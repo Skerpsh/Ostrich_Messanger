@@ -1,17 +1,39 @@
+import { authenticate } from "./middleware/auth.js";
 import Fastify from "fastify";
+import { db } from "./database.js";
+import authRoutes from "./routes/auth.js";
 
 const server = Fastify({
   logger: true,
 });
 
 server.get("/api/health", async () => {
+  const result = await db.query("SELECT NOW()");
+
   return {
     status: "ok",
+    database: "connected",
+    time: result.rows[0].now,
   };
 });
 
+server.get(
+  "/api/test-auth",
+  {
+    preHandler: authenticate,
+  },
+  async (request) => {
+    return {
+      message: "Authentication successful",
+      user: request.user,
+    };
+  },
+);
+
 const start = async () => {
   try {
+    await server.register(authRoutes);
+
     await server.listen({
       port: 3000,
       host: "0.0.0.0",

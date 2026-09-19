@@ -4,18 +4,21 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-  "dev": "tsx watch src/server.ts",
-  "build": "tsc",
-  "start": "node dist/server.js"
-},
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "fastify": "^5.12.5"
+    "argon2": "^0.45.1",
+    "fastify": "^5.12.5",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.1",
+    "@types/pg": "^8.23.1",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }
