@@ -188,11 +188,54 @@ export default async function authRoutes(server: FastifyInstance) {
       user: result.rows[0],
     });
   });
+
+  // LOGOUT
+  server.post("/api/auth/logout", async (request, reply) => {
+    const authorization = request.headers.authorization;
+
+    if (!authorization) {
+      return reply.status(401).send({
+        error: "Authorization token is required",
+      });
+    }
+
+    const [type, token] = authorization.split(" ");
+
+    if (type !== "Bearer" || !token) {
+      return reply.status(401).send({
+        error: "Invalid authorization header",
+      });
+    }
+
+    const tokenHash = crypto
+      .createHash("sha256")
+      .update(token)
+      .digest("hex");
+
+    await db.query(
+      `
+      DELETE FROM sessions
+      WHERE token_hash = $1
+      `,
+      [tokenHash],
+    );
+
+    return reply.send({
+      message: "Logout successful",
+    });
+  });
 }
 
-function generateLoginId(): number {
-  return Math.floor(
-    1000000000000000 +
-      Math.random() * 9000000000000000,
+function generateLoginId(): string {
+  const first = crypto.randomInt(
+    1_000_000,
+    9_999_999,
   );
+
+  const second = crypto.randomInt(
+    100_000_000,
+    999_999_999,
+  );
+
+  return `${first}${second}`;
 }

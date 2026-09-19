@@ -1,3 +1,6 @@
+import messagesRoutes from "./routes/messages.js";
+import chatsRoutes from "./routes/chats.js";
+import usersRoutes from "./routes/users.js";
 import { authenticate } from "./middleware/auth.js";
 import Fastify from "fastify";
 import { db } from "./database.js";
@@ -33,6 +36,9 @@ server.get(
 const start = async () => {
   try {
     await server.register(authRoutes);
+    await server.register(usersRoutes);
+    await server.register(chatsRoutes);
+    await server.register(messagesRoutes);
 
     await server.listen({
       port: 3000,
