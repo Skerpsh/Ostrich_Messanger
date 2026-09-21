@@ -12,3 +12,5 @@ dist/
 
 # Expo
 .expo/
+
+/cli/
