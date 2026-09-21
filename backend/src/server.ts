@@ -1,10 +1,14 @@
-import messagesRoutes from "./routes/messages.js";
-import chatsRoutes from "./routes/chats.js";
-import usersRoutes from "./routes/users.js";
-import { authenticate } from "./middleware/auth.js";
 import Fastify from "fastify";
+import websocket from "@fastify/websocket";
+
 import { db } from "./database.js";
+import { authenticate } from "./middleware/auth.js";
+
 import authRoutes from "./routes/auth.js";
+import usersRoutes from "./routes/users.js";
+import chatsRoutes from "./routes/chats.js";
+import messagesRoutes from "./routes/messages.js";
+import websocketRoutes from "./routes/websocket.js";
 
 const server = Fastify({
   logger: true,
@@ -35,6 +39,9 @@ server.get(
 
 const start = async () => {
   try {
+    await server.register(websocket);
+    await server.register(websocketRoutes);
+
     await server.register(authRoutes);
     await server.register(usersRoutes);
     await server.register(chatsRoutes);
