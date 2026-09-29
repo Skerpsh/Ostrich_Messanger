@@ -1,72 +1,98 @@
-import { View, Text, Image, StyleSheet } from "react-native";
+import { Image } from "expo-image";
 import { useRouter } from "expo-router";
+import { StyleSheet, Text, View } from "react-native";
+import AppHeader from "@/components/app-header";
+import Button from "@/components/button";
+import { useAppTheme } from "@/context/theme";
 
-import PrimaryButton from "../components/primary_button";
-
-
-export default function StartScreen() {
+// Landing screen, same hero as the website.
+export default function WelcomeScreen() {
   const router = useRouter();
+  const { colors } = useAppTheme();
 
   return (
-    <View style={styles.container}>
-      <Image
-        source={require("../assets/images/Giuseppe.png")}
-        style={styles.logoImage}
-        resizeMode="contain"
-      />
+    <View style={styles.screen}>
+      <AppHeader />
 
-      <Text style={styles.logo}>
-        Ostrich
-      </Text>
-
-      <Text style={styles.subtitle}>
-        Welcome to private chatting
-      </Text>
-
-      <View style={styles.buttons}>
-        <PrimaryButton
-          title="Generate New Account"
-          onPress={() => router.push("/register")}
+      <View style={styles.hero}>
+        <Image
+          source={require("@/assets/images/Giuseppe.png")}
+          style={styles.heroImage}
+          contentFit="contain"
+          accessibilityLabel="Giuseppe"
         />
 
-        <PrimaryButton
-          title="Login In Existing Account"
-          onPress={() => router.push("/login")}
-        />
+        <Text style={[styles.title, { color: colors.text }]}>OSTRICH</Text>
+
+        <Text style={[styles.subtitle, { color: colors.textSoft }]}>
+          Anonymous. Fast. Secure.{"\n"}Chat without limits.
+        </Text>
+
+        <View style={styles.buttons}>
+          <Button title="Log in" onPress={() => router.push("/login")} />
+          <Button
+            title="Create account"
+            variant="secondary"
+            onPress={() => router.push("/register")}
+          />
+        </View>
       </View>
+
+      <Text
+        style={[
+          styles.footer,
+          { color: colors.muted, borderTopColor: colors.line },
+        ]}
+      >
+        © 2026 Ostrich Messenger. All rights reserved.
+      </Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  screen: {
     flex: 1,
-    justifyContent: "center",
+  },
+
+  hero: {
+    flex: 1,
     alignItems: "center",
+    justifyContent: "center",
     padding: 24,
-    backgroundColor: "black",
   },
 
-  logoImage: {
-    width: 160,
-    height: 160,
+  heroImage: {
+    width: 180,
+    height: 180,
+    marginBottom: 20,
   },
 
-  logo: {
-    marginTop: 10,
-    color: "white",
-    fontSize: 42,
+  title: {
+    fontSize: 48,
     fontWeight: "700",
+    letterSpacing: 5,
+    marginBottom: 12,
   },
 
   subtitle: {
-    marginTop: 8,
-    color: "white",
-    fontSize: 16,
+    fontSize: 18,
+    lineHeight: 30,
+    textAlign: "center",
+    maxWidth: 600,
   },
 
   buttons: {
-    marginTop: 32,
-    alignItems: "center",
+    marginTop: 40,
+    gap: 16,
+    width: "100%",
+    maxWidth: 320,
+  },
+
+  footer: {
+    textAlign: "center",
+    fontSize: 13,
+    paddingVertical: 16,
+    borderTopWidth: 1,
   },
 });
