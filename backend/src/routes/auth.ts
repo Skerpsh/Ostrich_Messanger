@@ -1,240 +1,215 @@
 import { FastifyInstance } from "fastify";
 import argon2 from "argon2";
 import crypto from "node:crypto";
-import { db } from "../database.js";
+import { db, isPgError, PG_UNIQUE_VIOLATION } from "../database.js";
+import { authenticate, hashToken } from "../middleware/auth.js";
+
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+// Letters, digits, "_", "." and "-" only: usernames are shown in terminals,
+// so control characters and look-alike whitespace are not allowed.
+const credentialsSchema = {
+  body: {
+    type: "object",
+    required: ["username", "password"],
+    properties: {
+      username: {
+        type: "string",
+        minLength: 3,
+        maxLength: 32,
+        pattern: "^[A-Za-z0-9_.-]+$",
+      },
+      password: {
+        type: "string",
+        minLength: 8,
+        maxLength: 128,
+      },
+    },
+  },
+} as const;
+
+type Credentials = {
+  username: string;
+  password: string;
+};
+
+// Brute-force protection for endpoints that check passwords.
+const authRateLimit = {
+  rateLimit: {
+    max: 10,
+    timeWindow: "1 minute",
+  },
+};
+
+// Used to spend the same time on unknown usernames as on wrong passwords,
+// so login timing does not reveal which usernames exist.
+const dummyPasswordHash = argon2.hash(crypto.randomBytes(16).toString("hex"));
 
 export default async function authRoutes(server: FastifyInstance) {
   // REGISTER
-  server.post("/api/auth/register", async (request, reply) => {
-    const body = request.body as {
-      username?: string;
-      password?: string;
-    };
+  server.post<{ Body: Credentials }>(
+    "/api/auth/register",
+    {
+      schema: credentialsSchema,
+      config: authRateLimit,
+    },
+    async (request, reply) => {
+      const { username, password } = request.body;
 
-    const { username, password } = body;
+      const passwordHash = await argon2.hash(password);
 
-    if (!username || !password) {
-      return reply.status(400).send({
-        error: "Username and password are required",
-      });
-    }
+      // login_id is random, retry on the (unlikely) collision.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          const result = await db.query(
+            `
+            INSERT INTO users (
+              login_id,
+              username,
+              password_hash
+            )
+            VALUES ($1, $2, $3)
+            RETURNING id, login_id, username, created_at
+            `,
+            [generateLoginId(), username, passwordHash],
+          );
 
-    if (username.length < 3 || username.length > 32) {
-      return reply.status(400).send({
-        error: "Username must be between 3 and 32 characters",
-      });
-    }
+          const user = result.rows[0];
+          const token = await createSession(user.id);
 
-    if (password.length < 8) {
-      return reply.status(400).send({
-        error: "Password must be at least 8 characters",
-      });
-    }
+          return reply.status(201).send({
+            message: "Registration successful",
+            token,
+            user,
+          });
+        } catch (error) {
+          if (!isPgError(error, PG_UNIQUE_VIOLATION)) {
+            throw error;
+          }
 
-    const existingUser = await db.query(
-      "SELECT id FROM users WHERE username = $1",
-      [username],
-    );
+          const constraint = (error as { constraint?: string }).constraint;
 
-    if (existingUser.rows.length > 0) {
-      return reply.status(409).send({
-        error: "Username already exists",
-      });
-    }
+          if (constraint !== "users_login_id_key") {
+            return reply.status(409).send({
+              error: "Username already exists",
+            });
+          }
+        }
+      }
 
-    const passwordHash = await argon2.hash(password);
-    const loginId = generateLoginId();
-
-    const result = await db.query(
-      `
-      INSERT INTO users (
-        login_id,
-        username,
-        password_hash
-      )
-      VALUES ($1, $2, $3)
-      RETURNING id, login_id, username, created_at
-      `,
-      [loginId, username, passwordHash],
-    );
-
-    return reply.status(201).send({
-      user: result.rows[0],
-    });
-  });
+      throw new Error("Failed to generate a unique login_id");
+    },
+  );
 
   // LOGIN
-  server.post("/api/auth/login", async (request, reply) => {
-    const body = request.body as {
-      username?: string;
-      password?: string;
-    };
+  server.post<{ Body: Credentials }>(
+    "/api/auth/login",
+    {
+      schema: credentialsSchema,
+      config: authRateLimit,
+    },
+    async (request, reply) => {
+      const { username, password } = request.body;
 
-    const { username, password } = body;
+      const result = await db.query(
+        `
+        SELECT id, login_id, username, password_hash
+        FROM users
+        WHERE LOWER(username) = LOWER($1)
+        `,
+        [username],
+      );
 
-    if (!username || !password) {
-      return reply.status(400).send({
-        error: "Username and password are required",
+      const user = result.rows[0];
+
+      const passwordValid = await argon2.verify(
+        user ? user.password_hash : await dummyPasswordHash,
+        password,
+      );
+
+      if (!user || !passwordValid) {
+        return reply.status(401).send({
+          error: "Invalid username or password",
+        });
+      }
+
+      const token = await createSession(user.id);
+
+      return reply.send({
+        message: "Login successful",
+        token,
+        user: {
+          id: user.id,
+          login_id: user.login_id,
+          username: user.username,
+        },
       });
-    }
-
-    const result = await db.query(
-      `
-      SELECT id, login_id, username, password_hash
-      FROM users
-      WHERE username = $1
-      `,
-      [username],
-    );
-
-    if (result.rows.length === 0) {
-      return reply.status(401).send({
-        error: "Invalid username or password",
-      });
-    }
-
-    const user = result.rows[0];
-
-    const passwordValid = await argon2.verify(
-      user.password_hash,
-      password,
-    );
-
-    if (!passwordValid) {
-      return reply.status(401).send({
-        error: "Invalid username or password",
-      });
-    }
-
-    const token = crypto.randomBytes(32).toString("hex");
-
-    const tokenHash = crypto
-      .createHash("sha256")
-      .update(token)
-      .digest("hex");
-
-    const expiresAt = new Date(
-      Date.now() + 30 * 24 * 60 * 60 * 1000,
-    );
-
-    await db.query(
-      `
-      INSERT INTO sessions (
-        user_id,
-        token_hash,
-        expires_at
-      )
-      VALUES ($1, $2, $3)
-      `,
-      [user.id, tokenHash, expiresAt],
-    );
-
-    return reply.send({
-      message: "Login successful",
-      token,
-      user: {
-        id: user.id,
-        login_id: user.login_id,
-        username: user.username,
-      },
-    });
-  });
+    },
+  );
 
   // ME
-  server.get("/api/auth/me", async (request, reply) => {
-    const authorization = request.headers.authorization;
-
-    if (!authorization) {
-      return reply.status(401).send({
-        error: "Authorization token is required",
-      });
-    }
-
-    const [type, token] = authorization.split(" ");
-
-    if (type !== "Bearer" || !token) {
-      return reply.status(401).send({
-        error: "Invalid authorization header",
-      });
-    }
-
-    const tokenHash = crypto
-      .createHash("sha256")
-      .update(token)
-      .digest("hex");
-
-    const result = await db.query(
-      `
-      SELECT
-        users.id,
-        users.login_id,
-        users.username,
-        users.created_at
-      FROM sessions
-      JOIN users ON users.id = sessions.user_id
-      WHERE sessions.token_hash = $1
-        AND sessions.expires_at > NOW()
-      `,
-      [tokenHash],
-    );
-
-    if (result.rows.length === 0) {
-      return reply.status(401).send({
-        error: "Invalid or expired token",
-      });
-    }
-
-    return reply.send({
-      user: result.rows[0],
-    });
-  });
+  server.get(
+    "/api/auth/me",
+    {
+      preHandler: authenticate,
+    },
+    async (request) => {
+      return {
+        user: request.user,
+      };
+    },
+  );
 
   // LOGOUT
-  server.post("/api/auth/logout", async (request, reply) => {
-    const authorization = request.headers.authorization;
+  server.post(
+    "/api/auth/logout",
+    {
+      preHandler: authenticate,
+    },
+    async (request) => {
+      await db.query(
+        `
+        DELETE FROM sessions
+        WHERE token_hash = $1
+        `,
+        [hashToken(request.token)],
+      );
 
-    if (!authorization) {
-      return reply.status(401).send({
-        error: "Authorization token is required",
-      });
-    }
-
-    const [type, token] = authorization.split(" ");
-
-    if (type !== "Bearer" || !token) {
-      return reply.status(401).send({
-        error: "Invalid authorization header",
-      });
-    }
-
-    const tokenHash = crypto
-      .createHash("sha256")
-      .update(token)
-      .digest("hex");
-
-    await db.query(
-      `
-      DELETE FROM sessions
-      WHERE token_hash = $1
-      `,
-      [tokenHash],
-    );
-
-    return reply.send({
-      message: "Logout successful",
-    });
-  });
+      return {
+        message: "Logout successful",
+      };
+    },
+  );
 }
 
+async function createSession(userId: string): Promise<string> {
+  const token = crypto.randomBytes(32).toString("hex");
+
+  await db.query(
+    `
+    INSERT INTO sessions (
+      user_id,
+      token_hash,
+      expires_at
+    )
+    VALUES ($1, $2, $3)
+    `,
+    [userId, hashToken(token), new Date(Date.now() + SESSION_TTL_MS)],
+  );
+
+  return token;
+}
+
+// 16-digit numeric ID that users share to start a chat.
 function generateLoginId(): string {
   const first = crypto.randomInt(
     1_000_000,
-    9_999_999,
+    10_000_000,
   );
 
   const second = crypto.randomInt(
     100_000_000,
-    999_999_999,
+    1_000_000_000,
   );
 
   return `${first}${second}`;

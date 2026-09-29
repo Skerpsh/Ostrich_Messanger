@@ -1,218 +1,172 @@
 import { FastifyInstance } from "fastify";
-import crypto from "node:crypto";
 import type { WebSocket } from "ws";
-import { db } from "../database.js";
+import { isChatMember } from "../database.js";
+import { findUserByToken, getBearerToken } from "../middleware/auth.js";
+import { createMessage, MAX_MESSAGE_LENGTH } from "../messages.js";
+import { broadcast, subscribe, unsubscribeAll } from "../realtime.js";
 
-type AuthenticatedSocket = WebSocket & {
-  userId?: string;
-  username?: string;
+// Pings keep idle connections open behind reverse proxies (nginx closes
+// connections silent for 60s by default) and detect dead clients.
+const HEARTBEAT_INTERVAL_MS = 30_000;
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+type ClientMessage = {
+  type?: unknown;
+  chatId?: unknown;
+  content?: unknown;
 };
 
-const chatSockets = new Map<string, Set<AuthenticatedSocket>>();
-
 export default async function websocketRoutes(server: FastifyInstance) {
+  const alive = new WeakMap<WebSocket, boolean>();
+
+  const heartbeat = setInterval(() => {
+    for (const socket of server.websocketServer.clients) {
+      if (alive.get(socket) === false) {
+        socket.terminate();
+        continue;
+      }
+
+      alive.set(socket, false);
+      socket.ping();
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+
+  server.addHook("onClose", async () => {
+    clearInterval(heartbeat);
+  });
+
   server.get(
     "/ws",
-    { websocket: true },
-    async (socket, request) => {
-      const { token } = request.query as {
-        token?: string;
-      };
+    {
+      websocket: true,
 
-      if (!token) {
-        socket.close(1008, "Token required");
-        return;
-      }
+      // Authenticate before the upgrade so unauthorized clients get a
+      // plain 401. The token is taken from the Authorization header, or
+      // from ?token= for clients that cannot set headers.
+      preValidation: async (request, reply) => {
+        const { token: queryToken } = request.query as { token?: string };
+        const token = getBearerToken(request) ?? queryToken;
 
-      const tokenHash = crypto
-        .createHash("sha256")
-        .update(token)
-        .digest("hex");
+        const user = token ? await findUserByToken(token) : null;
 
-      const userResult = await db.query(
-        `
-        SELECT
-          users.id,
-          users.username
-        FROM sessions
-        JOIN users ON users.id = sessions.user_id
-        WHERE sessions.token_hash = $1
-          AND sessions.expires_at > NOW()
-        `,
-        [tokenHash],
-      );
-
-      if (userResult.rows.length === 0) {
-        socket.close(1008, "Invalid or expired token");
-        return;
-      }
-
-      const user = userResult.rows[0] as {
-        id: string;
-        username: string;
-      };
-
-      const ws = socket as AuthenticatedSocket;
-
-      ws.userId = user.id;
-      ws.username = user.username;
-
-      socket.send(
-        JSON.stringify({
-          type: "connected",
-          username: user.username,
-        }),
-      );
-
-      socket.on("message", async (raw) => {
-        try {
-          const data = JSON.parse(raw.toString());
-
-          if (data.type === "join") {
-            const chatId = data.chatId as string;
-
-            const membership = await db.query(
-              `
-              SELECT 1
-              FROM chat_members
-              WHERE chat_id = $1
-                AND user_id = $2
-              `,
-              [chatId, user.id],
-            );
-
-            if (membership.rows.length === 0) {
-              socket.send(
-                JSON.stringify({
-                  type: "error",
-                  error: "You are not a member of this chat",
-                }),
-              );
-              return;
-            }
-
-            if (!chatSockets.has(chatId)) {
-              chatSockets.set(chatId, new Set());
-            }
-
-            chatSockets.get(chatId)!.add(ws);
-
-            socket.send(
-              JSON.stringify({
-                type: "joined",
-                chatId,
-              }),
-            );
-
-            return;
-          }
-
-          if (data.type === "message") {
-            const chatId = data.chatId as string;
-            const content = data.content as string;
-
-            if (!chatId || !content || content.trim().length === 0) {
-              socket.send(
-                JSON.stringify({
-                  type: "error",
-                  error: "chatId and content are required",
-                }),
-              );
-              return;
-            }
-
-            const membership = await db.query(
-              `
-              SELECT 1
-              FROM chat_members
-              WHERE chat_id = $1
-                AND user_id = $2
-              `,
-              [chatId, user.id],
-            );
-
-            if (membership.rows.length === 0) {
-              socket.send(
-                JSON.stringify({
-                  type: "error",
-                  error: "You are not a member of this chat",
-                }),
-              );
-              return;
-            }
-
-            const result = await db.query(
-              `
-              INSERT INTO messages (
-                chat_id,
-                sender_id,
-                content
-              )
-              VALUES ($1, $2, $3)
-              RETURNING
-                id,
-                chat_id,
-                sender_id,
-                content,
-                created_at
-              `,
-              [chatId, user.id, content.trim()],
-            );
-
-            await db.query(
-              `
-              UPDATE chats
-              SET updated_at = NOW()
-              WHERE id = $1
-              `,
-              [chatId],
-            );
-
-            const message = {
-              type: "message",
-              message: {
-                ...result.rows[0],
-                sender_username: user.username,
-              },
-            };
-
-            const sockets = chatSockets.get(chatId);
-
-            if (sockets) {
-              for (const client of sockets) {
-                if (client.readyState === 1) {
-                  client.send(JSON.stringify(message));
-                }
-              }
-            }
-
-            return;
-          }
-
-          socket.send(
-            JSON.stringify({
-              type: "error",
-              error: "Unknown message type",
-            }),
-          );
-        } catch {
-          socket.send(
-            JSON.stringify({
-              type: "error",
-              error: "Invalid JSON",
-            }),
-          );
+        if (!user) {
+          return reply.status(401).send({
+            error: "Invalid or expired token",
+          });
         }
+
+        request.user = user;
+      },
+    },
+    (socket, request) => {
+      const user = request.user;
+
+      const send = (payload: unknown) => {
+        if (socket.readyState === socket.OPEN) {
+          socket.send(JSON.stringify(payload));
+        }
+      };
+
+      const sendError = (error: string) => send({ type: "error", error });
+
+      const handle = async (data: ClientMessage) => {
+        if (data.type === "join") {
+          const { chatId } = data;
+
+          if (typeof chatId !== "string" || !UUID_RE.test(chatId)) {
+            sendError("Valid chatId is required");
+            return;
+          }
+
+          if (!(await isChatMember(chatId, user.id))) {
+            sendError("You are not a member of this chat");
+            return;
+          }
+
+          subscribe(chatId, socket);
+          send({ type: "joined", chatId });
+          return;
+        }
+
+        if (data.type === "message") {
+          const { chatId } = data;
+          const content =
+            typeof data.content === "string" ? data.content.trim() : "";
+
+          if (
+            typeof chatId !== "string" ||
+            !UUID_RE.test(chatId) ||
+            content.length === 0
+          ) {
+            sendError("chatId and content are required");
+            return;
+          }
+
+          if (content.length > MAX_MESSAGE_LENGTH) {
+            sendError(
+              `Message is too long (max ${MAX_MESSAGE_LENGTH} characters)`,
+            );
+            return;
+          }
+
+          const message = await createMessage(chatId, user.id, content);
+
+          if (!message) {
+            sendError("You are not a member of this chat");
+            return;
+          }
+
+          broadcast(chatId, { type: "message", message });
+          return;
+        }
+
+        sendError("Unknown message type");
+      };
+
+      // Client messages are handled one at a time, in the order received.
+      let queue = Promise.resolve();
+
+      alive.set(socket, true);
+
+      socket.on("pong", () => {
+        // Client messages are handled one at a time, in the order received.
+      let queue = Promise.resolve();
+
+      alive.set(socket, true);
+      });
+
+      socket.on("message", (raw) => {
+        let data: ClientMessage;
+
+        try {
+          data = JSON.parse(raw.toString());
+        } catch {
+          sendError("Invalid JSON");
+          return;
+        }
+
+        if (typeof data !== "object" || data === null) {
+          sendError("Invalid message");
+          return;
+        }
+
+        queue = queue
+          .then(() => handle(data))
+          .catch((error) => {
+            request.log.error(error, "websocket message failed");
+            sendError("Internal server error");
+          });
       });
 
       socket.on("close", () => {
-        for (const [chatId, sockets] of chatSockets) {
-          sockets.delete(ws);
+        unsubscribeAll(socket);
+      });
 
-          if (sockets.size === 0) {
-            chatSockets.delete(chatId);
-          }
-        }
+      send({
+        type: "connected",
+        username: user.username,
       });
     },
   );

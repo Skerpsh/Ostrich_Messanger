@@ -2,16 +2,19 @@
   "name": "backend",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "db:migrate": "tsx src/migrate.ts",
+    "db:migrate:prod": "node dist/migrate.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@fastify/rate-limit": "^11.2.0",
     "@fastify/websocket": "^11.3.1",
     "argon2": "^0.45.1",
     "dotenv": "^18.0.1",

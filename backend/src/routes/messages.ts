@@ -1,97 +1,95 @@
 import { FastifyInstance } from "fastify";
-import { db } from "../database.js";
+import { db, isChatMember } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
+import { createMessage, MAX_MESSAGE_LENGTH } from "../messages.js";
+import { broadcast } from "../realtime.js";
+
+const chatParamsSchema = {
+  type: "object",
+  required: ["chatId"],
+  properties: {
+    chatId: { type: "string", format: "uuid" },
+  },
+} as const;
+
+type ChatParams = {
+  chatId: string;
+};
 
 export default async function messagesRoutes(server: FastifyInstance) {
   // SEND MESSAGE
-  server.post(
+  server.post<{ Params: ChatParams; Body: { content: string } }>(
     "/api/chats/:chatId/messages",
     {
       preHandler: authenticate,
+      schema: {
+        params: chatParamsSchema,
+        body: {
+          type: "object",
+          required: ["content"],
+          properties: {
+            content: {
+              type: "string",
+              maxLength: MAX_MESSAGE_LENGTH,
+            },
+          },
+        },
+      },
     },
     async (request, reply) => {
-      const { chatId } = request.params as {
-        chatId: string;
-      };
+      const { chatId } = request.params;
+      const content = request.body.content.trim();
 
-      const body = request.body as {
-        content?: string;
-      };
-
-      const { content } = body;
-
-      if (!content || content.trim().length === 0) {
+      if (content.length === 0) {
         return reply.status(400).send({
           error: "Message content is required",
         });
       }
 
-      const membership = await db.query(
-        `
-        SELECT 1
-        FROM chat_members
-        WHERE chat_id = $1
-          AND user_id = $2
-        `,
-        [chatId, request.user.id],
-      );
+      const message = await createMessage(chatId, request.user.id, content);
 
-      if (membership.rows.length === 0) {
+      if (!message) {
         return reply.status(403).send({
           error: "You are not a member of this chat",
         });
       }
 
-      const result = await db.query(
-        `
-        INSERT INTO messages (
-          chat_id,
-          sender_id,
-          content
-        )
-        VALUES ($1, $2, $3)
-        RETURNING id, chat_id, sender_id, content, created_at
-        `,
-        [chatId, request.user.id, content.trim()],
-      );
-
-      await db.query(
-        `
-        UPDATE chats
-        SET updated_at = NOW()
-        WHERE id = $1
-        `,
-        [chatId],
-      );
+      // Deliver to clients connected over websocket.
+      broadcast(chatId, {
+        type: "message",
+        message,
+      });
 
       return reply.status(201).send({
-        message: result.rows[0],
+        message,
       });
     },
   );
 
-  // GET MESSAGES
-  server.get(
+  // GET MESSAGES (the latest `limit` messages, oldest first)
+  server.get<{ Params: ChatParams; Querystring: { limit: number } }>(
     "/api/chats/:chatId/messages",
     {
       preHandler: authenticate,
+      schema: {
+        params: chatParamsSchema,
+        querystring: {
+          type: "object",
+          properties: {
+            limit: {
+              type: "integer",
+              minimum: 1,
+              maximum: 1000,
+              default: 200,
+            },
+          },
+        },
+      },
     },
     async (request, reply) => {
-      const { chatId } = request.params as {
-        chatId: string;
-      };
+      const { chatId } = request.params;
 
-      const membership = await db.query(
-        `
-        SELECT 1
-        FROM chat_members
-        WHERE chat_id = $1
-          AND user_id = $2
-        `,
-        [chatId, request.user.id],
-      );
-
-      if (membership.rows.length === 0) {
+      if (!(await isChatMember(chatId, request.user.id))) {
         return reply.status(403).send({
           error: "You are not a member of this chat",
         });
@@ -99,19 +97,24 @@ export default async function messagesRoutes(server: FastifyInstance) {
 
       const result = await db.query(
         `
-        SELECT
-          messages.id,
-          messages.chat_id,
-          messages.sender_id,
-          users.username AS sender_username,
-          messages.content,
-          messages.created_at
-        FROM messages
-        JOIN users ON users.id = messages.sender_id
-        WHERE messages.chat_id = $1
-        ORDER BY messages.created_at ASC
+        SELECT *
+        FROM (
+          SELECT
+            messages.id,
+            messages.chat_id,
+            messages.sender_id,
+            users.username AS sender_username,
+            messages.content,
+            messages.created_at
+          FROM messages
+          JOIN users ON users.id = messages.sender_id
+          WHERE messages.chat_id = $1
+          ORDER BY messages.created_at DESC, messages.id DESC
+          LIMIT $2
+        ) latest
+        ORDER BY created_at ASC, id ASC
         `,
-        [chatId],
+        [chatId, request.query.limit],
       );
 
       return reply.send({

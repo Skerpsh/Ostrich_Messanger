@@ -8,5 +8,6 @@ declare module "fastify" {
       username: string;
       created_at: Date;
     };
+    token: string;
   }
 }

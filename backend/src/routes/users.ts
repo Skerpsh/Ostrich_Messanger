@@ -3,15 +3,22 @@ import { db } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
 
 export default async function usersRoutes(server: FastifyInstance) {
-  server.get(
+  server.get<{ Params: { loginId: string } }>(
     "/api/users/:loginId",
     {
       preHandler: authenticate,
+      schema: {
+        params: {
+          type: "object",
+          required: ["loginId"],
+          properties: {
+            loginId: { type: "string", pattern: "^[0-9]{1,18}$" },
+          },
+        },
+      },
     },
     async (request, reply) => {
-      const { loginId } = request.params as {
-        loginId: string;
-      };
+      const { loginId } = request.params;
 
       const result = await db.query(
         `
