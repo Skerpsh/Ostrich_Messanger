@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- When the user was last connected (for "last seen"); NULL if never.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+
 -- Usernames are unique case-insensitively ("Alice" and "alice" are the
 -- same user), which also protects registration from races.
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_key

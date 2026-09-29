@@ -28,3 +28,48 @@ export function formatChatDate(iso: string) {
 export function formatLoginId(loginId: string) {
   return loginId.replace(/(\d{4})(?=\d)/g, "$1 ");
 }
+
+// "online", "last seen just now", "last seen 5 min ago",
+// "last seen today at 14:05", "last seen yesterday at 14:05",
+// "last seen 12.09 at 14:05".
+export function formatPresence(
+  presence: { online: boolean; lastSeenAt: string | null } | undefined,
+) {
+  if (!presence) {
+    return "";
+  }
+
+  if (presence.online) {
+    return "online";
+  }
+
+  if (!presence.lastSeenAt) {
+    return "offline";
+  }
+
+  const date = new Date(presence.lastSeenAt);
+  const minutes = Math.floor((Date.now() - date.getTime()) / 60_000);
+
+  if (minutes < 1) {
+    return "last seen just now";
+  }
+
+  if (minutes < 60) {
+    return `last seen ${minutes} min ago`;
+  }
+
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  const time = formatTime(presence.lastSeenAt);
+
+  if (date.toDateString() === new Date().toDateString()) {
+    return `last seen today at ${time}`;
+  }
+
+  if (date.toDateString() === yesterday.toDateString()) {
+    return `last seen yesterday at ${time}`;
+  }
+
+  return `last seen ${formatChatDate(presence.lastSeenAt)} at ${time}`;
+}

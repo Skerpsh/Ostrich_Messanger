@@ -16,9 +16,11 @@ import AppHeader from "@/components/app-header";
 import Avatar from "@/components/avatar";
 import Button from "@/components/button";
 import { useAuth, useCurrentUser } from "@/context/auth";
+import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
 import { getChats, type Chat } from "@/lib/api";
-import { formatChatDate, formatLoginId } from "@/lib/format";
+import { formatChatDate, formatLoginId, formatPresence } from "@/lib/format";
+import { useMinuteTick } from "@/lib/use-minute-tick";
 import { radius } from "@/theme/colors";
 
 export default function ChatsScreen() {
@@ -27,6 +29,8 @@ export default function ChatsScreen() {
   const insets = useSafeAreaInsets();
   const { withToken, signOut } = useAuth();
   const user = useCurrentUser();
+  const { presence, seedPresence } = useRealtime();
+  useMinuteTick();
 
   const [chats, setChats] = useState<Chat[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -35,12 +39,20 @@ export default function ChatsScreen() {
 
   const load = useCallback(async () => {
     try {
-      setChats(await withToken(getChats));
+      const loaded = await withToken(getChats);
+
+      seedPresence(
+        loaded.map((chat) => ({
+          userId: chat.user_id,
+          presence: { online: chat.online, lastSeenAt: chat.last_seen_at },
+        })),
+      );
+      setChats(loaded);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load chats");
     }
-  }, [withToken]);
+  }, [withToken, seedPresence]);
 
   // Reload whenever the screen is shown, e.g. after leaving a chat.
   useFocusEffect(
@@ -70,6 +82,7 @@ export default function ChatsScreen() {
       pathname: "/chats/[chatId]",
       params: {
         chatId: chat.id,
+        userId: chat.user_id,
         username: chat.username,
         loginId: chat.login_id,
       },
@@ -162,38 +175,48 @@ export default function ChatsScreen() {
             </Text>
           )
         }
-        renderItem={({ item }) => (
-          <Pressable
-            onPress={() => openChat(item)}
-            style={({ pressed, hovered }) => [
-              styles.chat,
-              {
-                backgroundColor:
-                  pressed || hovered ? colors.panelAlt : colors.panel,
-                borderColor: colors.line,
-              },
-            ]}
-          >
-            <Avatar name={item.username} />
-            <View style={styles.chatText}>
-              <Text
-                numberOfLines={1}
-                style={[styles.chatName, { color: colors.text }]}
-              >
-                {item.username}
+        renderItem={({ item }) => {
+          const peer = presence[item.user_id];
+
+          return (
+            <Pressable
+              onPress={() => openChat(item)}
+              style={({ pressed, hovered }) => [
+                styles.chat,
+                {
+                  backgroundColor:
+                    pressed || hovered ? colors.panelAlt : colors.panel,
+                  borderColor: colors.line,
+                },
+              ]}
+            >
+              <Avatar name={item.username} online={peer?.online} />
+              <View style={styles.chatText}>
+                <Text
+                  numberOfLines={1}
+                  style={[styles.chatName, { color: colors.text }]}
+                >
+                  {item.username}
+                </Text>
+                <Text
+                  numberOfLines={1}
+                  style={[styles.chatMeta, { color: colors.muted }]}
+                >
+                  {peer ? (
+                    <Text style={peer.online && { color: colors.online }}>
+                      {formatPresence(peer)}
+                      {"  ·  "}
+                    </Text>
+                  ) : null}
+                  {formatLoginId(item.login_id)}
+                </Text>
+              </View>
+              <Text style={[styles.chatMeta, { color: colors.muted }]}>
+                {formatChatDate(item.updated_at)}
               </Text>
-              <Text
-                numberOfLines={1}
-                style={[styles.chatMeta, { color: colors.muted }]}
-              >
-                {formatLoginId(item.login_id)}
-              </Text>
-            </View>
-            <Text style={[styles.chatMeta, { color: colors.muted }]}>
-              {formatChatDate(item.updated_at)}
-            </Text>
-          </Pressable>
-        )}
+            </Pressable>
+          );
+        }}
       />
 
       <View

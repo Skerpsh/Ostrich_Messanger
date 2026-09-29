@@ -8,6 +8,7 @@ import {
 } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { AuthProvider, useAuth } from "@/context/auth";
+import { RealtimeProvider } from "@/context/realtime";
 import { AppThemeProvider, useAppTheme } from "@/context/theme";
 
 // Keep the splash screen until the saved session has been checked.
@@ -17,7 +18,9 @@ export default function RootLayout() {
   return (
     <AppThemeProvider>
       <AuthProvider>
-        <RootNavigator />
+        <RealtimeProvider>
+          <RootNavigator />
+        </RealtimeProvider>
       </AuthProvider>
     </AppThemeProvider>
   );

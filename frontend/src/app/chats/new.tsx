@@ -11,6 +11,7 @@ import AppHeader from "@/components/app-header";
 import Button from "@/components/button";
 import TextField from "@/components/text-field";
 import { useAuth, useCurrentUser } from "@/context/auth";
+import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
 import { createChat } from "@/lib/api";
 import { formatLoginId } from "@/lib/format";
@@ -21,6 +22,7 @@ export default function NewChatScreen() {
   const { colors } = useAppTheme();
   const { withToken } = useAuth();
   const user = useCurrentUser();
+  const { seedPresence } = useRealtime();
 
   const [loginId, setLoginId] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -49,10 +51,18 @@ export default function NewChatScreen() {
     try {
       const chat = await withToken((token) => createChat(token, id));
 
+      seedPresence([
+        {
+          userId: chat.user_id,
+          presence: { online: chat.online, lastSeenAt: chat.last_seen_at },
+        },
+      ]);
+
       router.replace({
         pathname: "/chats/[chatId]",
         params: {
           chatId: chat.id,
+          userId: chat.user_id,
           username: chat.username,
           loginId: chat.login_id,
         },

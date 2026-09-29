@@ -1,6 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { db, withTransaction } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
+import { isOnline } from "../realtime.js";
 
 export default async function chatsRoutes(server: FastifyInstance) {
   // CREATE (or return the existing) direct chat with a user
@@ -29,7 +30,7 @@ export default async function chatsRoutes(server: FastifyInstance) {
 
       const targetUser = await db.query(
         `
-        SELECT id, login_id, username
+        SELECT id, login_id, username, last_seen_at
         FROM users
         WHERE login_id = $1
         `,
@@ -107,12 +108,15 @@ export default async function chatsRoutes(server: FastifyInstance) {
           id: otherUser.id,
           login_id: otherUser.login_id,
           username: otherUser.username,
+          last_seen_at: otherUser.last_seen_at,
+          online: isOnline(otherUser.id),
         },
       });
     },
   );
 
-  // LIST the user's chats, most recently active first
+  // LIST the user's chats, most recently active first, with the other
+  // user's presence
   server.get(
     "/api/chats",
     {
@@ -128,7 +132,8 @@ export default async function chatsRoutes(server: FastifyInstance) {
           chats.updated_at,
           users.id AS user_id,
           users.login_id,
-          users.username
+          users.username,
+          users.last_seen_at
         FROM chats
         JOIN chat_members
           ON chat_members.chat_id = chats.id
@@ -144,7 +149,10 @@ export default async function chatsRoutes(server: FastifyInstance) {
       );
 
       return {
-        chats: result.rows,
+        chats: result.rows.map((chat) => ({
+          ...chat,
+          online: isOnline(chat.user_id),
+        })),
       };
     },
   );

@@ -14,6 +14,9 @@ export type Chat = {
   user_id: string;
   login_id: string;
   username: string;
+  // Presence of the other user.
+  online: boolean;
+  last_seen_at: string | null;
 };
 
 export type Message = {
@@ -136,7 +139,7 @@ export async function getChats(token: string) {
 export async function createChat(token: string, loginId: string) {
   const { chat, user } = await request<{
     chat: { id: string; type: string; created_at: string };
-    user: User;
+    user: User & { online?: boolean; last_seen_at?: string | null };
   }>("POST", "/api/chats", { token, body: { login_id: loginId } });
 
   return {
@@ -145,6 +148,8 @@ export async function createChat(token: string, loginId: string) {
     user_id: user.id,
     login_id: user.login_id,
     username: user.username,
+    online: user.online ?? false,
+    last_seen_at: user.last_seen_at ?? null,
   } satisfies Chat;
 }
 

@@ -4,9 +4,12 @@ import { useAppTheme } from "@/context/theme";
 export default function Avatar({
   name,
   size = 46,
+  online = false,
 }: {
   name: string;
   size?: number;
+  // Shows the green "online" dot.
+  online?: boolean;
 }) {
   const { colors } = useAppTheme();
 
@@ -28,6 +31,22 @@ export default function Avatar({
       >
         {name.charAt(0).toUpperCase() || "?"}
       </Text>
+
+      {online ? (
+        <View
+          accessibilityLabel="online"
+          style={[
+            styles.dot,
+            {
+              width: size * 0.3,
+              height: size * 0.3,
+              borderRadius: size * 0.15,
+              backgroundColor: colors.online,
+              borderColor: colors.bg,
+            },
+          ]}
+        />
+      ) : null}
     </View>
   );
 }
@@ -41,5 +60,12 @@ const styles = StyleSheet.create({
 
   letter: {
     fontWeight: "700",
+  },
+
+  dot: {
+    position: "absolute",
+    right: -1,
+    bottom: -1,
+    borderWidth: 2,
   },
 });

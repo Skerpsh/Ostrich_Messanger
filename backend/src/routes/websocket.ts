@@ -3,10 +3,21 @@ import type { WebSocket } from "ws";
 import { isChatMember } from "../database.js";
 import { findUserByToken, getBearerToken } from "../middleware/auth.js";
 import { createMessage, MAX_MESSAGE_LENGTH } from "../messages.js";
-import { broadcast, subscribe, unsubscribeAll } from "../realtime.js";
+import {
+  broadcast,
+  chatPresence,
+  saveLastSeenForAll,
+  setRealtimeLogger,
+  subscribe,
+  unsubscribe,
+  unsubscribeAll,
+  userConnected,
+  userDisconnected,
+} from "../realtime.js";
 
 // Pings keep idle connections open behind reverse proxies (nginx closes
-// connections silent for 60s by default) and detect dead clients.
+// connections silent for 60s by default) and detect dead clients, which
+// then go offline.
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
 const UUID_RE =
@@ -18,7 +29,14 @@ type ClientMessage = {
   content?: unknown;
 };
 
+// Protocol (JSON messages):
+//   client -> server: join {chatId}, leave {chatId}, message {chatId, content}
+//   server -> client: connected, joined {chatId}, left {chatId},
+//                     message {message}, presence {userId, online, lastSeenAt},
+//                     error {error}
 export default async function websocketRoutes(server: FastifyInstance) {
+  setRealtimeLogger(server.log);
+
   const alive = new WeakMap<WebSocket, boolean>();
 
   const heartbeat = setInterval(() => {
@@ -35,6 +53,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
   server.addHook("onClose", async () => {
     clearInterval(heartbeat);
+    await saveLastSeenForAll();
   });
 
   server.get(
@@ -71,11 +90,14 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
       const sendError = (error: string) => send({ type: "error", error });
 
+      const validChatId = (chatId: unknown): chatId is string =>
+        typeof chatId === "string" && UUID_RE.test(chatId);
+
       const handle = async (data: ClientMessage) => {
         if (data.type === "join") {
           const { chatId } = data;
 
-          if (typeof chatId !== "string" || !UUID_RE.test(chatId)) {
+          if (!validChatId(chatId)) {
             sendError("Valid chatId is required");
             return;
           }
@@ -87,6 +109,24 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
           subscribe(chatId, socket);
           send({ type: "joined", chatId });
+
+          for (const event of await chatPresence(chatId, user.id)) {
+            send(event);
+          }
+
+          return;
+        }
+
+        if (data.type === "leave") {
+          const { chatId } = data;
+
+          if (!validChatId(chatId)) {
+            sendError("Valid chatId is required");
+            return;
+          }
+
+          unsubscribe(chatId, socket);
+          send({ type: "left", chatId });
           return;
         }
 
@@ -95,11 +135,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
           const content =
             typeof data.content === "string" ? data.content.trim() : "";
 
-          if (
-            typeof chatId !== "string" ||
-            !UUID_RE.test(chatId) ||
-            content.length === 0
-          ) {
+          if (!validChatId(chatId) || content.length === 0) {
             sendError("chatId and content are required");
             return;
           }
@@ -131,10 +167,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
       alive.set(socket, true);
 
       socket.on("pong", () => {
-        // Client messages are handled one at a time, in the order received.
-      let queue = Promise.resolve();
-
-      alive.set(socket, true);
+        alive.set(socket, true);
       });
 
       socket.on("message", (raw) => {
@@ -162,7 +195,10 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
       socket.on("close", () => {
         unsubscribeAll(socket);
+        userDisconnected(user.id, socket);
       });
+
+      userConnected(user.id, socket);
 
       send({
         type: "connected",

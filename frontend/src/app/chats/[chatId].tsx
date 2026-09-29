@@ -16,17 +16,11 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AppHeader from "@/components/app-header";
 import { useAuth, useCurrentUser } from "@/context/auth";
+import { usePresence, useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
-import {
-  getChats,
-  getMe,
-  getMessages,
-  sendMessage,
-  SessionExpiredError,
-  type Message,
-} from "@/lib/api";
-import { ChatSocket, type SocketStatus } from "@/lib/chat-socket";
-import { formatLoginId, formatTime } from "@/lib/format";
+import { getChats, getMessages, sendMessage, type Message } from "@/lib/api";
+import { formatLoginId, formatPresence, formatTime } from "@/lib/format";
+import { useMinuteTick } from "@/lib/use-minute-tick";
 import { radius } from "@/theme/colors";
 
 const MAX_MESSAGE_LENGTH = 4096;
@@ -50,30 +44,35 @@ export default function ChatScreen() {
   const router = useRouter();
   const { colors } = useAppTheme();
   const insets = useSafeAreaInsets();
-  const { state, withToken } = useAuth();
+  const { withToken } = useAuth();
   const user = useCurrentUser();
+  const { status, subscribeChat, seedPresence } = useRealtime();
+  useMinuteTick();
 
   const params = useLocalSearchParams<{
     chatId: string;
+    userId?: string;
     username?: string;
     loginId?: string;
   }>();
   const chatId = params.chatId;
 
   const [peer, setPeer] = useState(
-    params.username
-      ? { username: params.username, loginId: params.loginId ?? "" }
+    params.username && params.userId
+      ? {
+          userId: params.userId,
+          username: params.username,
+          loginId: params.loginId ?? "",
+        }
       : null,
   );
+  const peerPresence = usePresence(peer?.userId);
   const [messages, setMessages] = useState<Message[] | null>(null);
-  const [status, setStatus] = useState<SocketStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
 
   const inputRef = useRef<TextInput>(null);
-
-  const token = state.status === "signedIn" ? state.token : null;
 
   const goBack = () =>
     router.canGoBack() ? router.back() : router.replace("/chats");
@@ -89,13 +88,23 @@ export default function ChatScreen() {
         const chat = chats.find((c) => c.id === chatId);
 
         if (chat) {
-          setPeer({ username: chat.username, loginId: chat.login_id });
+          setPeer({
+            userId: chat.user_id,
+            username: chat.username,
+            loginId: chat.login_id,
+          });
+          seedPresence([
+            {
+              userId: chat.user_id,
+              presence: { online: chat.online, lastSeenAt: chat.last_seen_at },
+            },
+          ]);
         } else {
           setError("Chat not found");
         }
       })
       .catch((e) => setError(e.message));
-  }, [chatId, peer, withToken]);
+  }, [chatId, peer, withToken, seedPresence]);
 
   const loadHistory = useCallback(async () => {
     try {
@@ -108,33 +117,22 @@ export default function ChatScreen() {
     }
   }, [chatId, withToken]);
 
-  // Live updates. History is (re)loaded after every join, so nothing sent
-  // while disconnected is missed.
+  // Initial history, also when the realtime connection is down.
   useEffect(() => {
-    if (!token) {
-      return;
-    }
+    loadHistory();
+  }, [loadHistory]);
 
-    const socket = new ChatSocket(token, chatId, {
-      onStatus: setStatus,
-      onJoined: loadHistory,
-      onMessage: (message) =>
-        setMessages((current) => mergeMessages(current ?? [], [message])),
-      onError: setError,
-      shouldReconnect: async () => {
-        try {
-          await withToken(getMe);
-          return true;
-        } catch (e) {
-          return !(e instanceof SessionExpiredError);
-        }
-      },
-    });
-
-    socket.connect();
-
-    return () => socket.close();
-  }, [token, chatId, loadHistory, withToken]);
+  // Live updates over the session's connection. History is reloaded after
+  // every join, so nothing sent while disconnected is missed.
+  useEffect(
+    () =>
+      subscribeChat(chatId, {
+        onJoined: loadHistory,
+        onMessage: (message) =>
+          setMessages((current) => mergeMessages(current ?? [], [message])),
+      }),
+    [chatId, subscribeChat, loadHistory],
+  );
 
   const send = async () => {
     const content = draft.trim();
@@ -182,12 +180,14 @@ export default function ChatScreen() {
   // The list is inverted so it starts at the newest message.
   const reversed = useMemo(() => [...(messages ?? [])].reverse(), [messages]);
 
+  // The peer's presence is only known while we are connected ourselves.
+  const peerOnline = status === "online" && Boolean(peerPresence?.online);
   const statusText =
     status === "online"
-      ? "online"
+      ? formatPresence(peerPresence)
       : status === "connecting"
         ? "connecting…"
-        : "offline, reconnecting…";
+        : "waiting for network…";
 
   return (
     <View style={styles.screen}>
@@ -196,15 +196,12 @@ export default function ChatScreen() {
         title={peer?.username ?? "…"}
         subtitle={
           <>
-            <Text
-              style={{
-                color: status === "online" ? colors.online : colors.muted,
-              }}
-            >
-              ●{" "}
-            </Text>
+            {peerOnline ? (
+              <Text style={{ color: colors.online }}>● </Text>
+            ) : null}
             {statusText}
-            {peer?.loginId ? `  ·  ${formatLoginId(peer.loginId)}` : ""}
+            {statusText && peer?.loginId ? "  ·  " : ""}
+            {peer?.loginId ? formatLoginId(peer.loginId) : ""}
           </>
         }
       />
