@@ -1,6 +1,7 @@
 import Fastify, { FastifyError } from "fastify";
 import websocket from "@fastify/websocket";
 import rateLimit from "@fastify/rate-limit";
+import cors from "@fastify/cors";
 
 import { db, isPgError, PG_INVALID_TEXT } from "./database.js";
 
@@ -16,6 +17,11 @@ const HOST = process.env.HOST || "0.0.0.0";
 // Which proxies may set X-Forwarded-For (used for rate limiting). By default
 // only a reverse proxy on the same machine, e.g. nginx on the VPS.
 const TRUST_PROXY = process.env.TRUST_PROXY || "loopback";
+
+// Origins allowed to call the API from a browser (Ostrich Web), comma
+// separated. Any origin by default: auth uses bearer tokens, not cookies,
+// so other sites cannot act on behalf of a user.
+const CORS_ORIGINS = process.env.CORS_ORIGINS?.split(",").map((o) => o.trim());
 
 const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -81,6 +87,10 @@ async function deleteExpiredSessions() {
 
 const start = async () => {
   try {
+    await server.register(cors, {
+      origin: CORS_ORIGINS ?? true,
+    });
+
     await server.register(rateLimit, {
       // Only routes with a `rateLimit` config are limited.
       global: false,
