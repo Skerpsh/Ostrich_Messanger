@@ -7,6 +7,8 @@ import {
   ThemeProvider,
 } from "expo-router";
 import { StatusBar } from "expo-status-bar";
+import * as SystemUI from "expo-system-ui";
+import { Platform } from "react-native";
 import { AuthProvider, useAuth } from "@/context/auth";
 import { RealtimeProvider } from "@/context/realtime";
 import { AppThemeProvider, useAppTheme } from "@/context/theme";
@@ -35,6 +37,20 @@ function RootNavigator() {
       SplashScreen.hideAsync();
     }
   }, [state.status]);
+
+  // Paint the page behind the app so Safari's toolbars and overscroll areas
+  // follow the theme instead of showing a white body.
+  useEffect(() => {
+    SystemUI.setBackgroundColorAsync(colors.bg);
+
+    if (Platform.OS === "web") {
+      document.documentElement.style.backgroundColor = colors.bg;
+      document.documentElement.style.colorScheme = mode;
+      document
+        .querySelector('meta[name="theme-color"]')
+        ?.setAttribute("content", colors.bg);
+    }
+  }, [mode, colors.bg]);
 
   if (state.status === "loading") {
     return null;
