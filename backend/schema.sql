@@ -10,6 +10,12 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Databases created before this file existed may lack columns that the
+-- CREATE TABLE statements here have (CREATE TABLE IF NOT EXISTS leaves an
+-- existing table as it is): add them.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
 -- When the user was last connected (for "last seen"); NULL if never.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
 
@@ -53,6 +59,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at TIMESTAMPTZ NOT NULL
 );
 
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
 CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id);
 
 -- Which app the session is from ("web", "ios", "android", "cli", ...) and
@@ -75,6 +83,11 @@ CREATE TABLE IF NOT EXISTS chat_members (
   PRIMARY KEY (chat_id, user_id)
 );
 
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS type VARCHAR(20) NOT NULL DEFAULT 'direct';
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE chat_members ADD COLUMN IF NOT EXISTS joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
 CREATE INDEX IF NOT EXISTS chat_members_user_id_idx ON chat_members (user_id);
 
 -- How far the member has read the chat: messages created after it are
@@ -89,6 +102,8 @@ CREATE TABLE IF NOT EXISTS messages (
   content    TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 CREATE INDEX IF NOT EXISTS messages_chat_id_created_at_idx
   ON messages (chat_id, created_at);
