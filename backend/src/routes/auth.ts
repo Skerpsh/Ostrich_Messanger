@@ -1,4 +1,4 @@
-import { FastifyInstance } from "fastify";
+import { FastifyInstance, FastifyRequest } from "fastify";
 import argon2 from "argon2";
 import crypto from "node:crypto";
 import {
@@ -9,33 +9,39 @@ import {
 } from "../database.js";
 import {
   accountView,
-  PROFILE_COLUMNS,
-  formatOstrichId,
-  generateOstrichId,
-  hashOstrichId,
+  AUTH_KEY_PATTERN,
+  authKeyMatches,
+  hashAuthKey,
+  keyMaterialSchema,
   OSTRICH_ID_INPUT_PATTERN,
   ostrichIdMatches,
   passwordSchema,
+  PROFILE_COLUMNS,
   usernameSchema,
   USERNAME_CHANGE_INTERVAL_DAYS,
+  type KeyMaterial,
 } from "../accounts.js";
 import { authenticate, hashToken } from "../middleware/auth.js";
 import {
   closeSessionSockets,
   closeUserSockets,
   createTicket,
+  sendToChatMembers,
   sendToContacts,
 } from "../realtime.js";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+// The client generates the OstrichID and sends only what it derives from
+// it: the auth key and the account's (encrypted) keys.
 const registerSchema = {
   body: {
     type: "object",
-    required: ["username", "password"],
+    required: ["username", "password", "keys"],
     properties: {
       username: usernameSchema,
       password: passwordSchema,
+      keys: keyMaterialSchema,
     },
   },
 } as const;
@@ -49,8 +55,24 @@ const loginSchema = {
     properties: {
       username: { type: "string", maxLength: 64 },
       password: { type: "string", maxLength: 128 },
-      // Optional only for accounts created before OstrichIDs existed.
+      // Derived from the OstrichID on the client.
+      auth_key: { type: "string", pattern: AUTH_KEY_PATTERN },
+      // Accounts from before end-to-end encryption (the server answered
+      // 409 "upgrade_required"): the raw OstrichID once, with the keys
+      // derived from it.
       ostrich_id: { type: "string", pattern: OSTRICH_ID_INPUT_PATTERN },
+      keys: keyMaterialSchema,
+    },
+  },
+} as const;
+
+const upgradeKeysSchema = {
+  body: {
+    type: "object",
+    required: ["ostrich_id", "keys"],
+    properties: {
+      ostrich_id: { type: "string", pattern: OSTRICH_ID_INPUT_PATTERN },
+      keys: keyMaterialSchema,
     },
   },
 } as const;
@@ -80,15 +102,35 @@ const changeUsernameSchema = {
 type RegisterBody = {
   username: string;
   password: string;
+  keys: KeyMaterial;
 };
 
 type LoginBody = {
   username: string;
   password: string;
+  auth_key?: string;
   ostrich_id?: string;
+  keys?: KeyMaterial;
 };
 
-const USER_COLUMNS = `id, username, created_at, username_changed_at, ${PROFILE_COLUMNS}`;
+// The app a request comes from, for the list of devices.
+function clientName(request: FastifyRequest): string {
+  const value = request.headers["x-ostrich-client"];
+
+  return typeof value === "string" && /^[a-z]{2,16}$/.test(value)
+    ? value
+    : "unknown";
+}
+
+// The account's keys as sent to its owner after logging in.
+function keysView(row: { public_key: string; encrypted_private_key: string }) {
+  return {
+    public_key: row.public_key,
+    encrypted_private_key: row.encrypted_private_key,
+  };
+}
+
+const USER_COLUMNS = `id, username, created_at, username_changed_at, show_presence, read_receipts, ${PROFILE_COLUMNS}`;
 
 // Brute-force protection for endpoints that check passwords.
 const authRateLimit = {
@@ -156,8 +198,8 @@ function recordFailedLogin(username: string) {
 const dummyPasswordHash = argon2.hash(crypto.randomBytes(16).toString("hex"));
 
 export default async function authRoutes(server: FastifyInstance) {
-  // REGISTER: creates the account and its OstrichID, which is returned
-  // only in this response.
+  // REGISTER: the OstrichID was generated on the client; only the auth key
+  // and the account keys derived from it arrive here.
   server.post<{ Body: RegisterBody }>(
     "/api/auth/register",
     {
@@ -165,10 +207,9 @@ export default async function authRoutes(server: FastifyInstance) {
       config: authRateLimit,
     },
     async (request, reply) => {
-      const { username, password } = request.body;
+      const { username, password, keys } = request.body;
 
       const passwordHash = await argon2.hash(password);
-      const ostrichId = generateOstrichId();
 
       let user;
 
@@ -178,12 +219,20 @@ export default async function authRoutes(server: FastifyInstance) {
           INSERT INTO users (
             username,
             password_hash,
-            ostrich_id_hash
+            auth_key_hash,
+            public_key,
+            encrypted_private_key
           )
-          VALUES ($1, $2, $3)
+          VALUES ($1, $2, $3, $4, $5)
           RETURNING ${USER_COLUMNS}
           `,
-          [username, passwordHash, hashOstrichId(ostrichId)],
+          [
+            username,
+            passwordHash,
+            hashAuthKey(keys.auth_key),
+            keys.public_key,
+            keys.encrypted_private_key,
+          ],
         );
 
         user = result.rows[0];
@@ -197,19 +246,18 @@ export default async function authRoutes(server: FastifyInstance) {
         throw error;
       }
 
-      const token = await createSession(user.id);
+      const token = await createSession(user.id, clientName(request));
 
       return reply.status(201).send({
         message: "Registration successful",
         token,
         user: accountView(user),
-        ostrich_id: formatOstrichId(ostrichId),
       });
     },
   );
 
-  // LOGIN: username + password + OstrichID. Accounts created before
-  // OstrichIDs log in without one once and get their ID in the response.
+  // LOGIN: username + password + the auth key derived from the OstrichID.
+  // Answers with the account's encrypted keys.
   server.post<{ Body: LoginBody }>(
     "/api/auth/login",
     {
@@ -217,7 +265,7 @@ export default async function authRoutes(server: FastifyInstance) {
       config: authRateLimit,
     },
     async (request, reply) => {
-      const { password, ostrich_id } = request.body;
+      const { password, auth_key, ostrich_id, keys } = request.body;
       // "@alice" works too.
       const username = request.body.username.replace(/^@/, "");
 
@@ -229,7 +277,8 @@ export default async function authRoutes(server: FastifyInstance) {
 
       const result = await db.query(
         `
-        SELECT ${USER_COLUMNS}, password_hash, ostrich_id_hash
+        SELECT ${USER_COLUMNS}, password_hash, ostrich_id_hash, auth_key_hash,
+               public_key, encrypted_private_key
         FROM users
         WHERE LOWER(username) = LOWER($1)
         `,
@@ -243,56 +292,137 @@ export default async function authRoutes(server: FastifyInstance) {
         password,
       );
 
-      // Accounts without an OstrichID yet need none (it is issued below).
-      const ostrichIdValid =
-        user?.ostrich_id_hash == null ||
-        ostrichIdMatches(ostrich_id ?? "", user.ostrich_id_hash);
-
-      if (!user || !passwordValid || !ostrichIdValid) {
+      const fail = () => {
         recordFailedLogin(username);
 
         return reply.status(401).send({
           error: "Invalid username, password or OstrichID",
         });
+      };
+
+      if (!user || !passwordValid) {
+        return fail();
       }
 
-      let issuedOstrichId: string | null = null;
+      let accountKeys;
 
-      if (user.ostrich_id_hash == null) {
-        const ostrichId = generateOstrichId();
+      if (user.auth_key_hash) {
+        if (!authKeyMatches(auth_key, user.auth_key_hash)) {
+          return fail();
+        }
 
-        // Only if no concurrent login has issued one in the meantime:
-        // otherwise this client would show an ID that does not work.
-        const updated = await db.query(
-          `
-          UPDATE users
-          SET ostrich_id_hash = $2, updated_at = NOW()
-          WHERE id = $1
-            AND ostrich_id_hash IS NULL
-          `,
-          [user.id, hashOstrichId(ostrichId)],
-        );
-
-        if (updated.rowCount === 0) {
-          return reply.status(401).send({
-            error: "Invalid username, password or OstrichID",
+        accountKeys = keysView(user);
+      } else if (user.ostrich_id_hash) {
+        // Created before end-to-end encryption: the client sends the raw
+        // OstrichID once, with the keys it derived from it.
+        if (!ostrich_id || !keys) {
+          return reply.status(409).send({
+            error: "This account needs its OstrichID once to set up encryption",
+            code: "upgrade_required",
           });
         }
 
-        issuedOstrichId = formatOstrichId(ostrichId);
+        if (!ostrichIdMatches(ostrich_id, user.ostrich_id_hash)) {
+          return fail();
+        }
+
+        accountKeys = keysView(await setAccountKeys(user.id, keys));
+      } else {
+        return fail();
       }
 
       failedLogins.delete(username.toLowerCase());
 
-      const token = await createSession(user.id);
+      const token = await createSession(user.id, clientName(request));
 
       return reply.send({
         message: "Login successful",
         token,
         user: accountView(user),
-        // Only when the account has just been given its OstrichID.
-        ...(issuedOstrichId ? { ostrich_id: issuedOstrichId } : {}),
+        keys: accountKeys,
       });
+    },
+  );
+
+  // KEYS: the account's encrypted keys, for a device that is logged in but
+  // does not have them (e.g. after updating the app). "upgrade_required"
+  // for accounts from before end-to-end encryption.
+  server.get(
+    "/api/auth/keys",
+    {
+      preHandler: authenticate,
+    },
+    async (request, reply) => {
+      const result = await db.query(
+        `
+        SELECT public_key, encrypted_private_key
+        FROM users
+        WHERE id = $1
+        `,
+        [request.user.id],
+      );
+
+      const row = result.rows[0];
+
+      if (!row.public_key) {
+        return reply.status(409).send({
+          error: "This account needs its OstrichID once to set up encryption",
+          code: "upgrade_required",
+        });
+      }
+
+      return { keys: keysView(row) };
+    },
+  );
+
+  // UPGRADE KEYS: sets up encryption for an account from before it, from a
+  // logged-in device. The raw OstrichID proves the user knows it.
+  server.post<{ Body: { ostrich_id: string; keys: KeyMaterial } }>(
+    "/api/auth/keys/upgrade",
+    {
+      preHandler: authenticate,
+      schema: upgradeKeysSchema,
+      config: authRateLimit,
+    },
+    async (request, reply) => {
+      const { ostrich_id, keys } = request.body;
+
+      if (loginBlocked(request.user.username)) {
+        return reply.status(429).send({
+          error: "Too many failed attempts, try again later",
+        });
+      }
+
+      const result = await db.query(
+        `
+        SELECT ostrich_id_hash, public_key
+        FROM users
+        WHERE id = $1
+        `,
+        [request.user.id],
+      );
+
+      const row = result.rows[0];
+
+      if (row.public_key) {
+        return reply.status(409).send({
+          error: "Encryption is already set up for this account",
+          code: "already_set_up",
+        });
+      }
+
+      if (
+        !row.ostrich_id_hash ||
+        !ostrichIdMatches(ostrich_id, row.ostrich_id_hash)
+      ) {
+        recordFailedLogin(request.user.username);
+
+        return reply.status(401).send({
+          error: "Wrong OstrichID",
+        });
+      }
+
+      return { keys: keysView(await setAccountKeys(request.user.id, keys)) };
     },
   );
 
@@ -510,6 +640,166 @@ export default async function authRoutes(server: FastifyInstance) {
     },
   );
 
+  // PRIVACY: whether others see the user online / last seen, and whether
+  // read receipts are exchanged.
+  server.put<{ Body: { show_presence?: boolean; read_receipts?: boolean } }>(
+    "/api/auth/privacy",
+    {
+      preHandler: authenticate,
+      config: ticketRateLimit,
+      schema: {
+        body: {
+          type: "object",
+          properties: {
+            show_presence: { type: "boolean" },
+            read_receipts: { type: "boolean" },
+          },
+        },
+      },
+    },
+    async (request) => {
+      const { show_presence, read_receipts } = request.body;
+
+      const result = await db.query(
+        `
+        UPDATE users
+        SET show_presence = COALESCE($2::boolean, show_presence),
+            read_receipts = COALESCE($3::boolean, read_receipts),
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING ${USER_COLUMNS}
+        `,
+        [request.user.id, show_presence ?? null, read_receipts ?? null],
+      );
+
+      // Contacts reload their chats list (presence, read receipts).
+      await sendToContacts(request.user.id, { type: "chats_changed" });
+
+      return { user: accountView(result.rows[0]) };
+    },
+  );
+
+  // SESSIONS: the devices the user is logged in on.
+  server.get(
+    "/api/auth/sessions",
+    {
+      preHandler: authenticate,
+    },
+    async (request) => {
+      const result = await db.query(
+        `
+        SELECT id, client, created_at, last_used_at,
+               token_hash = $2 AS current
+        FROM sessions
+        WHERE user_id = $1
+          AND expires_at > NOW()
+        ORDER BY current DESC, last_used_at DESC
+        `,
+        [request.user.id, hashToken(request.token)],
+      );
+
+      return { sessions: result.rows };
+    },
+  );
+
+  // END SESSION: logs one device out.
+  server.delete<{ Params: { sessionId: string } }>(
+    "/api/auth/sessions/:sessionId",
+    {
+      preHandler: authenticate,
+      schema: {
+        params: {
+          type: "object",
+          required: ["sessionId"],
+          properties: { sessionId: { type: "string", format: "uuid" } },
+        },
+      },
+    },
+    async (request, reply) => {
+      const result = await db.query(
+        `
+        DELETE FROM sessions
+        WHERE id = $1
+          AND user_id = $2
+        RETURNING token_hash
+        `,
+        [request.params.sessionId, request.user.id],
+      );
+
+      if (result.rows.length === 0) {
+        return reply.status(404).send({ error: "Session not found" });
+      }
+
+      closeSessionSockets(result.rows[0].token_hash);
+
+      return { deleted: true };
+    },
+  );
+
+  // DELETE ACCOUNT: needs the password and the OstrichID (its auth key).
+  // Removes the user's chats for both members, then the user.
+  server.post<{ Body: { password: string; auth_key: string } }>(
+    "/api/auth/delete-account",
+    {
+      preHandler: authenticate,
+      config: authRateLimit,
+      schema: {
+        body: {
+          type: "object",
+          required: ["password", "auth_key"],
+          properties: {
+            password: { type: "string", maxLength: 128 },
+            auth_key: { type: "string", pattern: AUTH_KEY_PATTERN },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { password, auth_key } = request.body;
+
+      const result = await db.query(
+        "SELECT password_hash, auth_key_hash FROM users WHERE id = $1",
+        [request.user.id],
+      );
+
+      const row = result.rows[0];
+      const passwordValid = await argon2.verify(row.password_hash, password);
+
+      if (!passwordValid || !row.auth_key_hash || !authKeyMatches(auth_key, row.auth_key_hash)) {
+        recordFailedLogin(request.user.username);
+
+        return reply.status(403).send({
+          error: "Wrong password or OstrichID",
+        });
+      }
+
+      const chats = await db.query(
+        "SELECT chat_id FROM chat_members WHERE user_id = $1",
+        [request.user.id],
+      );
+
+      // Tell the other members while the chats still exist.
+      for (const { chat_id } of chats.rows) {
+        await sendToChatMembers(chat_id, { type: "chat_deleted", chatId: chat_id });
+      }
+
+      await withTransaction(async (client) => {
+        await client.query(
+          `
+          DELETE FROM chats
+          WHERE id IN (SELECT chat_id FROM chat_members WHERE user_id = $1)
+          `,
+          [request.user.id],
+        );
+        await client.query("DELETE FROM users WHERE id = $1", [request.user.id]);
+      });
+
+      closeUserSockets(request.user.id);
+
+      return { deleted: true };
+    },
+  );
+
   // WEBSOCKET TICKET: single-use, short-lived credential for /ws?ticket=,
   // so browsers do not have to put the session token in the URL.
   server.post(
@@ -526,7 +816,7 @@ export default async function authRoutes(server: FastifyInstance) {
   );
 }
 
-async function createSession(userId: string): Promise<string> {
+async function createSession(userId: string, client: string): Promise<string> {
   const token = crypto.randomBytes(32).toString("hex");
 
   await db.query(
@@ -534,12 +824,42 @@ async function createSession(userId: string): Promise<string> {
     INSERT INTO sessions (
       user_id,
       token_hash,
-      expires_at
+      expires_at,
+      client
     )
-    VALUES ($1, $2, $3)
+    VALUES ($1, $2, $3, $4)
     `,
-    [userId, hashToken(token), new Date(Date.now() + SESSION_TTL_MS)],
+    [userId, hashToken(token), new Date(Date.now() + SESSION_TTL_MS), client],
   );
 
   return token;
+}
+
+// Replaces the server-side OstrichID hash with the client-derived auth key
+// and stores the account keys. Only once: if a concurrent upgrade got there
+// first, its keys are kept and returned.
+async function setAccountKeys(
+  userId: string,
+  keys: KeyMaterial,
+): Promise<{ public_key: string; encrypted_private_key: string }> {
+  await db.query(
+    `
+    UPDATE users
+    SET auth_key_hash = $2,
+        public_key = $3,
+        encrypted_private_key = $4,
+        ostrich_id_hash = NULL,
+        updated_at = NOW()
+    WHERE id = $1
+      AND public_key IS NULL
+    `,
+    [userId, hashAuthKey(keys.auth_key), keys.public_key, keys.encrypted_private_key],
+  );
+
+  const result = await db.query(
+    "SELECT public_key, encrypted_private_key FROM users WHERE id = $1",
+    [userId],
+  );
+
+  return result.rows[0];
 }

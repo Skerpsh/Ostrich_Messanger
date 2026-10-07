@@ -21,6 +21,21 @@ ALTER TABLE users DROP COLUMN IF EXISTS login_id;
 -- next login.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS ostrich_id_hash TEXT;
 
+-- End-to-end encryption. The OstrichID never reaches the server: clients
+-- derive from it an auth key (only its SHA-256 is stored here, replacing
+-- ostrich_id_hash) and a key that encrypts the account's X25519 private
+-- key. The server keeps the public key and the encrypted private key, so
+-- every device that knows the OstrichID can read the account's chats.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_key_hash TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS public_key TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS encrypted_private_key TEXT;
+
+-- Privacy: whether others see the user online / last seen, and whether
+-- read receipts are exchanged (off works both ways: the user neither
+-- sends nor sees them).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS show_presence BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS read_receipts BOOLEAN NOT NULL DEFAULT TRUE;
+
 -- Last username change; NULL if never changed (the first change after
 -- registration is allowed right away, then once per 28 days).
 ALTER TABLE users ADD COLUMN IF NOT EXISTS username_changed_at TIMESTAMPTZ;
@@ -39,6 +54,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id);
+
+-- Which app the session is from ("web", "ios", "android", "cli", ...) and
+-- when it was last used, for the list of devices in Settings.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS client TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions (expires_at);
 
 CREATE TABLE IF NOT EXISTS chats (
@@ -73,6 +93,24 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS messages_chat_id_created_at_idx
   ON messages (chat_id, created_at);
 
+-- Set when the sender edits the message.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ;
+
+-- One reaction per user and message, from a fixed set of emoji. Not
+-- encrypted: the server sees which emoji, like it sees who wrote when.
+CREATE TABLE IF NOT EXISTS message_reactions (
+  message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  emoji      TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (message_id, user_id)
+);
+
+-- Per member: chats pinned to the top of the list, and muted chats (no
+-- notifications).
+ALTER TABLE chat_members ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
+ALTER TABLE chat_members ADD COLUMN IF NOT EXISTS muted BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- The message this one replies to (same chat); NULL if not a reply.
 ALTER TABLE messages
   ADD COLUMN IF NOT EXISTS reply_to_id UUID REFERENCES messages(id) ON DELETE SET NULL;
@@ -82,6 +120,17 @@ ALTER TABLE messages
 ALTER TABLE users
   ADD COLUMN IF NOT EXISTS is_developer BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- Blocks: the blocked user cannot message the blocker or start a chat
+-- with them, and neither sees the other's online status.
+CREATE TABLE IF NOT EXISTS blocks (
+  blocker_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  blocked_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (blocker_id, blocked_id)
+);
+
+CREATE INDEX IF NOT EXISTS blocks_blocked_id_idx ON blocks (blocked_id);
+
 -- Profile pictures: 512x512 WebP, re-encoded by the server (no metadata).
 -- The id is random and new for every upload, so it works as an
 -- unguessable, cacheable URL (/api/avatars/:id) that only reaches other
@@ -90,5 +139,13 @@ CREATE TABLE IF NOT EXISTS avatars (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id    UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
   image      BYTEA NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Push notification tokens (Expo) of the apps, one per session: logging
+-- out removes it with the session.
+CREATE TABLE IF NOT EXISTS push_tokens (
+  session_id UUID PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  token      TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

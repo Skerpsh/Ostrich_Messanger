@@ -1,0 +1,10 @@
+[Unit]
+Description=Ostrich database backup
+After=postgresql.service
+
+[Service]
+Type=oneshot
+# Change KEEP (how many backups to keep) or MIN_FREE_MB here if needed.
+Environment=KEEP=7
+Environment=MIN_FREE_MB=500
+ExecStart=/opt/ostrich/ops/backup.sh

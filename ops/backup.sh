@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Backs up the Ostrich database (compressed pg_dump) and keeps only the
+# newest KEEP backups. Skips the backup when the disk is nearly full.
+#
+#   ops/backup.sh                       # with the defaults below
+#   KEEP=3 BACKUP_DIR=/srv/backups ops/backup.sh
+#
+# Run daily by ops/ostrich-backup.timer (see ops/README.md).
+# Restore: pg_restore --clean --if-exists -d ostrich_db <file>
+set -euo pipefail
+
+BACKUP_DIR="${BACKUP_DIR:-/var/backups/ostrich}"
+KEEP="${KEEP:-7}"
+# Database connection: the backend's .env (DB_HOST, DB_PORT, DB_NAME,
+# DB_USER, DB_PASSWORD).
+ENV_FILE="${ENV_FILE:-/opt/ostrich/backend/.env}"
+# Space that must stay free on the disk besides the new backup.
+MIN_FREE_MB="${MIN_FREE_MB:-500}"
+
+if [ ! -r "$ENV_FILE" ]; then
+  echo "backup: cannot read $ENV_FILE" >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+set +a
+
+export PGHOST="${DB_HOST:-localhost}"
+export PGPORT="${DB_PORT:-5432}"
+export PGDATABASE="${DB_NAME:-ostrich_db}"
+export PGUSER="${DB_USER:-ostrich}"
+export PGPASSWORD="${DB_PASSWORD:-}"
+
+mkdir -p "$BACKUP_DIR"
+chmod 700 "$BACKUP_DIR"
+
+# A compressed dump is smaller than the database; its size is an upper
+# bound for the space the backup needs.
+db_bytes="$(psql -tAc "SELECT pg_database_size(current_database())")"
+free_bytes="$(df --output=avail -B1 "$BACKUP_DIR" | tail -n 1 | tr -d ' ')"
+needed_bytes=$((db_bytes + MIN_FREE_MB * 1024 * 1024))
+
+if [ "$free_bytes" -lt "$needed_bytes" ]; then
+  echo "backup: skipped, not enough disk space in $BACKUP_DIR" \
+    "($((free_bytes / 1024 / 1024)) MB free, need $((needed_bytes / 1024 / 1024)) MB)" >&2
+  exit 1
+fi
+
+file="$BACKUP_DIR/ostrich-$(date +%Y%m%d-%H%M%S).dump"
+
+# Written under a temporary name, so a failed dump never looks complete.
+pg_dump --format=custom --compress=6 --file="$file.partial"
+mv "$file.partial" "$file"
+chmod 600 "$file"
+
+# Keep the newest KEEP backups.
+find "$BACKUP_DIR" -maxdepth 1 -name 'ostrich-*.dump' -printf '%T@ %p\n' \
+  | sort -rn \
+  | tail -n +"$((KEEP + 1))" \
+  | cut -d' ' -f2- \
+  | xargs -r rm --
+
+count="$(find "$BACKUP_DIR" -maxdepth 1 -name 'ostrich-*.dump' | wc -l)"
+echo "backup: $file ($(du -h "$file" | cut -f1)), $count kept in $BACKUP_DIR"

@@ -128,13 +128,17 @@ func (m *tuiModel) chatReadElsewhere(chatID string, lastReadAt *string) {
 // chatPreview is the second line of a chat in the list: the start of its
 // last message, or its @username when there are no messages.
 func (m tuiModel) chatPreview(chat Chat) string {
+	if m.isTyping(chat.ID) {
+		return selectedChatStyle.Render("typing…")
+	}
+
 	last := chat.LastMessage
 
 	if last == nil {
 		return hintStyle.Render("@" + sanitize(chat.Username) + " · no messages yet")
 	}
 
-	text := strings.Join(strings.Fields(sanitize(last.Content)), " ")
+	text := strings.Join(strings.Fields(sanitize(m.textOf(chat, last.Content))), " ")
 
 	if runes := []rune(text); len(runes) > previewLength {
 		text = string(runes[:previewLength-1]) + "…"

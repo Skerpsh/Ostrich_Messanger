@@ -67,6 +67,17 @@ function closeSessions(predicate: (session: SocketSession) => boolean) {
   }
 }
 
+// Whether the session has an open socket (the app is open on that device).
+export function hasOpenSocket(tokenHash: string) {
+  for (const session of socketSessions.values()) {
+    if (session.tokenHash === tokenHash) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function closeSessionSockets(tokenHash: string) {
   closeSessions((session) => session.tokenHash === tokenHash);
 }
@@ -153,7 +164,12 @@ export function consumeTicket(ticket: string): string | null {
 // not only to clients that have the chat open: chat lists need new
 // messages and read positions to keep last messages and unread counts
 // up to date.
-export async function sendToChatMembers(chatId: string, payload: unknown) {
+export async function sendToChatMembers(
+  chatId: string,
+  payload: unknown,
+  // E.g. the typing user, who does not need their own "typing" event.
+  exceptUserId?: string,
+) {
   const result = await db.query(
     `
     SELECT user_id
@@ -166,8 +182,15 @@ export async function sendToChatMembers(chatId: string, payload: unknown) {
   const data = JSON.stringify(payload);
 
   for (const row of result.rows) {
-    sendToUser(row.user_id, data);
+    if (row.user_id !== exceptUserId) {
+      sendToUser(row.user_id, data);
+    }
   }
+}
+
+// Sends to all sockets of one user (their devices).
+export function sendToUserSockets(userId: string, payload: unknown) {
+  sendToUser(userId, JSON.stringify(payload));
 }
 
 // Sends to everyone who shares a chat with the user and to the user's own
@@ -207,16 +230,24 @@ function sendToUser(userId: string, data: string) {
   }
 }
 
-// Presence is visible only to users who share a chat with the user.
+// Presence is visible only to users who share a chat with the user, and
+// not at all if the user hid it or to users blocked either way.
 async function notifyPeers(event: PresenceEvent) {
   const result = await db.query(
     `
     SELECT DISTINCT other.user_id
     FROM chat_members me
+    JOIN users self ON self.id = me.user_id
     JOIN chat_members other
       ON other.chat_id = me.chat_id
      AND other.user_id <> me.user_id
     WHERE me.user_id = $1
+      AND self.show_presence
+      AND NOT EXISTS (
+        SELECT 1 FROM blocks
+        WHERE (blocker_id = $1 AND blocked_id = other.user_id)
+           OR (blocker_id = other.user_id AND blocked_id = $1)
+      )
     `,
     [event.userId],
   );
@@ -308,7 +339,14 @@ export async function chatPresence(
 ): Promise<PresenceEvent[]> {
   const result = await db.query(
     `
-    SELECT users.id, users.last_seen_at
+    SELECT
+      users.id,
+      users.last_seen_at,
+      users.show_presence AND NOT EXISTS (
+        SELECT 1 FROM blocks
+        WHERE (blocker_id = $2 AND blocked_id = users.id)
+           OR (blocker_id = users.id AND blocked_id = $2)
+      ) AS visible
     FROM chat_members
     JOIN users ON users.id = chat_members.user_id
     WHERE chat_members.chat_id = $1
@@ -320,8 +358,8 @@ export async function chatPresence(
   return result.rows.map((row) => ({
     type: "presence",
     userId: row.id,
-    online: isOnline(row.id),
-    lastSeenAt: row.last_seen_at,
+    online: row.visible && isOnline(row.id),
+    lastSeenAt: row.visible ? row.last_seen_at : null,
   }));
 }
 

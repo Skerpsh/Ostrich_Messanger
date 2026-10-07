@@ -158,6 +158,9 @@ type tuiModel struct {
 	selectedMessage int
 	replyTo         *Message
 
+	// "typing…" of the other member, by chat (see events.go).
+	typingUntil map[string]time.Time
+
 	// The session's websocket, open for as long as the user is logged in.
 	conn       *websocket.Conn
 	connStatus connStatus
@@ -492,6 +495,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case minuteTickMsg:
 		return m, minuteTick()
 
+	case typingExpiredMsg:
+		// Redraw so "typing…" disappears.
+		return m, nil
+
 	case authSuccessMsg:
 		m.loading = true
 		m.user = msg.result
@@ -716,6 +723,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// A chat someone has just started.
 				cmd = tea.Batch(cmd, loadChatsCmd(m.user.Token))
 			}
+
+			// The message ends "typing…".
+			delete(m.typingUntil, message.ChatID)
+
+		case "typing", "message_updated", "message_deleted", "reactions",
+			"chat_deleted", "chats_changed":
+			cmd = m.handleChatEvent(msg.message)
 
 		case "read":
 			// Read on another device of this user.
@@ -1111,17 +1125,24 @@ func (m tuiModel) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// The server only takes end-to-end encrypted messages.
+		encrypted, err := encryptMessage(content, m.user.PrivateKey, m.currentChat.PublicKey, m.currentChat.ID)
+		if err != nil {
+			m.err = err
+			return m, nil
+		}
+
 		payload := map[string]string{
 			"type":    "message",
 			"chatId":  m.currentChat.ID,
-			"content": content,
+			"content": encrypted,
 		}
 
 		if m.replyTo != nil {
 			payload["replyTo"] = m.replyTo.ID
 		}
 
-		err := writeWebSocketJSON(m.conn, payload)
+		err = writeWebSocketJSON(m.conn, payload)
 
 		if err != nil {
 			m.err = err
@@ -1248,17 +1269,13 @@ func (m tuiModel) loginView() string {
 		b.WriteString("\n")
 		b.WriteString(inputStyle.Render(m.ostrichIDInput.View()))
 		b.WriteString("\n")
-		b.WriteString(hintStyle.Render(
-			"Account created before OstrichIDs? Leave it empty once to get yours.",
-		))
-		b.WriteString("\n")
 	}
 
 	if m.authMode == authRegister {
 		b.WriteString("\n")
 		b.WriteString(hintStyle.Render(
-			"After registration you get an OstrichID: you need it to log in,\n" +
-				"and it is shown only once.",
+			"After registration you get an OstrichID: you need it to log in and it\n" +
+				"is the key to your end-to-end encrypted messages. It is shown only once.",
 		))
 		b.WriteString("\n\n")
 
@@ -1399,6 +1416,14 @@ func (m tuiModel) chatsView() string {
 			}
 
 			name = withDevBadge(name, chat.IsDeveloper)
+
+			if chat.Pinned {
+				name += hintStyle.Render("  pinned")
+			}
+
+			if chat.Muted {
+				name += hintStyle.Render("  muted")
+			}
 
 			if chat.UnreadCount > 0 {
 				name += " " + unreadStyle.Render(fmt.Sprintf(" %d ", chat.UnreadCount))
@@ -1585,14 +1610,22 @@ func (m tuiModel) renderMessages(textWidth int) []string {
 				Align(lipgloss.Right)
 		}
 
-		text := sanitize(name) + ": " + sanitize(message.Content)
+		text := sanitize(name) + ": " + sanitize(m.textOf(m.currentChat, message.Content))
 
 		if m.selecting && i == m.selectedMessage {
 			text = selectedChatStyle.Render("▶ ") + text
 		}
 
+		if message.EditedAt != nil {
+			text += hintStyle.Render(" (edited)")
+		}
+
 		if message.ReplyTo != nil {
 			text = m.quoteLine(message.ReplyTo) + "\n" + text
+		}
+
+		if line := reactionsLine(message.Reactions); line != "" {
+			text += "\n" + line
 		}
 
 		rendered[i] = style.Render(text)
@@ -1697,8 +1730,14 @@ func (m tuiModel) chatView() string {
 	// The peer's presence is only known while we are connected ourselves.
 	if m.connStatus != connOnline {
 		status = append(status, hintStyle.Render("connecting..."))
+	} else if m.isTyping(m.currentChat.ID) {
+		status = append(status, selectedChatStyle.Render("typing…"))
 	} else if peer := m.presenceText(m.currentChat.UserID); peer != "" {
 		status = append(status, peer)
+	}
+
+	if m.currentChat.BlockedByMe {
+		status = append(status, errorStyle.Render("blocked"))
 	}
 
 	if start > 0 {

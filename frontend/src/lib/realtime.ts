@@ -1,5 +1,5 @@
 import { Platform } from "react-native";
-import type { Message } from "./api";
+import type { Message, Reaction } from "./api";
 import { WS_URL } from "./config";
 
 const RECONNECT_DELAY_MS = 3_000;
@@ -26,6 +26,24 @@ export type ProfileEvent = {
   isDeveloper: boolean;
 };
 
+// Other events of the user's chats.
+export type ChatEvent =
+  | { type: "typing"; chatId: string; userId: string }
+  | { type: "message_updated"; message: Message }
+  | { type: "message_deleted"; chatId: string; messageId: string }
+  | { type: "reactions"; chatId: string; messageId: string; reactions: Reaction[] }
+  | { type: "chat_deleted"; chatId: string }
+  | { type: "chats_changed" };
+
+const CHAT_EVENTS = new Set([
+  "typing",
+  "message_updated",
+  "message_deleted",
+  "reactions",
+  "chat_deleted",
+  "chats_changed",
+]);
+
 type Handlers = {
   onStatus: (status: ConnectionStatus) => void;
   // Called after every (re)join, so screens can reload missed history.
@@ -34,6 +52,7 @@ type Handlers = {
   onMessage: (message: Message) => void;
   onRead: (event: ReadEvent) => void;
   onProfile: (event: ProfileEvent) => void;
+  onEvent: (event: ChatEvent) => void;
   onPresence: (event: PresenceEvent) => void;
   onError: (error: string) => void;
   // Web only: a single-use ticket for the websocket URL, so the session
@@ -95,6 +114,11 @@ export class RealtimeConnection {
   leave(chatId: string) {
     this.chats.delete(chatId);
     this.send({ type: "leave", chatId });
+  }
+
+  // "typing…" for the other member; call every few seconds while typing.
+  typing(chatId: string) {
+    this.send({ type: "typing", chatId });
   }
 
   private send(payload: unknown) {
@@ -231,6 +255,11 @@ export class RealtimeConnection {
         case "error":
           this.handlers.onError(data.error || "Server error");
           break;
+
+        default:
+          if (data.type && CHAT_EVENTS.has(data.type)) {
+            this.handlers.onEvent(data as ChatEvent);
+          }
       }
     };
 

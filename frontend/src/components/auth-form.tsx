@@ -53,6 +53,11 @@ export default function AuthForm({ mode }: AuthFormProps) {
       return;
     }
 
+    if (!isRegister && !ostrichId.trim()) {
+      setError("Enter your OstrichID");
+      return;
+    }
+
     if (isRegister) {
       if (!USERNAME_RE.test(name)) {
         setError("Username: 3–32 characters, letters, digits, _ . - only");
@@ -167,10 +172,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
                     returnKeyType="go"
                     onSubmitEditing={submit}
                   />
-                  <Text style={[styles.fieldHint, { color: colors.muted }]}>
-                    Account created before OstrichIDs? Leave it empty once to
-                    get yours.
-                  </Text>
+
                 </View>
               )}
 
@@ -193,8 +195,9 @@ export default function AuthForm({ mode }: AuthFormProps) {
 
             {isRegister ? (
               <Text style={[styles.note, { color: colors.textSoft }]}>
-                After you create the account, Ostrich gives you an OstrichID.
-                You will need it to log in, and it is shown only once.
+                After you create the account, you get an OstrichID. You need it
+                to log in, and it is the key to your end-to-end encrypted
+                messages: it is shown only once and never sent to the server.
               </Text>
             ) : null}
 
@@ -262,11 +265,6 @@ const styles = StyleSheet.create({
 
   idField: {
     gap: 8,
-  },
-
-  fieldHint: {
-    fontSize: 13,
-    lineHeight: 18,
   },
 
   note: {

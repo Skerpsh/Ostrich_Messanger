@@ -24,6 +24,10 @@ type WSMessage struct {
 	// "read" events.
 	LastReadAt *string `json:"lastReadAt,omitempty"`
 
+	// "message_deleted" and "reactions" events.
+	MessageID string     `json:"messageId,omitempty"`
+	Reactions []Reaction `json:"reactions,omitempty"`
+
 	// "presence" events (and "read": who has read).
 	UserID     string  `json:"userId,omitempty"`
 	Online     bool    `json:"online,omitempty"`

@@ -5,26 +5,24 @@ mobile apps; styled after the Ostrich website.
 
 ## Features
 
-- Log in with @username + password + OstrichID; create account (session is
-  remembered: Keychain/Keystore on mobile, localStorage on web)
-- OstrichID shown once after registration, until the user confirms saving it
+- End-to-end encryption: messages are encrypted on the device (X25519 +
+  XChaCha20-Poly1305) with keys derived from the OstrichID, which never leaves
+  the device; the server stores only ciphertext. See `src/lib/crypto.ts`
+- Log in with @username + password + OstrichID; a device logged in without
+  keys unlocks them once with the OstrichID
 - Phones: chats list and chat on separate screens. Wide screens (tablets,
   desktop browsers, Mac): chats list on the left, open chat on the right
-- Chats list with last message, unread counters (live), search; start a
-  chat by typing someone's exact @username into the search
-- Chat: grouped bubbles, day separators, "unread messages" line, read
-  receipts (✓ sent, ✓✓ read), multi-line composer (Enter sends on web)
-- Replies: hover a message (web) or long-press it (any platform) → Reply;
-  tapping a quote jumps to the original message
-- Profile pictures: picked from the photo library, cropped square and
-  resized on the device, re-encoded by the server
-- DEV badge (gradient) next to developer accounts' names everywhere; given
-  on the server with `npm run dev-badge:prod -- add @username`
-- Settings: profile picture, theme (system / light / dark), accent color
-  (stored per device), change username (once per 28 days), change
-  password, log out of all devices
-- Chat with live updates over WebSocket, automatic reconnect
-- Light / dark theme (same switch as on the website)
+- Chats list: last message, live unread counters, "typing…", search that can
+  start a chat by exact @username; pin and mute chats; delete a chat (for
+  both); long press / right click for the menu
+- Chat: older history while scrolling up, grouped bubbles, day separators,
+  "unread messages" line, read receipts, replies (swipe left on phones, hover
+  or menu on desktop), edit and delete own messages, reactions, search,
+  block / unblock
+- Profile pictures, DEV badge, theme and accent color (per device)
+- Settings: privacy (online status, read receipts), notifications (browser
+  notifications on web, push in the apps), devices with per-device log out,
+  username, password, delete account
 
 ## Structure
 
@@ -35,6 +33,7 @@ src/
     index.tsx       welcome screen
     login.tsx, register.tsx
     ostrich-id.tsx  new OstrichID, shown once until saved
+    unlock.tsx      enter the OstrichID once on a device without keys
     chats/_layout.tsx  one or two columns depending on screen width
     chats/index.tsx    chats list (phones) / "select a chat" (wide)
     chats/[chatId].tsx chat

@@ -10,8 +10,10 @@ import {
 import {
   CREATE_MESSAGE_ERRORS,
   createMessage,
-  MAX_MESSAGE_LENGTH,
+  isBlockedInChat,
+  isEncryptedMessage,
 } from "../messages.js";
+import { notifyNewMessage } from "../push.js";
 import {
   chatPresence,
   closeEndedSessions,
@@ -55,10 +57,14 @@ type ClientMessage = {
 
 // Protocol (JSON messages):
 //   client -> server: join {chatId}, leave {chatId},
-//                     message {chatId, content, replyTo?}
+//                     message {chatId, content, replyTo?}, typing {chatId}
 //   server -> client: connected, joined {chatId}, left {chatId},
 //                     message {message}, read {chatId, userId, lastReadAt},
 //                     profile {userId, username, avatarId},
+//                     typing {chatId, userId}, message_updated {message},
+//                     message_deleted {chatId, messageId},
+//                     reactions {chatId, messageId, reactions},
+//                     chat_deleted {chatId}, chats_changed,
 //                     presence {userId, online, lastSeenAt}, error {error}
 //
 // "message" and "read" events of all the user's chats are sent to all their
@@ -196,10 +202,8 @@ export default async function websocketRoutes(server: FastifyInstance) {
             return;
           }
 
-          if (content.length > MAX_MESSAGE_LENGTH) {
-            sendError(
-              `Message is too long (max ${MAX_MESSAGE_LENGTH} characters)`,
-            );
+          if (!isEncryptedMessage(content)) {
+            sendError("Messages must be end-to-end encrypted; update the app");
             return;
           }
 
@@ -226,6 +230,27 @@ export default async function websocketRoutes(server: FastifyInstance) {
             type: "message",
             message: result.message,
           });
+          notifyNewMessage(chatId, user.id);
+          return;
+        }
+
+        // "typing…", sent by clients every few seconds while typing.
+        if (data.type === "typing") {
+          const { chatId } = data;
+
+          if (
+            !validChatId(chatId) ||
+            !(await isChatMember(chatId, user.id)) ||
+            (await isBlockedInChat(chatId, user.id))
+          ) {
+            return;
+          }
+
+          await sendToChatMembers(
+            chatId,
+            { type: "typing", chatId, userId: user.id },
+            user.id,
+          );
           return;
         }
 

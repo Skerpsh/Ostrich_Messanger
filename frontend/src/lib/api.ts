@@ -1,4 +1,6 @@
+import { Platform } from "react-native";
 import { API_URL } from "./config";
+import type { KeyMaterial } from "./crypto";
 
 export type User = {
   id: string;
@@ -9,6 +11,9 @@ export type User = {
   avatar_id: string | null;
   // Shows the DEV badge.
   is_developer: boolean;
+  // Privacy: others see when the user is online; read receipts exchanged.
+  show_presence: boolean;
+  read_receipts: boolean;
 };
 
 // Profile pictures are plain image URLs: the id is random and new for
@@ -34,6 +39,9 @@ export type Chat = {
   username: string;
   avatar_id: string | null;
   is_developer: boolean;
+  // The other member's public key, to encrypt for them; null until they
+  // have set up end-to-end encryption.
+  public_key: string | null;
   // Presence of the other user.
   online: boolean;
   last_seen_at: string | null;
@@ -42,10 +50,17 @@ export type Chat = {
   unread_count: number;
   // Up to when the other user has read the chat (for read receipts).
   peer_last_read_at: string | null;
+  // The signed-in user's settings for the chat.
+  pinned: boolean;
+  muted: boolean;
+  // The signed-in user blocked the other member.
+  blocked_by_me: boolean;
 };
 
 export type ChatHistory = {
   messages: Message[];
+  // There are older messages (load them with `before`).
+  has_more: boolean;
   // Up to when the signed-in user had read the chat.
   last_read_at: string | null;
   peer_last_read_at: string | null;
@@ -60,6 +75,11 @@ export type ReplyPreview = {
   content: string;
 };
 
+export type Reaction = { emoji: string; user_id: string };
+
+// The emoji messages can be reacted with (same list as the server).
+export const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🔥", "🙏", "👎"];
+
 export type Message = {
   id: string;
   chat_id: string;
@@ -67,21 +87,40 @@ export type Message = {
   sender_username: string;
   content: string;
   created_at: string;
+  edited_at: string | null;
   reply_to: ReplyPreview | null;
+  reactions: Reaction[];
+};
+
+export type Session = {
+  id: string;
+  // "web", "ios", "android", "cli", ...
+  client: string | null;
+  created_at: string;
+  last_used_at: string;
+  current: boolean;
+};
+
+// The account's keys: the private key is encrypted with a key derived
+// from the OstrichID (see crypto.ts).
+export type AccountKeys = {
+  public_key: string;
+  encrypted_private_key: string;
 };
 
 export type AuthResponse = {
   token: string;
   user: User;
-  // Only right after registration, or the first login of an account
-  // created before OstrichIDs. Shown to the user once, never again.
-  ostrich_id?: string;
+  // Login only.
+  keys?: AccountKeys;
 };
 
 export class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
+    // Machine-readable reason, e.g. "upgrade_required".
+    public code?: string,
   ) {
     super(message);
   }
@@ -97,7 +136,7 @@ export class SessionExpiredError extends ApiError {
 const REQUEST_TIMEOUT_MS = 15_000;
 
 async function request<T>(
-  method: "GET" | "POST" | "PUT" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
   options: {
     token?: string;
@@ -107,7 +146,10 @@ async function request<T>(
     timeoutMs?: number;
   } = {},
 ): Promise<T> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = {
+    // Shown in the list of devices in Settings.
+    "X-Ostrich-Client": Platform.OS,
+  };
 
   if (options.file) {
     headers["Content-Type"] = options.file.type;
@@ -156,28 +198,64 @@ async function request<T>(
         data?.message ||
         `Request failed (HTTP ${response.status})`,
       response.status,
+      data?.code,
     );
   }
 
   return data as T;
 }
 
-export function login(username: string, password: string, ostrichId: string) {
+// authKey is derived from the OstrichID. Accounts from before end-to-end
+// encryption answer 409 "upgrade_required" and are logged in again with
+// the raw OstrichID and new keys (upgrade).
+export function login(
+  username: string,
+  password: string,
+  authKey: string,
+  upgrade?: { ostrichId: string; keys: KeyMaterial },
+) {
   return request<AuthResponse>("POST", "/api/auth/login", {
     body: {
       username,
       password,
-      // Left out when empty: accounts created before OstrichIDs log in
-      // without one once.
-      ...(ostrichId ? { ostrich_id: ostrichId } : {}),
+      auth_key: authKey,
+      ...(upgrade
+        ? { ostrich_id: upgrade.ostrichId, keys: upgrade.keys }
+        : {}),
     },
   });
 }
 
-export function register(username: string, password: string) {
+// The OstrichID is generated on the device; only what is derived from it
+// is sent.
+export function register(username: string, password: string, keys: KeyMaterial) {
   return request<AuthResponse>("POST", "/api/auth/register", {
-    body: { username, password },
+    body: { username, password, keys },
   });
+}
+
+// The account's keys, for a logged-in device that does not have them.
+export async function getKeys(token: string) {
+  const { keys } = await request<{ keys: AccountKeys }>("GET", "/api/auth/keys", {
+    token,
+  });
+
+  return keys;
+}
+
+// Sets up encryption for an account from before it.
+export async function upgradeKeys(
+  token: string,
+  ostrichId: string,
+  keys: KeyMaterial,
+) {
+  const { keys: stored } = await request<{ keys: AccountKeys }>(
+    "POST",
+    "/api/auth/keys/upgrade",
+    { token, body: { ostrich_id: ostrichId, keys } },
+  );
+
+  return stored;
 }
 
 export function logout(token: string) {
@@ -253,6 +331,7 @@ export async function createChat(token: string, username: string) {
       username: string;
       avatar_id?: string | null;
       is_developer?: boolean;
+      public_key?: string | null;
       online?: boolean;
       last_seen_at?: string | null;
     };
@@ -265,20 +344,144 @@ export async function createChat(token: string, username: string) {
     username: user.username,
     avatar_id: user.avatar_id ?? null,
     is_developer: user.is_developer ?? false,
+    public_key: user.public_key ?? null,
     online: user.online ?? false,
     last_seen_at: user.last_seen_at ?? null,
     last_message: null,
     unread_count: 0,
     peer_last_read_at: null,
+    pinned: false,
+    muted: false,
+    blocked_by_me: false,
   } satisfies Chat;
 }
 
-export function getMessages(token: string, chatId: string) {
+// The newest messages, or those before the message `before`.
+export function getMessages(token: string, chatId: string, before?: string) {
+  const query = before ? `?before=${encodeURIComponent(before)}` : "";
+
   return request<ChatHistory>(
     "GET",
-    `/api/chats/${encodeURIComponent(chatId)}/messages`,
+    `/api/chats/${encodeURIComponent(chatId)}/messages${query}`,
     { token },
   );
+}
+
+const messagePath = (chatId: string, messageId: string) =>
+  `/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`;
+
+// Own messages only; `content` is encrypted.
+export async function editMessage(
+  token: string,
+  chatId: string,
+  messageId: string,
+  content: string,
+) {
+  const { message } = await request<{ message: Message }>(
+    "PATCH",
+    messagePath(chatId, messageId),
+    { token, body: { content } },
+  );
+
+  return message;
+}
+
+// Own messages, for everyone.
+export function deleteMessage(token: string, chatId: string, messageId: string) {
+  return request<unknown>("DELETE", messagePath(chatId, messageId), { token });
+}
+
+// null removes the user's reaction.
+export async function setReaction(
+  token: string,
+  chatId: string,
+  messageId: string,
+  emoji: string | null,
+) {
+  const { reactions } = await request<{ reactions: Reaction[] }>(
+    "PUT",
+    `${messagePath(chatId, messageId)}/reaction`,
+    { token, body: { emoji } },
+  );
+
+  return reactions;
+}
+
+export function setChatSettings(
+  token: string,
+  chatId: string,
+  settings: { pinned?: boolean; muted?: boolean },
+) {
+  return request<{ pinned: boolean; muted: boolean }>(
+    "PUT",
+    `/api/chats/${encodeURIComponent(chatId)}/settings`,
+    { token, body: settings },
+  );
+}
+
+// For both members, with all messages.
+export function deleteChat(token: string, chatId: string) {
+  return request<unknown>("DELETE", `/api/chats/${encodeURIComponent(chatId)}`, {
+    token,
+  });
+}
+
+export function setBlocked(token: string, userId: string, blocked: boolean) {
+  return request<unknown>(
+    blocked ? "PUT" : "DELETE",
+    `/api/users/${encodeURIComponent(userId)}/block`,
+    { token },
+  );
+}
+
+export async function setPrivacy(
+  token: string,
+  privacy: { show_presence?: boolean; read_receipts?: boolean },
+) {
+  const { user } = await request<{ user: User }>("PUT", "/api/auth/privacy", {
+    token,
+    body: privacy,
+  });
+
+  return user;
+}
+
+export async function getSessions(token: string) {
+  const { sessions } = await request<{ sessions: Session[] }>(
+    "GET",
+    "/api/auth/sessions",
+    { token },
+  );
+
+  return sessions;
+}
+
+export function endSession(token: string, sessionId: string) {
+  return request<unknown>(
+    "DELETE",
+    `/api/auth/sessions/${encodeURIComponent(sessionId)}`,
+    { token },
+  );
+}
+
+// Needs the password and the auth key derived from the OstrichID.
+export function deleteAccount(token: string, password: string, authKey: string) {
+  return request<unknown>("POST", "/api/auth/delete-account", {
+    token,
+    body: { password, auth_key: authKey },
+  });
+}
+
+// Push notifications (mobile apps).
+export function savePushToken(token: string, pushToken: string) {
+  return request<unknown>("PUT", "/api/push/token", {
+    token,
+    body: { token: pushToken },
+  });
+}
+
+export function removePushToken(token: string) {
+  return request<unknown>("DELETE", "/api/push/token", { token });
 }
 
 // Marks the chat read up to and including the message.

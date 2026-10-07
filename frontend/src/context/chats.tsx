@@ -9,10 +9,20 @@ import {
   type ReactNode,
 } from "react";
 import { AppState, Platform } from "react-native";
+import { router } from "expo-router";
 import { useAuth } from "@/context/auth";
 import { useRealtime } from "@/context/realtime";
 import * as api from "@/lib/api";
 import type { Chat, Message } from "@/lib/api";
+import { decryptMessage } from "@/lib/crypto";
+import {
+  showMessageNotification,
+  syncPushToken,
+  useNotificationTaps,
+} from "@/lib/notifications";
+
+// How long "typing…" shows after the last typing event.
+const TYPING_MS = 6000;
 
 type ChatsContextValue = {
   // null until the first load.
@@ -29,6 +39,15 @@ type ChatsContextValue = {
   markChatRead: (chatId: string, message: Message) => void;
   // The other user's read position, from a history load.
   setPeerReadAt: (chatId: string, lastReadAt: string | null) => void;
+  // Chats where the other member is typing.
+  typing: Set<string>;
+  // Pin / mute (for this user).
+  updateChatSettings: (
+    chatId: string,
+    settings: { pinned?: boolean; muted?: boolean },
+  ) => Promise<void>;
+  // Deletes the chat for both members.
+  removeChat: (chatId: string) => Promise<void>;
 };
 
 const ChatsContext = createContext<ChatsContextValue | null>(null);
@@ -38,6 +57,10 @@ const later = (a: string | null, b: string | null) =>
 
 const isAfter = (a: string, b: string | null) =>
   !b || new Date(a).getTime() > new Date(b).getTime();
+
+function openChat(chatId: string) {
+  router.navigate({ pathname: "/chats/[chatId]", params: { chatId } });
+}
 
 // Whether the user can see the app (tab visible / app in the foreground).
 function useAppVisible() {
@@ -66,6 +89,10 @@ function useAppVisible() {
 // sidebar on wide screens.
 export function ChatsProvider({ children }: { children: ReactNode }) {
   const { state, withToken, updateUser } = useAuth();
+  const privateKey = state.status === "signedIn" ? state.privateKey : null;
+  const privateKeyRef = useRef(privateKey);
+  privateKeyRef.current = privateKey;
+  const [typingUntil, setTypingUntil] = useState<Record<string, number>>({});
   const { status, seedPresence, subscribeEvents } = useRealtime();
   const userId = state.status === "signedIn" ? state.user.id : null;
 
@@ -184,7 +211,8 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
               last_message: {
                 id: message.id,
                 sender_id: message.sender_id,
-                content: message.content.slice(0, 200),
+                // Whole: encrypted text cannot be shortened.
+                content: message.content,
                 created_at: message.created_at,
               },
               unread_count:
@@ -197,6 +225,28 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
 
           if (incoming && viewing) {
             sendRead(message.chat_id, message.id);
+          }
+
+          if (incoming) {
+            // The message ends "typing…".
+            setTypingUntil(({ [message.chat_id]: _, ...rest }) => rest);
+
+            const chat = chatsRef.current?.find((c) => c.id === message.chat_id);
+
+            // Web: a browser notification unless the chat is on screen or muted.
+            if (chat && !chat.muted && !viewing) {
+              showMessageNotification(
+                `@${chat.username}`,
+                decryptMessage(
+                  message.content,
+                  privateKeyRef.current,
+                  chat.public_key,
+                  chat.id,
+                ).text,
+                chat.id,
+                openChat,
+              );
+            }
           }
         },
         onRead: ({ chatId, userId: readerId, lastReadAt }) => {
@@ -232,6 +282,54 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
             reload();
           }
         },
+        onEvent: (event) => {
+          switch (event.type) {
+            case "typing":
+              setTypingUntil((current) => ({
+                ...current,
+                [event.chatId]: Date.now() + TYPING_MS,
+              }));
+              break;
+
+            case "message_updated":
+              setChats((current) =>
+                current?.map((chat) =>
+                  chat.last_message?.id === event.message.id
+                    ? {
+                        ...chat,
+                        last_message: {
+                          ...chat.last_message,
+                          content: event.message.content,
+                        },
+                      }
+                    : chat,
+                ) ?? current,
+              );
+              break;
+
+            case "message_deleted":
+              // The preview may need the message before it.
+              if (
+                chatsRef.current?.some(
+                  (chat) => chat.last_message?.id === event.messageId,
+                )
+              ) {
+                reload();
+              }
+              break;
+
+            case "chat_deleted":
+              setChats(
+                (current) =>
+                  current?.filter((chat) => chat.id !== event.chatId) ?? current,
+              );
+              break;
+
+            case "chats_changed":
+              reload();
+              break;
+          }
+        },
         onProfile: ({ userId: changedId, username, avatarId, isDeveloper }) => {
           if (changedId === userId) {
             // Changed on another device; also refreshes the date of the
@@ -257,7 +355,59 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
         },
       }),
     [subscribeEvents, userId, reload, sendRead, withToken, updateUser],
+    // openChat and the refs are stable.
   );
+
+  // "typing…" ends by itself.
+  useEffect(() => {
+    const times = Object.values(typingUntil);
+
+    if (times.length === 0) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      const now = Date.now();
+      setTypingUntil((current) =>
+        Object.fromEntries(Object.entries(current).filter(([, until]) => until > now)),
+      );
+    }, Math.max(0, Math.min(...times) - Date.now()) + 50);
+
+    return () => clearTimeout(timer);
+  }, [typingUntil]);
+
+  const typing = useMemo(() => new Set(Object.keys(typingUntil)), [typingUntil]);
+
+  const updateChatSettings = useCallback(
+    async (chatId: string, settings: { pinned?: boolean; muted?: boolean }) => {
+      setChats(
+        (current) =>
+          current?.map((chat) => (chat.id === chatId ? { ...chat, ...settings } : chat)) ??
+          current,
+      );
+      await withToken((token) => api.setChatSettings(token, chatId, settings));
+      // Pinned chats move to the top.
+      await reload();
+    },
+    [withToken, reload],
+  );
+
+  const removeChat = useCallback(
+    async (chatId: string) => {
+      await withToken((token) => api.deleteChat(token, chatId));
+      setChats((current) => current?.filter((chat) => chat.id !== chatId) ?? current);
+    },
+    [withToken],
+  );
+
+  // Mobile: register for push notifications; tapping one opens its chat.
+  useEffect(() => {
+    if (userId && privateKey) {
+      syncPushToken(withToken);
+    }
+  }, [userId, privateKey, withToken]);
+
+  useNotificationTaps(openChat);
 
   const addChat = useCallback((chat: Chat) => {
     setChats((current) =>
@@ -311,6 +461,9 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
         setActiveChat: setActiveChatId,
         markChatRead,
         setPeerReadAt,
+        typing,
+        updateChatSettings,
+        removeChat,
       }}
     >
       {children}

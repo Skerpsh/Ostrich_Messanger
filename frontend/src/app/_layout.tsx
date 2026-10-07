@@ -62,6 +62,8 @@ function RootNavigator() {
   const signedIn = state.status === "signedIn";
   // A new OstrichID must be saved before anything else.
   const mustSaveOstrichId = signedIn && state.pendingOstrichId !== null;
+  // A device without the account's keys must unlock them first.
+  const mustUnlock = signedIn && !mustSaveOstrichId && state.privateKey === null;
   const baseTheme = mode === "dark" ? DarkTheme : DefaultTheme;
 
   return (
@@ -96,7 +98,11 @@ function RootNavigator() {
           <Stack.Screen name="ostrich-id" />
         </Stack.Protected>
 
-        <Stack.Protected guard={signedIn && !mustSaveOstrichId}>
+        <Stack.Protected guard={mustUnlock}>
+          <Stack.Screen name="unlock" />
+        </Stack.Protected>
+
+        <Stack.Protected guard={signedIn && !mustSaveOstrichId && !mustUnlock}>
           <Stack.Screen name="chats" />
         </Stack.Protected>
       </Stack>

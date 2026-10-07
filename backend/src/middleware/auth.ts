@@ -42,6 +42,8 @@ export async function findSessionByHash(
       users.username,
       users.created_at,
       users.username_changed_at,
+      users.show_presence,
+      users.read_receipts,
       ${PROFILE_COLUMNS},
       sessions.expires_at
     FROM sessions
@@ -57,6 +59,17 @@ export async function findSessionByHash(
   if (!row) {
     return null;
   }
+
+  // For the list of devices; at most every few minutes per session.
+  db.query(
+    `
+    UPDATE sessions
+    SET last_used_at = NOW()
+    WHERE token_hash = $1
+      AND last_used_at < NOW() - INTERVAL '5 minutes'
+    `,
+    [tokenHash],
+  ).catch(() => {});
 
   const { expires_at, ...user } = row;
 

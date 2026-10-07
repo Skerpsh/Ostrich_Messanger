@@ -19,9 +19,9 @@ func validUsername(username string) bool {
 	return usernameRE.MatchString(username)
 }
 
-// OstrichID screen: shown once after registration (or the first login of
-// an account created before OstrichIDs). The server keeps only a hash of
-// the ID, so this is the only chance to save it.
+// OstrichID screen: shown once after registration. The ID is generated on
+// this device and never sent to the server, so this is the only chance to
+// save it.
 
 func (m tuiModel) updateOstrichID(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// A distinct key rather than Enter, so a key still held from the login

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import * as Clipboard from "expo-clipboard";
 import { useRouter } from "expo-router";
@@ -9,6 +9,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   View,
 } from "react-native";
@@ -24,11 +25,23 @@ import { useAppTheme, type ThemePreference } from "@/context/theme";
 import {
   changePassword,
   changeUsername,
+  deleteAccount,
+  endSession,
+  getSessions,
   removeAvatar,
+  setPrivacy,
   uploadAvatar,
+  type Session,
 } from "@/lib/api";
+import { deriveFromOstrichId, normalizeOstrichId } from "@/lib/crypto";
+import {
+  disableNotifications,
+  enableNotifications,
+  notificationsEnabled,
+  notificationsSupported,
+} from "@/lib/notifications";
 import { pickAvatar } from "@/lib/avatar-picker";
-import { formatDate } from "@/lib/format";
+import { formatChatDate, formatDate } from "@/lib/format";
 import { useIsWide } from "@/lib/layout";
 import { accents, radius } from "@/theme/colors";
 
@@ -53,7 +66,7 @@ export default function SettingsScreen() {
   const { signOut, signOutEverywhere } = useAuth();
   const user = useCurrentUser();
 
-  const [open, setOpen] = useState<"username" | "password" | null>(null);
+  const [open, setOpen] = useState<"username" | "password" | "delete" | null>(null);
   const [copied, setCopied] = useState(false);
 
   // Logging out everywhere takes a second tap, so it is not done by accident.
@@ -68,7 +81,7 @@ export default function SettingsScreen() {
   const close = () =>
     wide || !router.canGoBack() ? router.replace("/chats") : router.back();
 
-  const toggle = (section: "username" | "password") =>
+  const toggle = (section: "username" | "password" | "delete") =>
     setOpen((current) => (current === section ? null : section));
 
   const copyUsername = async () => {
@@ -242,6 +255,12 @@ export default function SettingsScreen() {
             {open === "password" ? <PasswordForm /> : null}
           </Section>
 
+          <PrivacySection />
+
+          <NotificationsSection />
+
+          <DevicesSection />
+
           <Section
             title="Security"
             footer="Log out everywhere if you think someone else has access to your account. You will need your username, password and OstrichID to log in again."
@@ -266,6 +285,17 @@ export default function SettingsScreen() {
 
           <Section>
             <Row icon="log-out-outline" label="Log out" onPress={signOut} />
+          </Section>
+
+          <Section title="Danger zone">
+            <Row
+              icon="trash-outline"
+              label="Delete account"
+              danger
+              expanded={open === "delete"}
+              onPress={() => toggle("delete")}
+            />
+            {open === "delete" ? <DeleteAccountForm /> : null}
           </Section>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -352,6 +382,313 @@ function ProfilePhoto() {
       {error ? (
         <Text style={[styles.photoError, { color: colors.danger }]}>{error}</Text>
       ) : null}
+    </View>
+  );
+}
+
+// A row with an on/off switch.
+function ToggleRow({
+  icon,
+  label,
+  hint,
+  value,
+  onChange,
+  disabled = false,
+}: {
+  icon: IconName;
+  label: string;
+  hint?: string;
+  value: boolean;
+  onChange: (value: boolean) => void;
+  disabled?: boolean;
+}) {
+  const { colors } = useAppTheme();
+
+  return (
+    <View style={styles.toggleRow}>
+      <Ionicons name={icon} size={20} color={colors.muted} />
+      <View style={styles.toggleText}>
+        <Text style={[styles.rowLabel, { color: colors.text }]}>{label}</Text>
+        {hint ? (
+          <Text style={[styles.toggleHint, { color: colors.muted }]}>{hint}</Text>
+        ) : null}
+      </View>
+      <Switch
+        value={value}
+        onValueChange={onChange}
+        disabled={disabled}
+        accessibilityLabel={label}
+        trackColor={{ false: colors.panelAlt, true: colors.accent }}
+        thumbColor="#ffffff"
+        {...({ activeThumbColor: "#ffffff" } as object)}
+      />
+    </View>
+  );
+}
+
+function PrivacySection() {
+  const { withToken, updateUser } = useAuth();
+  const user = useCurrentUser();
+  const [error, setError] = useState<string | null>(null);
+  const { colors } = useAppTheme();
+
+  if (!user) {
+    return null;
+  }
+
+  const change = async (privacy: { show_presence?: boolean; read_receipts?: boolean }) => {
+    setError(null);
+    // Show the change right away.
+    await updateUser({ ...user, ...privacy });
+
+    try {
+      await updateUser(await withToken((token) => setPrivacy(token, privacy)));
+    } catch (e) {
+      await updateUser(user);
+      setError(e instanceof Error ? e.message : "Failed to save");
+    }
+  };
+
+  return (
+    <Section title="Privacy">
+      <ToggleRow
+        icon="radio-button-on-outline"
+        label="Show when I'm online"
+        hint="Off: nobody sees your online status or when you were last seen."
+        value={user.show_presence}
+        onChange={(value) => change({ show_presence: value })}
+      />
+      <Divider />
+      <ToggleRow
+        icon="checkmark-done-outline"
+        label="Read receipts"
+        hint="Off: others don't see when you've read their messages, and you don't see theirs."
+        value={user.read_receipts}
+        onChange={(value) => change({ read_receipts: value })}
+      />
+      {error ? (
+        <Text style={[styles.formMessage, styles.inset, { color: colors.danger }]}>{error}</Text>
+      ) : null}
+    </Section>
+  );
+}
+
+function NotificationsSection() {
+  const { withToken } = useAuth();
+  const { colors } = useAppTheme();
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    notificationsEnabled().then(setEnabled);
+  }, []);
+
+  if (!notificationsSupported()) {
+    return null;
+  }
+
+  const change = async (value: boolean) => {
+    setError(null);
+
+    try {
+      if (value) {
+        const granted = await enableNotifications(withToken);
+        setEnabled(granted);
+
+        if (!granted) {
+          setError(
+            Platform.OS === "web"
+              ? "Notifications are blocked for this site. Allow them in the browser's site settings."
+              : "Notifications are turned off for Ostrich in the system settings.",
+          );
+        }
+      } else {
+        await disableNotifications(withToken);
+        setEnabled(false);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to change notifications");
+    }
+  };
+
+  return (
+    <Section
+      title="Notifications"
+      footer={
+        Platform.OS === "web"
+          ? "While Ostrich is open in a tab. Muted chats stay quiet."
+          : "Only “New message”: the text is end-to-end encrypted. Muted chats stay quiet."
+      }
+    >
+      <ToggleRow
+        icon="notifications-outline"
+        label={Platform.OS === "web" ? "Desktop notifications" : "Push notifications"}
+        value={enabled ?? false}
+        disabled={enabled === null}
+        onChange={change}
+      />
+      {error ? (
+        <Text style={[styles.formMessage, styles.inset, { color: colors.danger }]}>{error}</Text>
+      ) : null}
+    </Section>
+  );
+}
+
+const CLIENT_NAMES: Record<string, { name: string; icon: IconName }> = {
+  web: { name: "Web browser", icon: "globe-outline" },
+  ios: { name: "iPhone / iPad", icon: "phone-portrait-outline" },
+  android: { name: "Android", icon: "phone-portrait-outline" },
+  macos: { name: "Mac", icon: "laptop-outline" },
+  windows: { name: "Windows", icon: "laptop-outline" },
+  cli: { name: "Terminal (CLI)", icon: "terminal-outline" },
+};
+
+function DevicesSection() {
+  const { withToken } = useAuth();
+  const { colors } = useAppTheme();
+  const [sessions, setSessions] = useState<Session[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setSessions(await withToken(getSessions));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load devices");
+    }
+  }, [withToken]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const end = async (session: Session) => {
+    try {
+      await withToken((token) => endSession(token, session.id));
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to log out the device");
+    }
+  };
+
+  return (
+    <Section title="Devices">
+      {sessions === null ? (
+        <ActivityIndicator color={colors.muted} style={styles.loadingRow} />
+      ) : (
+        sessions.map((session, index) => {
+          const client = CLIENT_NAMES[session.client ?? ""] ?? {
+            name: "Unknown app",
+            icon: "help-circle-outline" as IconName,
+          };
+
+          return (
+            <View key={session.id}>
+              {index > 0 ? <Divider /> : null}
+              <View style={styles.deviceRow}>
+                <Ionicons name={client.icon} size={20} color={colors.muted} />
+                <View style={styles.toggleText}>
+                  <Text style={[styles.rowLabel, { color: colors.text }]}>{client.name}</Text>
+                  <Text style={[styles.toggleHint, { color: session.current ? colors.online : colors.muted }]}>
+                    {session.current
+                      ? "This device"
+                      : `Active ${formatChatDate(session.last_used_at)} · since ${formatDate(session.created_at)}`}
+                  </Text>
+                </View>
+                {session.current ? null : (
+                  <Button
+                    title="Log out"
+                    variant="secondary"
+                    onPress={() => end(session)}
+                    style={styles.deviceButton}
+                  />
+                )}
+              </View>
+            </View>
+          );
+        })
+      )}
+      {error ? (
+        <Text style={[styles.formMessage, styles.inset, { color: colors.danger }]}>{error}</Text>
+      ) : null}
+    </Section>
+  );
+}
+
+// Needs the password and the OstrichID: deleting is final.
+function DeleteAccountForm() {
+  const { colors } = useAppTheme();
+  const { state, withToken, signOut } = useAuth();
+  const [password, setPassword] = useState("");
+  const [ostrichId, setOstrichId] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const submit = async () => {
+    setError(null);
+    const id = normalizeOstrichId(ostrichId);
+
+    if (!password || !id) {
+      setError("Enter your password and OstrichID");
+      return;
+    }
+
+    if (!confirming) {
+      setConfirming(true);
+      return;
+    }
+
+    setDeleting(true);
+
+    try {
+      await withToken((token) =>
+        deleteAccount(token, password, deriveFromOstrichId(id).authKey),
+      );
+      await signOut();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to delete the account");
+      setDeleting(false);
+      setConfirming(false);
+    }
+  };
+
+  if (state.status !== "signedIn") {
+    return null;
+  }
+
+  return (
+    <View style={styles.form}>
+      <Text style={[styles.formText, { color: colors.textSoft }]}>
+        Deletes your account, all your chats (for the people you talk to as
+        well) and your messages. This cannot be undone. Your username becomes
+        free for others.
+      </Text>
+      <TextField
+        label="Password"
+        value={password}
+        onChangeText={setPassword}
+        secureTextEntry
+        autoComplete="current-password"
+        maxLength={MAX_PASSWORD}
+      />
+      <TextField
+        label="OstrichID"
+        placeholder="XXXX-XXXX-XXXX-XXXX-XXXX"
+        value={ostrichId}
+        onChangeText={setOstrichId}
+        autoCapitalize="characters"
+        autoComplete="off"
+        maxLength={40}
+      />
+      {error ? (
+        <Text style={[styles.formMessage, { color: colors.danger }]}>{error}</Text>
+      ) : null}
+      <Button
+        title={confirming ? "Delete forever?" : "Delete account"}
+        variant="danger"
+        loading={deleting}
+        onPress={submit}
+      />
     </View>
   );
 }
@@ -823,6 +1160,42 @@ const styles = StyleSheet.create({
   rowValue: {
     fontSize: 15,
     maxWidth: "50%",
+  },
+
+  toggleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    minHeight: 56,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+
+  toggleText: {
+    flex: 1,
+    gap: 2,
+  },
+
+  toggleHint: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+
+  deviceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+
+  deviceButton: {
+    minHeight: 36,
+    paddingHorizontal: 14,
+  },
+
+  loadingRow: {
+    padding: 16,
   },
 
   divider: {

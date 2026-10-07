@@ -18,6 +18,7 @@ import {
 import {
   RealtimeConnection,
   type ConnectionStatus,
+  type ChatEvent,
   type PresenceEvent,
   type ProfileEvent,
   type ReadEvent,
@@ -35,9 +36,10 @@ type ChatListener = {
 
 // Receives the events of all chats (for the chats list).
 export type EventListener = {
-  onMessage: (message: Message) => void;
-  onRead: (event: ReadEvent) => void;
-  onProfile: (event: ProfileEvent) => void;
+  onMessage?: (message: Message) => void;
+  onRead?: (event: ReadEvent) => void;
+  onProfile?: (event: ProfileEvent) => void;
+  onEvent?: (event: ChatEvent) => void;
 };
 
 type RealtimeContextValue = {
@@ -49,6 +51,8 @@ type RealtimeContextValue = {
   subscribeChat: (chatId: string, listener: ChatListener) => () => void;
   // Receive all chats' events while the returned function is not called.
   subscribeEvents: (listener: EventListener) => () => void;
+  // "typing…" in the chat, for the other member.
+  sendTyping: (chatId: string) => void;
 };
 
 const RealtimeContext = createContext<RealtimeContextValue | null>(null);
@@ -87,17 +91,22 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         }
 
         for (const listener of eventListeners) {
-          listener.onMessage(message);
+          listener.onMessage?.(message);
         }
       },
       onRead: (event) => {
         for (const listener of eventListeners) {
-          listener.onRead(event);
+          listener.onRead?.(event);
         }
       },
       onProfile: (event) => {
         for (const listener of eventListeners) {
-          listener.onProfile(event);
+          listener.onProfile?.(event);
+        }
+      },
+      onEvent: (event) => {
+        for (const listener of eventListeners) {
+          listener.onEvent?.(event);
         }
       },
       onPresence: ({ userId, online, lastSeenAt }: PresenceEvent) =>
@@ -196,9 +205,20 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  const sendTyping = useCallback((chatId: string) => {
+    connectionRef.current?.typing(chatId);
+  }, []);
+
   return (
     <RealtimeContext
-      value={{ status, presence, seedPresence, subscribeChat, subscribeEvents }}
+      value={{
+        status,
+        presence,
+        seedPresence,
+        subscribeChat,
+        subscribeEvents,
+        sendTyping,
+      }}
     >
       {children}
     </RealtimeContext>

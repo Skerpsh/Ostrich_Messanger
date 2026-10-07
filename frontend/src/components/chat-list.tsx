@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "expo-router";
 import {
   ActivityIndicator,
   FlatList,
+  Modal,
   Platform,
   Pressable,
   RefreshControl,
@@ -15,6 +16,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AppHeader from "@/components/app-header";
+import ActionMenu from "@/components/action-menu";
 import Avatar from "@/components/avatar";
 import DevBadge from "@/components/dev-badge";
 import IconButton from "@/components/icon-button";
@@ -26,6 +28,7 @@ import { useAppTheme } from "@/context/theme";
 import { createChat, type Chat } from "@/lib/api";
 import { formatChatDate, previewText } from "@/lib/format";
 import { useIsWide } from "@/lib/layout";
+import { useChatCrypto } from "@/lib/use-chat-crypto";
 import { useMinuteTick } from "@/lib/use-minute-tick";
 import { radius } from "@/theme/colors";
 
@@ -41,7 +44,10 @@ export default function ChatList() {
   const wide = useIsWide();
   const { withToken } = useAuth();
   const user = useCurrentUser();
-  const { chats, error, reload, addChat } = useChats();
+  const { chats, error, reload, addChat, typing, updateChatSettings, removeChat } =
+    useChats();
+  // The chat whose actions are shown (long press / right click).
+  const [menuFor, setMenuFor] = useState<Chat | null>(null);
   const { status, presence, seedPresence } = useRealtime();
   useMinuteTick();
 
@@ -276,11 +282,60 @@ export default function ChatList() {
             chat={item}
             ownId={user.id}
             online={status === "online" && Boolean(presence[item.user_id]?.online)}
+            typing={typing.has(item.id)}
             selected={wide && item.id === selectedId}
             onPress={() => openChat(item)}
+            onMenu={() => setMenuFor(item)}
           />
         )}
       />
+
+      <Modal
+        visible={menuFor !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setMenuFor(null)}
+      >
+        {menuFor ? (
+          <ActionMenu
+            title={`@${menuFor.username}`}
+            onClose={() => setMenuFor(null)}
+            items={[
+              {
+                icon: menuFor.pinned ? "pin" : "pin-outline",
+                label: menuFor.pinned ? "Unpin" : "Pin to top",
+                onPress: () => {
+                  setMenuFor(null);
+                  updateChatSettings(menuFor.id, { pinned: !menuFor.pinned });
+                },
+              },
+              {
+                icon: menuFor.muted ? "notifications-outline" : "notifications-off-outline",
+                label: menuFor.muted ? "Unmute" : "Mute",
+                onPress: () => {
+                  setMenuFor(null);
+                  updateChatSettings(menuFor.id, { muted: !menuFor.muted });
+                },
+              },
+              {
+                icon: "trash-outline",
+                label: "Delete chat",
+                confirmLabel: "Delete for both of you?",
+                danger: true,
+                onPress: () => {
+                  const chatId = menuFor.id;
+                  setMenuFor(null);
+                  removeChat(chatId).then(() => {
+                    if (selectedId === chatId) {
+                      router.replace("/chats");
+                    }
+                  });
+                },
+              },
+            ]}
+          />
+        ) : null}
+      </Modal>
     </View>
   );
 }
@@ -289,16 +344,22 @@ function ChatRow({
   chat,
   ownId,
   online,
+  typing,
   selected,
   onPress,
+  onMenu,
 }: {
   chat: Chat;
   ownId: string;
   online: boolean;
+  typing: boolean;
   selected: boolean;
   onPress: () => void;
+  // Long press / right click: pin, mute, delete.
+  onMenu: () => void;
 }) {
   const { colors } = useAppTheme();
+  const { decrypt } = useChatCrypto(chat);
   const last = chat.last_message;
   const own = last?.sender_id === ownId;
   const read =
@@ -309,6 +370,14 @@ function ChatRow({
   return (
     <Pressable
       onPress={onPress}
+      onLongPress={onMenu}
+      // Web: right click opens the menu instead of the browser's.
+      {...({
+        onContextMenu: (event: { preventDefault: () => void }) => {
+          event.preventDefault();
+          onMenu();
+        },
+      } as object)}
       accessibilityRole="button"
       accessibilityLabel={`Chat with ${chat.username}${chat.unread_count ? `, ${chat.unread_count} unread` : ""}`}
       style={({ hovered, pressed }) => [
@@ -331,6 +400,14 @@ function ChatRow({
               {chat.username}
             </Text>
             {chat.is_developer ? <DevBadge /> : null}
+            {chat.muted ? (
+              <Ionicons
+                name="notifications-off"
+                size={14}
+                color={colors.muted}
+                accessibilityLabel="muted"
+              />
+            ) : null}
           </View>
           <View style={styles.meta}>
             {own ? (
@@ -347,18 +424,34 @@ function ChatRow({
         </View>
         <View style={styles.rowLine}>
           <Text numberOfLines={1} style={[styles.preview, { color: colors.muted }]}>
-            {last ? (
+            {typing ? (
+              <Text style={{ color: colors.accent }}>typing…</Text>
+            ) : last ? (
               <>
                 {own ? <Text style={{ color: colors.textSoft }}>You: </Text> : null}
-                {previewText(last.content)}
+                {previewText(decrypt(last.content).text)}
               </>
             ) : (
               <Text style={styles.italic}>No messages yet</Text>
             )}
           </Text>
+          {chat.pinned && chat.unread_count === 0 ? (
+            <Ionicons name="pin" size={14} color={colors.muted} accessibilityLabel="pinned" />
+          ) : null}
           {chat.unread_count > 0 ? (
-            <View style={[styles.badge, { backgroundColor: colors.accent }]}>
-              <Text style={[styles.badgeText, { color: colors.onAccent }]}>
+            <View
+              style={[
+                styles.badge,
+                // Muted chats count quietly.
+                { backgroundColor: chat.muted ? colors.muted : colors.accent },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.badgeText,
+                  { color: chat.muted ? colors.bg : colors.onAccent },
+                ]}
+              >
                 {chat.unread_count > 99 ? "99+" : chat.unread_count}
               </Text>
             </View>

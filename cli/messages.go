@@ -15,6 +15,9 @@ type Message struct {
 
 	// The message this one replies to, if any.
 	ReplyTo *ReplyPreview `json:"reply_to"`
+
+	EditedAt  *string    `json:"edited_at"`
+	Reactions []Reaction `json:"reactions"`
 }
 
 type MessagesResponse struct {

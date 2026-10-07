@@ -4,11 +4,15 @@ import { authenticate } from "../middleware/auth.js";
 import {
   CREATE_MESSAGE_ERRORS,
   createMessage,
+  getMessage,
   MAX_MESSAGE_LENGTH,
-  REPLY_COLUMNS,
+  MESSAGE_PATTERN,
+  MESSAGE_SELECT,
+  REACTIONS,
   withReply,
 } from "../messages.js";
-import { sendToChatMembers } from "../realtime.js";
+import { notifyNewMessage } from "../push.js";
+import { sendToChatMembers, sendToUserSockets } from "../realtime.js";
 
 const chatParamsSchema = {
   type: "object",
@@ -38,6 +42,17 @@ type ChatParams = {
   chatId: string;
 };
 
+type MessageParams = ChatParams & { messageId: string };
+
+const messageParamsSchema = {
+  type: "object",
+  required: ["chatId", "messageId"],
+  properties: {
+    chatId: { type: "string", format: "uuid" },
+    messageId: { type: "string", format: "uuid" },
+  },
+} as const;
+
 export default async function messagesRoutes(server: FastifyInstance) {
   // SEND MESSAGE
   server.post<{
@@ -57,6 +72,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
             content: {
               type: "string",
               maxLength: MAX_MESSAGE_LENGTH,
+              pattern: MESSAGE_PATTERN,
             },
             // Id of the message (in this chat) this one replies to.
             reply_to: { type: "string", format: "uuid" },
@@ -88,6 +104,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
       }
 
       const { message } = result;
+      notifyNewMessage(chatId, request.user.id);
 
       // Deliver to clients connected over websocket.
       await sendToChatMembers(chatId, {
@@ -101,8 +118,12 @@ export default async function messagesRoutes(server: FastifyInstance) {
     },
   );
 
-  // GET MESSAGES (the latest `limit` messages, oldest first)
-  server.get<{ Params: ChatParams; Querystring: { limit: number } }>(
+  // GET MESSAGES: the newest `limit` messages, or the `limit` messages
+  // before the message `before` (loading older history); oldest first.
+  server.get<{
+    Params: ChatParams;
+    Querystring: { limit: number; before?: string };
+  }>(
     "/api/chats/:chatId/messages",
     {
       preHandler: authenticate,
@@ -114,15 +135,17 @@ export default async function messagesRoutes(server: FastifyInstance) {
             limit: {
               type: "integer",
               minimum: 1,
-              maximum: 1000,
-              default: 200,
+              maximum: 500,
+              default: 100,
             },
+            before: { type: "string", format: "uuid" },
           },
         },
       },
     },
     async (request, reply) => {
       const { chatId } = request.params;
+      const { limit, before } = request.query;
 
       if (!(await isChatMember(chatId, request.user.id))) {
         return reply.status(403).send({
@@ -130,49 +153,209 @@ export default async function messagesRoutes(server: FastifyInstance) {
         });
       }
 
+      // One more than asked, to tell whether there is older history.
       const result = await db.query(
         `
         SELECT *
         FROM (
-          SELECT
-            messages.id,
-            messages.chat_id,
-            messages.sender_id,
-            users.username AS sender_username,
-            messages.content,
-            messages.created_at,
-            ${REPLY_COLUMNS}
-          FROM messages
-          JOIN users ON users.id = messages.sender_id
-          LEFT JOIN messages reply ON reply.id = messages.reply_to_id
-          LEFT JOIN users reply_sender ON reply_sender.id = reply.sender_id
-          WHERE messages.chat_id = $1
-          ORDER BY messages.created_at DESC, messages.id DESC
-          LIMIT $2
+          ${MESSAGE_SELECT}
+          WHERE m.chat_id = $1
+            AND (
+              $3::uuid IS NULL
+              OR (m.created_at, m.id) < (
+                SELECT created_at, id FROM messages WHERE id = $3 AND chat_id = $1
+              )
+            )
+          ORDER BY m.created_at DESC, m.id DESC
+          LIMIT $2 + 1
         ) latest
         ORDER BY created_at ASC, id ASC
         `,
-        [chatId, request.query.limit],
+        [chatId, limit, before ?? null],
       );
 
+      const hasMore = result.rows.length > limit;
+      const rows = hasMore ? result.rows.slice(1) : result.rows;
+
       // Read positions: the user's own (where unread messages start) and
-      // the other member's (which of the user's messages have been read).
+      // the other member's (which of the user's messages have been read),
+      // unless either has turned read receipts off.
       const reads = await db.query(
         `
         SELECT
-          MAX(last_read_at) FILTER (WHERE user_id = $2) AS last_read_at,
-          MAX(last_read_at) FILTER (WHERE user_id <> $2) AS peer_last_read_at
-        FROM chat_members
-        WHERE chat_id = $1
+          MAX(cm.last_read_at) FILTER (WHERE cm.user_id = $2) AS last_read_at,
+          MAX(cm.last_read_at) FILTER (WHERE cm.user_id <> $2) AS peer_last_read_at,
+          BOOL_AND(u.read_receipts) AS receipts
+        FROM chat_members cm
+        JOIN users u ON u.id = cm.user_id
+        WHERE cm.chat_id = $1
         `,
         [chatId, request.user.id],
       );
 
+      const { last_read_at, peer_last_read_at, receipts } = reads.rows[0];
+
       return reply.send({
-        messages: result.rows.map(withReply),
-        last_read_at: reads.rows[0].last_read_at,
-        peer_last_read_at: reads.rows[0].peer_last_read_at,
+        messages: rows.map(withReply),
+        has_more: hasMore,
+        last_read_at,
+        peer_last_read_at: receipts ? peer_last_read_at : null,
       });
+    },
+  );
+
+  // EDIT MESSAGE: own messages only; the new text is encrypted too.
+  server.patch<{ Params: MessageParams; Body: { content: string } }>(
+    "/api/chats/:chatId/messages/:messageId",
+    {
+      preHandler: authenticate,
+      config: sendRateLimit,
+      schema: {
+        params: messageParamsSchema,
+        body: {
+          type: "object",
+          required: ["content"],
+          properties: {
+            content: {
+              type: "string",
+              maxLength: MAX_MESSAGE_LENGTH,
+              pattern: MESSAGE_PATTERN,
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { chatId, messageId } = request.params;
+
+      const result = await db.query(
+        `
+        UPDATE messages
+        SET content = $4, edited_at = NOW()
+        WHERE id = $1
+          AND chat_id = $2
+          AND sender_id = $3
+        RETURNING id
+        `,
+        [messageId, chatId, request.user.id, request.body.content],
+      );
+
+      if (result.rows.length === 0) {
+        return reply.status(404).send({
+          error: "You can only edit your own messages",
+        });
+      }
+
+      const message = await getMessage(messageId);
+      await sendToChatMembers(chatId, { type: "message_updated", message });
+
+      return { message };
+    },
+  );
+
+  // DELETE MESSAGE: own messages, for everyone.
+  server.delete<{ Params: MessageParams }>(
+    "/api/chats/:chatId/messages/:messageId",
+    {
+      preHandler: authenticate,
+      config: sendRateLimit,
+      schema: { params: messageParamsSchema },
+    },
+    async (request, reply) => {
+      const { chatId, messageId } = request.params;
+
+      const result = await db.query(
+        `
+        DELETE FROM messages
+        WHERE id = $1
+          AND chat_id = $2
+          AND sender_id = $3
+        RETURNING id
+        `,
+        [messageId, chatId, request.user.id],
+      );
+
+      if (result.rows.length === 0) {
+        return reply.status(404).send({
+          error: "You can only delete your own messages",
+        });
+      }
+
+      await sendToChatMembers(chatId, {
+        type: "message_deleted",
+        chatId,
+        messageId,
+      });
+
+      return { deleted: true };
+    },
+  );
+
+  // REACT: sets (or replaces) the user's reaction; emoji null removes it.
+  server.put<{ Params: MessageParams; Body: { emoji: string | null } }>(
+    "/api/chats/:chatId/messages/:messageId/reaction",
+    {
+      preHandler: authenticate,
+      config: readRateLimit,
+      schema: {
+        params: messageParamsSchema,
+        body: {
+          type: "object",
+          required: ["emoji"],
+          properties: {
+            emoji: { type: ["string", "null"], enum: [...REACTIONS, null] },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { chatId, messageId } = request.params;
+      const { emoji } = request.body;
+
+      const target = await db.query(
+        `
+        SELECT 1
+        FROM messages
+        JOIN chat_members ON chat_members.chat_id = messages.chat_id
+        WHERE messages.id = $1
+          AND messages.chat_id = $2
+          AND chat_members.user_id = $3
+        `,
+        [messageId, chatId, request.user.id],
+      );
+
+      if (target.rows.length === 0) {
+        return reply.status(404).send({
+          error: "Message not found in this chat",
+        });
+      }
+
+      if (emoji === null) {
+        await db.query(
+          "DELETE FROM message_reactions WHERE message_id = $1 AND user_id = $2",
+          [messageId, request.user.id],
+        );
+      } else {
+        await db.query(
+          `
+          INSERT INTO message_reactions (message_id, user_id, emoji)
+          VALUES ($1, $2, $3)
+          ON CONFLICT (message_id, user_id)
+          DO UPDATE SET emoji = EXCLUDED.emoji, created_at = NOW()
+          `,
+          [messageId, request.user.id, emoji],
+        );
+      }
+
+      const message = await getMessage(messageId);
+      await sendToChatMembers(chatId, {
+        type: "reactions",
+        chatId,
+        messageId,
+        reactions: message?.reactions ?? [],
+      });
+
+      return { reactions: message?.reactions ?? [] };
     },
   );
 
@@ -218,15 +401,26 @@ export default async function messagesRoutes(server: FastifyInstance) {
       }
 
       const lastReadAt = result.rows[0].last_read_at;
+      const event = { type: "read", chatId, userId: request.user.id, lastReadAt };
 
       // Other devices of the user clear their unread count; the other
-      // member sees their messages as read.
-      await sendToChatMembers(chatId, {
-        type: "read",
-        chatId,
-        userId: request.user.id,
-        lastReadAt,
-      });
+      // member sees their messages as read, unless either has turned read
+      // receipts off.
+      const receipts = await db.query(
+        `
+        SELECT BOOL_AND(users.read_receipts) AS on
+        FROM chat_members
+        JOIN users ON users.id = chat_members.user_id
+        WHERE chat_members.chat_id = $1
+        `,
+        [chatId],
+      );
+
+      if (receipts.rows[0].on) {
+        await sendToChatMembers(chatId, event);
+      } else {
+        sendToUserSockets(request.user.id, event);
+      }
 
       return reply.send({
         last_read_at: lastReadAt,

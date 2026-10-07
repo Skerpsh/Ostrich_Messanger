@@ -7,14 +7,27 @@ import {
   type ReactNode,
 } from "react";
 import * as api from "@/lib/api";
+import {
+  createAccountKeys,
+  deriveFromOstrichId,
+  formatOstrichId,
+  fromBase64,
+  generateOstrichId,
+  normalizeOstrichId,
+  openPrivateKey,
+  toBase64,
+} from "@/lib/crypto";
 import { getItem, removeItem, setItem } from "@/lib/storage";
 
 const TOKEN_KEY = "ostrich-token";
 const USER_KEY = "ostrich-user";
 // An OstrichID the user has not confirmed saving yet. Kept on the device
 // until then, so it is not lost if the app closes on the screen showing it
-// (the server cannot show it again).
+// (nobody can show it again).
 const PENDING_OSTRICH_ID_KEY = "ostrich-pending-id";
+// The account's private key (decrypted), so the device can read messages
+// without asking for the OstrichID every time. Removed on logout.
+const PRIVATE_KEY_KEY = "ostrich-private-key";
 
 type AuthState =
   | { status: "loading" }
@@ -25,6 +38,9 @@ type AuthState =
       user: api.User;
       // Shown until the user confirms they have saved it.
       pendingOstrichId: string | null;
+      // null: this device has no keys yet (logged in before end-to-end
+      // encryption); the OstrichID unlocks them.
+      privateKey: Uint8Array | null;
     };
 
 type AuthContextValue = {
@@ -37,6 +53,8 @@ type AuthContextValue = {
     ostrichId: string,
   ) => Promise<void>;
   signUp: (username: string, password: string) => Promise<void>;
+  // Gets the account's keys onto this device with the OstrichID.
+  unlock: (ostrichId: string) => Promise<void>;
   signOut: () => Promise<void>;
   // Ends all sessions of the user (every device), then signs out here.
   signOutEverywhere: () => Promise<void>;
@@ -50,6 +68,21 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+const WRONG_ID = "Invalid username, password or OstrichID";
+
+function parseOstrichId(input: string) {
+  const id = normalizeOstrichId(input);
+
+  if (!id) {
+    throw new api.ApiError(
+      "An OstrichID has 20 letters and digits, like XXXX-XXXX-XXXX-XXXX-XXXX",
+      400,
+    );
+  }
+
+  return id;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({ status: "loading" });
   const [notice, setNotice] = useState<string | null>(null);
@@ -59,6 +92,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       removeItem(TOKEN_KEY),
       removeItem(USER_KEY),
       removeItem(PENDING_OSTRICH_ID_KEY),
+      removeItem(PRIVATE_KEY_KEY),
     ]);
     setState({ status: "signedOut" });
   }, []);
@@ -66,10 +100,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Restore the saved session on startup.
   useEffect(() => {
     (async () => {
-      const [token, savedUser, pendingOstrichId] = await Promise.all([
+      const [token, savedUser, pendingOstrichId, savedKey] = await Promise.all([
         getItem(TOKEN_KEY),
         getItem(USER_KEY),
         getItem(PENDING_OSTRICH_ID_KEY),
+        getItem(PRIVATE_KEY_KEY),
       ]);
 
       if (!token || !savedUser) {
@@ -77,10 +112,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
+      const privateKey = savedKey ? fromBase64(savedKey) : null;
+
       try {
         const user = await api.getMe(token);
         await setItem(USER_KEY, JSON.stringify(user));
-        setState({ status: "signedIn", token, user, pendingOstrichId });
+        setState({ status: "signedIn", token, user, pendingOstrichId, privateKey });
       } catch (error) {
         if (error instanceof api.SessionExpiredError) {
           setNotice(error.message);
@@ -94,38 +131,111 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           token,
           user: JSON.parse(savedUser),
           pendingOstrichId,
+          privateKey,
         });
       }
     })();
   }, [clearSession]);
 
-  const startSession = async ({ token, user, ostrich_id }: api.AuthResponse) => {
+  const startSession = async (
+    { token, user }: api.AuthResponse,
+    privateKey: Uint8Array,
+    pendingOstrichId: string | null,
+  ) => {
     await Promise.all([
       setItem(TOKEN_KEY, token),
       setItem(USER_KEY, JSON.stringify(user)),
-      ostrich_id
-        ? setItem(PENDING_OSTRICH_ID_KEY, ostrich_id)
+      setItem(PRIVATE_KEY_KEY, toBase64(privateKey)),
+      pendingOstrichId
+        ? setItem(PENDING_OSTRICH_ID_KEY, pendingOstrichId)
         : removeItem(PENDING_OSTRICH_ID_KEY),
     ]);
     setNotice(null);
-    setState({
-      status: "signedIn",
-      token,
-      user,
-      pendingOstrichId: ostrich_id ?? null,
-    });
+    setState({ status: "signedIn", token, user, pendingOstrichId, privateKey });
   };
 
   const signIn = async (
     username: string,
     password: string,
-    ostrichId: string,
+    ostrichIdInput: string,
   ) => {
-    await startSession(await api.login(username, password, ostrichId));
+    const ostrichId = parseOstrichId(ostrichIdInput);
+    const derived = deriveFromOstrichId(ostrichId);
+
+    let response: api.AuthResponse;
+
+    try {
+      response = await api.login(username, password, derived.authKey);
+    } catch (error) {
+      if (!(error instanceof api.ApiError) || error.code !== "upgrade_required") {
+        throw error;
+      }
+
+      // An account from before end-to-end encryption: set it up now.
+      response = await api.login(username, password, derived.authKey, {
+        ostrichId,
+        keys: createAccountKeys(derived).material,
+      });
+    }
+
+    let privateKey: Uint8Array;
+
+    try {
+      privateKey = openPrivateKey(derived, response.keys!.encrypted_private_key);
+    } catch {
+      throw new api.ApiError(WRONG_ID, 401);
+    }
+
+    await startSession(response, privateKey, null);
   };
 
   const signUp = async (username: string, password: string) => {
-    await startSession(await api.register(username, password));
+    const ostrichId = generateOstrichId();
+    const { material, privateKey } = createAccountKeys(
+      deriveFromOstrichId(ostrichId),
+    );
+
+    const response = await api.register(username, password, material);
+    await startSession(response, privateKey, formatOstrichId(ostrichId));
+  };
+
+  const unlock = async (ostrichIdInput: string) => {
+    if (state.status !== "signedIn") {
+      return;
+    }
+
+    const ostrichId = parseOstrichId(ostrichIdInput);
+    const derived = deriveFromOstrichId(ostrichId);
+    const token = state.token;
+
+    let keys: api.AccountKeys;
+
+    try {
+      keys = await api.getKeys(token);
+    } catch (error) {
+      if (!(error instanceof api.ApiError) || error.code !== "upgrade_required") {
+        throw error;
+      }
+
+      keys = await api.upgradeKeys(
+        token,
+        ostrichId,
+        createAccountKeys(derived).material,
+      );
+    }
+
+    let privateKey: Uint8Array;
+
+    try {
+      privateKey = openPrivateKey(derived, keys.encrypted_private_key);
+    } catch {
+      throw new api.ApiError("Wrong OstrichID", 401);
+    }
+
+    await setItem(PRIVATE_KEY_KEY, toBase64(privateKey));
+    setState((current) =>
+      current.status === "signedIn" ? { ...current, privateKey } : current,
+    );
   };
 
   const signOut = async () => {
@@ -192,6 +302,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         notice,
         signIn,
         signUp,
+        unlock,
         signOut,
         signOutEverywhere,
         confirmOstrichIdSaved,
@@ -220,4 +331,11 @@ export function useCurrentUser() {
   const { state } = useAuth();
 
   return state.status === "signedIn" ? state.user : null;
+}
+
+// The account's private key on this device, or null.
+export function usePrivateKey() {
+  const { state } = useAuth();
+
+  return state.status === "signedIn" ? state.privateKey : null;
 }

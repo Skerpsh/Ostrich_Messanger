@@ -18,6 +18,7 @@ import {
   type TextInputKeyPressEventData,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import ActionMenu from "@/components/action-menu";
 import AppHeader from "@/components/app-header";
 import Avatar from "@/components/avatar";
 import Button from "@/components/button";
@@ -28,7 +29,17 @@ import { useAuth, useCurrentUser } from "@/context/auth";
 import { useChats } from "@/context/chats";
 import { usePresence, useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
-import { getMessages, sendMessage, type Message } from "@/lib/api";
+import {
+  deleteMessage,
+  editMessage,
+  getMessages,
+  REACTIONS,
+  sendMessage,
+  setBlocked,
+  setReaction,
+  type Message,
+  type Reaction,
+} from "@/lib/api";
 import {
   formatDayLabel,
   formatPresence,
@@ -36,6 +47,7 @@ import {
   previewText,
 } from "@/lib/format";
 import { useIsWide } from "@/lib/layout";
+import { useChatCrypto } from "@/lib/use-chat-crypto";
 import { useMinuteTick } from "@/lib/use-minute-tick";
 import { radius } from "@/theme/colors";
 
@@ -160,8 +172,17 @@ export default function ChatScreen() {
   const wide = useIsWide();
   const { withToken } = useAuth();
   const user = useCurrentUser();
-  const { status, subscribeChat } = useRealtime();
-  const { chats, setActiveChat, markChatRead, setPeerReadAt } = useChats();
+  const { status, subscribeChat, subscribeEvents, sendTyping } = useRealtime();
+  const {
+    chats,
+    setActiveChat,
+    markChatRead,
+    setPeerReadAt,
+    typing,
+    updateChatSettings,
+    removeChat,
+    reload: reloadChats,
+  } = useChats();
   useMinuteTick();
 
   const { chatId } = useLocalSearchParams<{ chatId: string }>();
@@ -170,6 +191,7 @@ export default function ChatScreen() {
   // URL: anyone can craft a link with a misleading name.
   const chat = chats?.find((c) => c.id === chatId) ?? null;
   const peerPresence = usePresence(chat?.user_id);
+  const crypto = useChatCrypto(chat);
 
   const [messages, setMessages] = useState<Message[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -185,6 +207,18 @@ export default function ChatScreen() {
   const [menuFor, setMenuFor] = useState<Message | null>(null);
   // Briefly highlighted after jumping to it from a quote.
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  // Older history (loaded while scrolling up).
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  // The own message being edited in the composer.
+  const [editing, setEditing] = useState<Message | null>(null);
+  // The chat's menu (search, pin, mute, block, delete).
+  const [chatMenu, setChatMenu] = useState(false);
+  // Search in the loaded messages.
+  const [searching, setSearching] = useState(false);
+  const [query, setQuery] = useState("");
+  const [matchIndex, setMatchIndex] = useState(0);
+  const lastTypingSent = useRef(0);
 
   const inputRef = useRef<TextInput>(null);
   const listRef = useRef<FlatList<Row>>(null);
@@ -199,6 +233,10 @@ export default function ChatScreen() {
     setError(null);
     setUnreadAfter(null);
     setReplyTo(null);
+    setEditing(null);
+    setSearching(false);
+    setQuery("");
+    setHasMore(false);
     firstLoad.current = true;
   }, [chatId]);
 
@@ -218,6 +256,7 @@ export default function ChatScreen() {
       if (firstLoad.current) {
         firstLoad.current = false;
         setUnreadAfter(history.last_read_at);
+        setHasMore(history.has_more);
       }
 
       const newest = history.messages[history.messages.length - 1];
@@ -236,6 +275,53 @@ export default function ChatScreen() {
     }
   }, [chatId, withToken, setPeerReadAt, markChatRead, user?.id]);
 
+  // Older messages, when scrolled to the top of what is loaded.
+  const loadOlder = useCallback(async () => {
+    const oldest = messages?.[0];
+
+    if (!hasMore || loadingOlder || !oldest) {
+      return;
+    }
+
+    setLoadingOlder(true);
+
+    try {
+      const history = await withToken((t) => getMessages(t, chatId, oldest.id));
+      setMessages((current) => mergeMessages(current ?? [], history.messages));
+      setHasMore(history.has_more);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load messages");
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [messages, hasMore, loadingOlder, withToken, chatId]);
+
+  // Edits, deletions and reactions from any device; the chat being deleted.
+  useEffect(
+    () =>
+      subscribeEvents({
+        onEvent: (event) => {
+          if (event.type === "message_updated" && event.message.chat_id === chatId) {
+            setMessages((current) =>
+              current?.map((m) => (m.id === event.message.id ? event.message : m)) ??
+              current,
+            );
+          } else if (event.type === "message_deleted" && event.chatId === chatId) {
+            setMessages((current) => current?.filter((m) => m.id !== event.messageId) ?? current);
+          } else if (event.type === "reactions" && event.chatId === chatId) {
+            setMessages((current) =>
+              current?.map((m) =>
+                m.id === event.messageId ? { ...m, reactions: event.reactions } : m,
+              ) ?? current,
+            );
+          } else if (event.type === "chat_deleted" && event.chatId === chatId) {
+            router.replace("/chats");
+          }
+        },
+      }),
+    [subscribeEvents, chatId, router],
+  );
+
   // Initial history, also when the realtime connection is down.
   useEffect(() => {
     loadHistory();
@@ -253,15 +339,64 @@ export default function ChatScreen() {
     [chatId, subscribeChat, loadHistory],
   );
 
+  // Decrypted once per message.
+  const texts = useMemo(
+    () => new Map((messages ?? []).map((m) => [m.id, crypto.decrypt(m.content).text])),
+    [messages, crypto],
+  );
+  const textOf = (message: { id: string; content: string }) =>
+    texts.get(message.id) ?? crypto.decrypt(message.content).text;
+
   const rows = useMemo(
     () => buildRows(messages ?? [], user?.id, unreadAfter),
     [messages, user?.id, unreadAfter],
   );
 
+  // Search: matching messages, newest first.
+  const matches = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+
+    if (!searching || !needle) {
+      return [];
+    }
+
+    return (messages ?? [])
+      .filter((m) => (texts.get(m.id) ?? "").toLowerCase().includes(needle))
+      .map((m) => m.id)
+      .reverse();
+  }, [searching, query, messages, texts]);
+
   const send = async () => {
     const content = draft.trim();
 
     if (!content || sending) {
+      return;
+    }
+
+    if (editing) {
+      const target = editing;
+      setSending(true);
+      setDraft("");
+      setEditing(null);
+      setInputHeight(INPUT_MIN_HEIGHT);
+
+      try {
+        const updated = await withToken((t) =>
+          editMessage(t, chatId, target.id, crypto.encrypt(content)),
+        );
+        setMessages((current) =>
+          current?.map((m) => (m.id === updated.id ? updated : m)) ?? current,
+        );
+        setError(null);
+      } catch (e) {
+        setDraft((current) => current || content);
+        setEditing((current) => current ?? target);
+        setError(e instanceof Error ? e.message : "Failed to edit the message");
+      } finally {
+        setSending(false);
+        inputRef.current?.focus();
+      }
+
       return;
     }
 
@@ -275,8 +410,9 @@ export default function ChatScreen() {
     setReplyTo(null);
 
     try {
+      const encrypted = crypto.encrypt(content);
       const message = await withToken((t) =>
-        sendMessage(t, chatId, content, replying?.id ?? null),
+        sendMessage(t, chatId, encrypted, replying?.id ?? null),
       );
       setMessages((current) => mergeMessages(current ?? [], [message]));
       setError(null);
@@ -294,13 +430,107 @@ export default function ChatScreen() {
 
   const startReply = (message: Message) => {
     setMenuFor(null);
+    setEditing(null);
     setReplyTo(message);
     inputRef.current?.focus();
   };
 
+  const startEdit = (message: Message) => {
+    setMenuFor(null);
+    setReplyTo(null);
+    setEditing(message);
+    setDraft(textOf(message));
+    inputRef.current?.focus();
+  };
+
+  const cancelEdit = () => {
+    setEditing(null);
+    setDraft("");
+  };
+
+  const removeMessage = async (message: Message) => {
+    setMenuFor(null);
+
+    try {
+      await withToken((t) => deleteMessage(t, chatId, message.id));
+      setMessages((current) => current?.filter((m) => m.id !== message.id) ?? current);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to delete the message");
+    }
+  };
+
+  // Tapping your own reaction removes it; another emoji replaces it.
+  const react = async (message: Message, emoji: string) => {
+    setMenuFor(null);
+
+    const mine = message.reactions.find((r) => r.user_id === user?.id);
+    const next = mine?.emoji === emoji ? null : emoji;
+    const optimistic: Reaction[] = [
+      ...message.reactions.filter((r) => r.user_id !== user?.id),
+      ...(next && user ? [{ emoji: next, user_id: user.id }] : []),
+    ];
+
+    setMessages((current) =>
+      current?.map((m) => (m.id === message.id ? { ...m, reactions: optimistic } : m)) ??
+      current,
+    );
+
+    try {
+      const reactions = await withToken((t) => setReaction(t, chatId, message.id, next));
+      setMessages((current) =>
+        current?.map((m) => (m.id === message.id ? { ...m, reactions } : m)) ?? current,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to react");
+    }
+  };
+
+  const onDraftChange = (text: string) => {
+    setDraft(text);
+
+    // "typing…" for the other member, at most every few seconds.
+    if (text.trim() && !editing && Date.now() - lastTypingSent.current > 3000) {
+      lastTypingSent.current = Date.now();
+      sendTyping(chatId);
+    }
+  };
+
+  const toggleBlocked = async () => {
+    if (!chat) {
+      return;
+    }
+
+    setChatMenu(false);
+
+    try {
+      await withToken((t) => setBlocked(t, chat.user_id, !chat.blocked_by_me));
+      await reloadChats();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Something went wrong");
+    }
+  };
+
+  const openSearch = () => {
+    setChatMenu(false);
+    setSearching(true);
+    setQuery("");
+    setMatchIndex(0);
+  };
+
+  // Jumps to the n-th match (0 = newest).
+  const goToMatch = (index: number) => {
+    if (matches.length === 0) {
+      return;
+    }
+
+    const next = Math.max(0, Math.min(matches.length - 1, index));
+    setMatchIndex(next);
+    showMessage(matches[next]);
+  };
+
   const copyText = async (message: Message) => {
     setMenuFor(null);
-    await Clipboard.setStringAsync(message.content);
+    await Clipboard.setStringAsync(textOf(message));
   };
 
   // Jumps to a quoted message (if it is loaded) and highlights it.
@@ -338,9 +568,13 @@ export default function ChatScreen() {
       send();
     }
 
-    if (Platform.OS === "web" && nativeEvent.key === "Escape" && replyTo) {
+    if (Platform.OS === "web" && nativeEvent.key === "Escape" && (replyTo || editing)) {
       event.preventDefault();
       setReplyTo(null);
+
+      if (editing) {
+        cancelEdit();
+      }
     }
   };
 
@@ -391,13 +625,80 @@ export default function ChatScreen() {
         title={chat?.username ?? "…"}
         titleBadge={chat?.is_developer ? <DevBadge size="md" /> : null}
         subtitle={
-          peerOnline ? (
+          typing.has(chatId) ? (
+            <Text style={{ color: colors.accent }}>typing…</Text>
+          ) : peerOnline ? (
             <Text style={{ color: colors.online }}>online</Text>
           ) : (
             statusText
           )
         }
+        right={
+          chat ? (
+            <>
+              <IconButton icon="search" label="Search in chat" size={20} onPress={openSearch} />
+              <IconButton
+                icon="ellipsis-vertical"
+                label="Chat menu"
+                size={20}
+                onPress={() => setChatMenu(true)}
+              />
+            </>
+          ) : null
+        }
       />
+
+      {searching ? (
+        <View style={[styles.searchBar, { backgroundColor: colors.surface, borderBottomColor: colors.line }]}>
+          <View style={[styles.searchBox, { backgroundColor: colors.panelAlt }]}>
+            <Ionicons name="search" size={16} color={colors.muted} />
+            <TextInput
+              value={query}
+              onChangeText={(text) => {
+                setQuery(text);
+                setMatchIndex(0);
+              }}
+              onSubmitEditing={() => goToMatch(matchIndex)}
+              placeholder="Search messages"
+              placeholderTextColor={colors.muted}
+              autoFocus
+              returnKeyType="search"
+              style={[styles.searchInput, { color: colors.text }, noWebOutline]}
+            />
+          </View>
+          <Text style={[styles.searchCount, { color: colors.muted }]}>
+            {query.trim() ? (matches.length ? `${matchIndex + 1}/${matches.length}` : "0") : ""}
+          </Text>
+          <IconButton
+            icon="chevron-up"
+            label="Older match"
+            size={18}
+            disabled={matchIndex >= matches.length - 1}
+            onPress={() => goToMatch(matchIndex + 1)}
+          />
+          <IconButton
+            icon="chevron-down"
+            label="Newer match"
+            size={18}
+            disabled={matchIndex <= 0}
+            onPress={() => goToMatch(matchIndex - 1)}
+          />
+          {hasMore ? (
+            <IconButton
+              icon="time-outline"
+              label="Load older messages"
+              size={18}
+              onPress={loadOlder}
+            />
+          ) : null}
+          <IconButton
+            icon="close"
+            label="Close search"
+            size={18}
+            onPress={() => setSearching(false)}
+          />
+        </View>
+      ) : null}
 
       <KeyboardAvoidingView
         style={styles.screen}
@@ -418,6 +719,14 @@ export default function ChatScreen() {
                 setScrolledUp(event.nativeEvent.contentOffset.y > 400)
               }
               scrollEventThrottle={100}
+              // Inverted: the end is the top, the oldest loaded message.
+              onEndReached={loadOlder}
+              onEndReachedThreshold={0.4}
+              ListFooterComponent={
+                loadingOlder ? (
+                  <ActivityIndicator color={colors.muted} style={styles.older} />
+                ) : null
+              }
               // Rows have different heights: get close first, then retry.
               onScrollToIndexFailed={(info) => {
                 listRef.current?.scrollToOffset({
@@ -485,10 +794,15 @@ export default function ChatScreen() {
                       time(peerReadAt) >= time(item.message.created_at)
                     }
                     ownId={user?.id}
+                    text={textOf(item.message)}
+                    quoteText={
+                      item.message.reply_to ? textOf(item.message.reply_to) : ""
+                    }
                     highlighted={item.message.id === highlightedId}
                     onReply={() => startReply(item.message)}
                     onMenu={() => setMenuFor(item.message)}
                     onQuotePress={showMessage}
+                    onReact={(emoji) => react(item.message, emoji)}
                   />
                 );
               }}
@@ -514,10 +828,35 @@ export default function ChatScreen() {
           </View>
         )}
 
+        {chat && !crypto.canEncrypt ? (
+          <Text style={[styles.error, { color: colors.muted }]}>
+            @{chat.username} has not set up end-to-end encryption yet. You can
+            write once they open the updated Ostrich.
+          </Text>
+        ) : null}
+
         {error ? (
           <Text style={[styles.error, { color: colors.danger }]}>{error}</Text>
         ) : null}
 
+        {chat?.blocked_by_me ? (
+          <View
+            style={[
+              styles.composer,
+              styles.blockedBar,
+              {
+                paddingBottom: insets.bottom + 10,
+                backgroundColor: colors.surface,
+                borderTopColor: colors.line,
+              },
+            ]}
+          >
+            <Text style={[styles.blockedText, { color: colors.muted }]}>
+              You blocked @{chat.username}
+            </Text>
+            <Button title="Unblock" variant="secondary" onPress={toggleBlocked} />
+          </View>
+        ) : (
         <View
           style={[
             styles.composer,
@@ -528,6 +867,27 @@ export default function ChatScreen() {
             },
           ]}
         >
+          {editing ? (
+            <View style={styles.replyBar}>
+              <Ionicons name="create-outline" size={18} color={colors.accent} />
+              <View style={[styles.replyBarText, { borderLeftColor: colors.accent }]}>
+                <Text style={[styles.replyBarName, { color: colors.accent }]}>
+                  Edit message
+                </Text>
+                <Text numberOfLines={1} style={[styles.replyBarContent, { color: colors.muted }]}>
+                  {previewText(textOf(editing))}
+                </Text>
+              </View>
+              <IconButton
+                icon="close"
+                label="Cancel editing"
+                size={18}
+                color={colors.muted}
+                onPress={cancelEdit}
+              />
+            </View>
+          ) : null}
+
           {replyTo ? (
             <View style={styles.replyBar}>
               <Ionicons name="arrow-undo" size={18} color={colors.accent} />
@@ -542,7 +902,7 @@ export default function ChatScreen() {
                     : chat?.is_developer) ? <DevBadge /> : null}
                 </View>
                 <Text numberOfLines={1} style={[styles.replyBarContent, { color: colors.muted }]}>
-                  {previewText(replyTo.content)}
+                  {previewText(textOf(replyTo))}
                 </Text>
               </View>
               <IconButton
@@ -560,7 +920,7 @@ export default function ChatScreen() {
               <TextInput
                 ref={inputRef}
                 value={draft}
-                onChangeText={setDraft}
+                onChangeText={onDraftChange}
                 onKeyPress={onKeyPress}
                 placeholder="Message"
                 placeholderTextColor={colors.muted}
@@ -589,8 +949,8 @@ export default function ChatScreen() {
             </View>
 
             <IconButton
-              icon="arrow-up"
-              label="Send"
+              icon={editing ? "checkmark" : "arrow-up"}
+              label={editing ? "Save" : "Send"}
               filled
               size={22}
               onPress={send}
@@ -598,54 +958,101 @@ export default function ChatScreen() {
             />
           </View>
         </View>
+        )}
       </KeyboardAvoidingView>
 
-      {/* A plain overlay rather than a Modal: on web a Modal hands the focus
+      {/* Plain overlays rather than Modals: on web a Modal hands the focus
           back to the message when it closes, away from the input. */}
       {menuFor ? (
-        <Pressable
-          style={styles.menuBackdrop}
-          onPress={() => setMenuFor(null)}
-          accessibilityLabel="Close menu"
-        >
-          {menuFor ? (
-            <View style={[styles.menu, { backgroundColor: colors.panel }]}>
-              <Text numberOfLines={2} style={[styles.menuPreview, { color: colors.muted }]}>
-                {previewText(menuFor.content)}
-              </Text>
-              <MenuItem icon="arrow-undo-outline" label="Reply" onPress={() => startReply(menuFor)} />
-              <MenuItem icon="copy-outline" label="Copy text" onPress={() => copyText(menuFor)} />
+        <ActionMenu
+          title={previewText(textOf(menuFor))}
+          onClose={() => setMenuFor(null)}
+          header={
+            <View style={styles.reactionPicker}>
+              {REACTIONS.map((emoji) => {
+                const mine = menuFor.reactions.some(
+                  (r) => r.user_id === user?.id && r.emoji === emoji,
+                );
+
+                return (
+                  <Pressable
+                    key={emoji}
+                    onPress={() => react(menuFor, emoji)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`React ${emoji}`}
+                    style={({ hovered, pressed }) => [
+                      styles.reactionOption,
+                      (mine || hovered || pressed) && { backgroundColor: colors.accentSoft },
+                    ]}
+                  >
+                    <Text style={styles.reactionOptionText}>{emoji}</Text>
+                  </Pressable>
+                );
+              })}
             </View>
-          ) : null}
-        </Pressable>
+          }
+          items={[
+            { icon: "arrow-undo-outline", label: "Reply", onPress: () => startReply(menuFor) },
+            { icon: "copy-outline", label: "Copy text", onPress: () => copyText(menuFor) },
+            ...(menuFor.sender_id === user?.id
+              ? [
+                  { icon: "create-outline" as const, label: "Edit", onPress: () => startEdit(menuFor) },
+                  {
+                    icon: "trash-outline" as const,
+                    label: "Delete",
+                    confirmLabel: "Delete for everyone?",
+                    danger: true,
+                    onPress: () => removeMessage(menuFor),
+                  },
+                ]
+              : []),
+          ]}
+        />
+      ) : null}
+
+      {chatMenu && chat ? (
+        <ActionMenu
+          title={`@${chat.username}`}
+          onClose={() => setChatMenu(false)}
+          items={[
+            { icon: "search", label: "Search in chat", onPress: openSearch },
+            {
+              icon: chat.pinned ? "pin" : "pin-outline",
+              label: chat.pinned ? "Unpin" : "Pin to top",
+              onPress: () => {
+                setChatMenu(false);
+                updateChatSettings(chat.id, { pinned: !chat.pinned });
+              },
+            },
+            {
+              icon: chat.muted ? "notifications-outline" : "notifications-off-outline",
+              label: chat.muted ? "Unmute" : "Mute",
+              onPress: () => {
+                setChatMenu(false);
+                updateChatSettings(chat.id, { muted: !chat.muted });
+              },
+            },
+            {
+              icon: "ban-outline",
+              label: chat.blocked_by_me ? `Unblock @${chat.username}` : `Block @${chat.username}`,
+              ...(chat.blocked_by_me ? {} : { confirmLabel: "Block? They won't be able to message you" }),
+              danger: !chat.blocked_by_me,
+              onPress: toggleBlocked,
+            },
+            {
+              icon: "trash-outline",
+              label: "Delete chat",
+              confirmLabel: "Delete for both of you?",
+              danger: true,
+              onPress: () => {
+                setChatMenu(false);
+                removeChat(chat.id).then(() => router.replace("/chats"));
+              },
+            },
+          ]}
+        />
       ) : null}
     </View>
-  );
-}
-
-function MenuItem({
-  icon,
-  label,
-  onPress,
-}: {
-  icon: "arrow-undo-outline" | "copy-outline";
-  label: string;
-  onPress: () => void;
-}) {
-  const { colors } = useAppTheme();
-
-  return (
-    <Pressable
-      onPress={onPress}
-      accessibilityRole="button"
-      style={({ hovered, pressed }) => [
-        styles.menuItem,
-        (hovered || pressed) && { backgroundColor: colors.hover },
-      ]}
-    >
-      <Ionicons name={icon} size={20} color={colors.text} />
-      <Text style={[styles.menuLabel, { color: colors.text }]}>{label}</Text>
-    </Pressable>
   );
 }
 
@@ -653,19 +1060,27 @@ function Bubble({
   row,
   read,
   ownId,
+  text,
+  quoteText,
   highlighted,
   onReply,
   onMenu,
   onQuotePress,
+  onReact,
 }: {
   row: Extract<Row, { type: "message" }>;
   read: boolean;
   ownId: string | undefined;
+  // Decrypted text of the message and of the message it replies to.
+  text: string;
+  quoteText: string;
   highlighted: boolean;
   onReply: () => void;
-  // Long press: the message's actions (reply, copy).
+  // Long press / right click: the message's actions.
   onMenu: () => void;
   onQuotePress: (messageId: string) => void;
+  // Tapping a reaction under the message toggles yours.
+  onReact: (emoji: string) => void;
 }) {
   const { colors } = useAppTheme();
   const [hovered, setHovered] = useState(false);
@@ -720,6 +1135,13 @@ function Bubble({
       <Pressable
         onLongPress={onMenu}
         delayLongPress={350}
+        // Web: right click opens the message menu instead of the browser's.
+        {...({
+          onContextMenu: (event: { preventDefault: () => void }) => {
+            event.preventDefault();
+            onMenu();
+          },
+        } as object)}
         style={[
           styles.bubble,
           corners,
@@ -730,7 +1152,7 @@ function Bubble({
           <Pressable
             onPress={() => onQuotePress(quote.id)}
             accessibilityRole="button"
-            accessibilityLabel={`Reply to ${quote.sender_username}: ${quote.content}`}
+            accessibilityLabel={`Reply to ${quote.sender_username}: ${quoteText}`}
             style={[
               styles.quote,
               {
@@ -752,7 +1174,7 @@ function Bubble({
               numberOfLines={2}
               style={[styles.quoteText, { color: own ? colors.onAccent : colors.textSoft }]}
             >
-              {previewText(quote.content)}
+              {previewText(quoteText)}
             </Text>
           </Pressable>
         ) : null}
@@ -763,9 +1185,40 @@ function Bubble({
           selectable={!TOUCH_UI}
           style={[styles.content, { color: textColor }]}
         >
-          {message.content}
+          {text}
         </Text>
+        {message.reactions.length > 0 ? (
+          <View style={styles.reactions}>
+            {groupReactions(message.reactions, ownId).map(({ emoji, count, mine }) => (
+              <Pressable
+                key={emoji}
+                onPress={() => onReact(emoji)}
+                accessibilityRole="button"
+                accessibilityLabel={`${emoji} ${count}${mine ? ", yours" : ""}`}
+                style={[
+                  styles.reactionChip,
+                  {
+                    backgroundColor: own
+                      ? "rgba(0, 0, 0, 0.14)"
+                      : mine
+                        ? colors.accentSoft
+                        : colors.panelAlt,
+                    borderColor: mine ? (own ? colors.onAccent : colors.accent) : "transparent",
+                  },
+                ]}
+              >
+                <Text style={styles.reactionEmoji}>{emoji}</Text>
+                {count > 1 ? (
+                  <Text style={[styles.reactionCount, { color: textColor }]}>{count}</Text>
+                ) : null}
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
         <View style={styles.bubbleMeta}>
+          {message.edited_at ? (
+            <Text style={[styles.time, { color: metaColor }]}>edited</Text>
+          ) : null}
           <Text style={[styles.time, { color: metaColor }]}>
             {formatTime(message.created_at)}
           </Text>
@@ -796,6 +1249,20 @@ function Bubble({
       ) : null}
     </View>
   );
+}
+
+// Reactions as chips: emoji, how many, whether one is yours.
+function groupReactions(reactions: Reaction[], ownId: string | undefined) {
+  const groups = new Map<string, { emoji: string; count: number; mine: boolean }>();
+
+  for (const r of reactions) {
+    const group = groups.get(r.emoji) ?? { emoji: r.emoji, count: 0, mine: false };
+    group.count++;
+    group.mine ||= r.user_id === ownId;
+    groups.set(r.emoji, group);
+  }
+
+  return [...groups.values()];
 }
 
 // Swipe a bubble to the left to reply: it follows the finger up to
@@ -996,6 +1463,99 @@ const styles = StyleSheet.create({
     opacity: 0.9,
   },
 
+  searchBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+
+  searchBox: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    height: 38,
+    borderRadius: radius.input,
+    paddingHorizontal: 12,
+    marginRight: 6,
+  },
+
+  searchInput: {
+    flex: 1,
+    height: "100%",
+    fontSize: 15,
+  },
+
+  searchCount: {
+    minWidth: 36,
+    textAlign: "center",
+    fontSize: 13,
+    fontVariant: ["tabular-nums"],
+  },
+
+  older: {
+    paddingVertical: 14,
+  },
+
+  blockedBar: {
+    alignItems: "center",
+    gap: 10,
+  },
+
+  blockedText: {
+    fontSize: 14,
+  },
+
+  reactions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 4,
+    marginTop: 4,
+  },
+
+  reactionChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+  },
+
+  reactionEmoji: {
+    fontSize: 14,
+  },
+
+  reactionCount: {
+    fontSize: 12,
+    fontWeight: "600",
+  },
+
+  reactionPicker: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: 2,
+    paddingHorizontal: 10,
+    paddingBottom: 6,
+  },
+
+  reactionOption: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  reactionOptionText: {
+    fontSize: 22,
+  },
+
   replyBar: {
     width: "100%",
     maxWidth: 820,
@@ -1029,45 +1589,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
 
-  menuBackdrop: {
-    position: "absolute",
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-    zIndex: 10,
-    backgroundColor: "rgba(0, 0, 0, 0.45)",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
-  },
-
-  menu: {
-    width: "100%",
-    maxWidth: 320,
-    borderRadius: radius.card,
-    paddingVertical: 6,
-    overflow: "hidden",
-  },
-
-  menuPreview: {
-    fontSize: 13,
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 6,
-  },
-
-  menuItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 14,
-    minHeight: 48,
-    paddingHorizontal: 16,
-  },
-
-  menuLabel: {
-    fontSize: 16,
-  },
 
   rowOwn: {
     justifyContent: "flex-end",

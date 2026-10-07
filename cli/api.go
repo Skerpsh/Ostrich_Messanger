@@ -57,10 +57,29 @@ type LoginResponse struct {
 	Token   string  `json:"token"`
 	User    Account `json:"user"`
 
-	// Only right after registration, or the first login of an account
-	// created before OstrichIDs. Shown to the user once, never again.
-	OstrichID string `json:"ostrich_id"`
+	// Login only: the account's keys, the private key encrypted.
+	Keys *AccountKeys `json:"keys"`
+
+	// Set on this device. OstrichID: only right after registration (shown
+	// once). PrivateKey: decrypts the account's chats.
+	OstrichID  string `json:"-"`
+	PrivateKey []byte `json:"-"`
 }
+
+// apiError is an error answer of the server.
+type apiError struct {
+	status  int
+	code    string
+	message string
+}
+
+func (e *apiError) Error() string { return e.message }
+
+var errInvalidOstrichID = errors.New(
+	"an OstrichID has 20 letters and digits, like XXXX-XXXX-XXXX-XXXX-XXXX",
+)
+
+var errWrongCredentials = errors.New("Invalid username, password or OstrichID")
 
 type Chat struct {
 	ID          string `json:"id"`
@@ -70,6 +89,14 @@ type Chat struct {
 	UserID      string `json:"user_id"`
 	Username    string `json:"username"`
 	IsDeveloper bool   `json:"is_developer"`
+
+	// The other member's public key; "" until they set up encryption.
+	PublicKey string `json:"public_key"`
+
+	// This user's settings for the chat.
+	Pinned      bool `json:"pinned"`
+	Muted       bool `json:"muted"`
+	BlockedByMe bool `json:"blocked_by_me"`
 
 	// Presence of the other user.
 	Online     bool    `json:"online"`
@@ -92,29 +119,72 @@ type ChatsResponse struct {
 	Chats []Chat `json:"chats"`
 }
 
-// loginWithCredentials logs in with username, password and OstrichID.
-// ostrichID may be empty for accounts created before OstrichIDs: they
-// get one in the response.
-func loginWithCredentials(username, password, ostrichID string) (*LoginResponse, error) {
-	body := map[string]string{
+// loginWithCredentials logs in with username, password and OstrichID. The
+// OstrichID itself is not sent: only the auth key derived from it (see
+// crypto.go). Accounts from before end-to-end encryption are set up on the
+// way.
+func loginWithCredentials(username, password, ostrichIDInput string) (*LoginResponse, error) {
+	id := normalizeOstrichID(ostrichIDInput)
+
+	if id == "" {
+		return nil, errInvalidOstrichID
+	}
+
+	derived := deriveFromOstrichID(id)
+	body := map[string]any{
 		"username": username,
 		"password": password,
+		"auth_key": derived.authKey,
 	}
 
-	if ostrichID != "" {
-		body["ostrich_id"] = ostrichID
+	result, err := authRequest("/api/auth/login", body)
+
+	var apiErr *apiError
+
+	if errors.As(err, &apiErr) && apiErr.code == "upgrade_required" {
+		material, _ := createAccountKeys(derived)
+		body["ostrich_id"] = id
+		body["keys"] = material
+		result, err = authRequest("/api/auth/login", body)
 	}
 
-	return authRequest("/api/auth/login", body)
+	if err != nil {
+		return nil, err
+	}
+
+	if result.Keys == nil {
+		return nil, fmt.Errorf("server did not return the account keys")
+	}
+
+	privateKey, err := openPrivateKey(derived, result.Keys.EncryptedPrivateKey)
+	if err != nil {
+		return nil, errWrongCredentials
+	}
+
+	result.PrivateKey = privateKey
+
+	return result, nil
 }
 
-// registerWithCredentials creates the account; the response carries its
-// OstrichID.
+// registerWithCredentials creates the account. Its OstrichID is generated
+// here and never sent; the response carries it (formatted) to show once.
 func registerWithCredentials(username, password string) (*LoginResponse, error) {
-	return authRequest("/api/auth/register", map[string]string{
+	id := generateOstrichID()
+	material, privateKey := createAccountKeys(deriveFromOstrichID(id))
+
+	result, err := authRequest("/api/auth/register", map[string]any{
 		"username": username,
 		"password": password,
+		"keys":     material,
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	result.OstrichID = formatOstrichID(id)
+	result.PrivateKey = privateKey
+
+	return result, nil
 }
 
 func logout(token string) error {
@@ -160,7 +230,7 @@ func changePassword(token, currentPassword, newPassword string) error {
 }
 
 // authRequest posts credentials to an auth endpoint.
-func authRequest(endpoint string, credentials map[string]string) (*LoginResponse, error) {
+func authRequest(endpoint string, credentials map[string]any) (*LoginResponse, error) {
 	body, err := json.Marshal(credentials)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode request: %w", err)
@@ -225,6 +295,9 @@ func authorizedGet(token, path string, out any) error {
 // doJSON sends the request, turns non-2xx responses into errors using the
 // server's error message when available, and decodes the body into out.
 func doJSON(req *http.Request, out any) error {
+	// Shown in the list of devices in the apps' Settings.
+	req.Header.Set("X-Ostrich-Client", "cli")
+
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("server connection failed: %w", err)
@@ -251,15 +324,18 @@ func doJSON(req *http.Request, out any) error {
 		var serverError struct {
 			Message string `json:"message"`
 			Error   string `json:"error"`
+			Code    string `json:"code"`
 		}
 
 		if json.Unmarshal(responseBody, &serverError) == nil {
+			message := serverError.Error
+
 			if serverError.Message != "" {
-				return fmt.Errorf("%s", serverError.Message)
+				message = serverError.Message
 			}
 
-			if serverError.Error != "" {
-				return fmt.Errorf("%s", serverError.Error)
+			if message != "" {
+				return &apiError{status: resp.StatusCode, code: serverError.Code, message: message}
 			}
 		}
 
@@ -302,6 +378,7 @@ type createChatResponse struct {
 		ID          string  `json:"id"`
 		Username    string  `json:"username"`
 		IsDeveloper bool    `json:"is_developer"`
+		PublicKey   string  `json:"public_key"`
 		Online      bool    `json:"online"`
 		LastSeenAt  *string `json:"last_seen_at"`
 	} `json:"user"`
@@ -326,6 +403,7 @@ func createChat(token, username string) (Chat, error) {
 		UserID:      result.User.ID,
 		Username:    result.User.Username,
 		IsDeveloper: result.User.IsDeveloper,
+		PublicKey:   result.User.PublicKey,
 
 		Online:     result.User.Online,
 		LastSeenAt: result.User.LastSeenAt,

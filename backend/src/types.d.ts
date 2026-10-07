@@ -9,6 +9,8 @@ declare module "fastify" {
       username_changed_at: Date | null;
       avatar_id: string | null;
       is_developer: boolean;
+      show_presence: boolean;
+      read_receipts: boolean;
     };
     token: string;
   }
