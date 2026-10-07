@@ -1,3 +1,5 @@
+// First: crypto.getRandomValues for the apps.
+import "@/lib/crypto-polyfill";
 import { useEffect } from "react";
 import {
   DarkTheme,

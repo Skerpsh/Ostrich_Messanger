@@ -25,7 +25,7 @@ export function avatarUrl(avatarId: string) {
 export type LastMessage = {
   id: string;
   sender_id: string;
-  // The start of the message (up to 200 characters), for previews.
+  // Encrypted, whole; clients shorten the decrypted text for previews.
   content: string;
   created_at: string;
 };
@@ -55,6 +55,8 @@ export type Chat = {
   muted: boolean;
   // The signed-in user blocked the other member.
   blocked_by_me: boolean;
+  // Either has blocked the other: no messages in either direction.
+  blocked: boolean;
 };
 
 export type ChatHistory = {
@@ -334,6 +336,7 @@ export async function createChat(token: string, username: string) {
       public_key?: string | null;
       online?: boolean;
       last_seen_at?: string | null;
+      blocked?: boolean;
     };
   }>("POST", "/api/chats", { token, body: { username } });
 
@@ -353,6 +356,7 @@ export async function createChat(token: string, username: string) {
     pinned: false,
     muted: false,
     blocked_by_me: false,
+    blocked: user.blocked ?? false,
   } satisfies Chat;
 }
 
@@ -419,11 +423,14 @@ export function setChatSettings(
   );
 }
 
-// For both members, with all messages.
-export function deleteChat(token: string, chatId: string) {
-  return request<unknown>("DELETE", `/api/chats/${encodeURIComponent(chatId)}`, {
-    token,
-  });
+// "everyone": for both members, with all messages. "me": clears the
+// history for the signed-in user only.
+export function deleteChat(token: string, chatId: string, scope: "everyone" | "me") {
+  return request<unknown>(
+    "DELETE",
+    `/api/chats/${encodeURIComponent(chatId)}?for=${scope}`,
+    { token },
+  );
 }
 
 export function setBlocked(token: string, userId: string, blocked: boolean) {
@@ -493,23 +500,32 @@ export function markRead(token: string, chatId: string, messageId: string) {
   );
 }
 
+// `id` is chosen by the client (newMessageId()): the encrypted content is
+// bound to it.
 export async function sendMessage(
   token: string,
   chatId: string,
-  content: string,
-  // Id of the message this one replies to.
-  replyTo: string | null = null,
+  message: {
+    id: string;
+    content: string;
+    // Id of the message this one replies to.
+    replyTo: string | null;
+  },
 ) {
-  const { message } = await request<{ message: Message }>(
+  const { message: sent } = await request<{ message: Message }>(
     "POST",
     `/api/chats/${encodeURIComponent(chatId)}/messages`,
     {
       token,
-      body: replyTo ? { content, reply_to: replyTo } : { content },
+      body: {
+        id: message.id,
+        content: message.content,
+        ...(message.replyTo ? { reply_to: message.replyTo } : {}),
+      },
     },
   );
 
-  return message;
+  return sent;
 }
 
 // Sets the profile picture (the server re-encodes it to a square WebP).

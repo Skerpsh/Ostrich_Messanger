@@ -12,25 +12,19 @@ import {
 import AppHeader from "@/components/app-header";
 import Button from "@/components/button";
 import TextField from "@/components/text-field";
-import { useAuth, useCurrentUser } from "@/context/auth";
-import { useChats } from "@/context/chats";
-import { useRealtime } from "@/context/realtime";
+import { useCurrentUser } from "@/context/auth";
 import { useAppTheme } from "@/context/theme";
-import { createChat } from "@/lib/api";
 import { useIsWide } from "@/lib/layout";
+import { useStartChat } from "@/lib/use-start-chat";
+import { cleanUsername, USERNAME_RE, USERNAME_RULES } from "@/lib/validation";
 import { radius } from "@/theme/colors";
-
-// Same rules as the backend.
-const USERNAME_RE = /^[A-Za-z0-9_.-]{3,32}$/;
 
 export default function NewChatScreen() {
   const router = useRouter();
   const { colors } = useAppTheme();
   const wide = useIsWide();
-  const { withToken } = useAuth();
   const user = useCurrentUser();
-  const { seedPresence } = useRealtime();
-  const { addChat } = useChats();
+  const startChat = useStartChat();
 
   const [username, setUsername] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -41,10 +35,10 @@ export default function NewChatScreen() {
 
   const submit = async () => {
     // "@alice" and "alice" both work.
-    const name = username.trim().replace(/^@/, "");
+    const name = cleanUsername(username);
 
     if (!USERNAME_RE.test(name)) {
-      setError("Username: 3–32 characters, letters, digits, _ . - only");
+      setError(USERNAME_RULES);
       return;
     }
 
@@ -57,15 +51,7 @@ export default function NewChatScreen() {
     setLoading(true);
 
     try {
-      const chat = await withToken((token) => createChat(token, name));
-
-      seedPresence([
-        {
-          userId: chat.user_id,
-          presence: { online: chat.online, lastSeenAt: chat.last_seen_at },
-        },
-      ]);
-      addChat(chat);
+      const chat = await startChat(name);
 
       router.replace({
         pathname: "/chats/[chatId]",

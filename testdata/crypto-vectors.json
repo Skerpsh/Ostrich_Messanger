@@ -1,0 +1,27 @@
+{
+  "comment": "Generated once by frontend/src/lib/crypto.ts; checked by crypto.test.ts and cli/crypto_test.go. Account A wrote both messages to B.",
+  "ostrich_id": "W3M3-24MD-A8XX-YR7P-QYNM",
+  "auth_key": "4ae71267b22a716239a75901f879e19fdb4edae937b0af92fec4d43c57f439f0",
+  "encrypted_private_key_a": "jfIuxniKkIhgzD1YzcfVGVNWuQN6iPK0ktjBT54erRkoEgum4Jsz+kEkME0LELgvTE4Xs9MZzrS8uCnlnmrZeSBEKickEgAR",
+  "private_key_a": "yCm0DoxEY2Wai9rhSLqSJXmG2HQBHFmL7rleRkYmIXs=",
+  "public_key_a": "SI2+UJS5+l0yDfaG1GMo7agvGw/5hkwmX9Fq3LHOthk=",
+  "private_key_b": "oBWzhDBIP3f00KCvYQQlmHfud3b5Fer2qrVMVJUYTZ0=",
+  "public_key_b": "jCFF1FZwqZSqKQpnfnIuzl1LOml3kt6cTn75F6hEFRw=",
+  "chat_id": "5b66c325-d795-4578-9ce1-a1f78dc11b58",
+  "sender_id": "708324f0-3be4-4319-a3e2-8c87b39c24ce",
+  "message_id": "ba4650c5-a2ae-48fa-88cc-fc8c091fbc71",
+  "text": "Привет, Ostrich! 🦤 e2",
+  "message_e2": "e2:65hlcmKjGllcOLCSD2sktL+iLUfjk86bxLwVqCwOIeF0jOcxd6H7CFacmyONu3VtJIqnl0lObmMnfOnu2CVDqn3Cd1WuDw==",
+  "text_e1": "legacy e1",
+  "message_e1": "e1:Zh0Y6iUJlBZSW0n0N5fU0RbZ7U6K/hNcSYQoZFKIK8i1dw2rmuahnnjvNi/nLiihew==",
+  "safety_code": [
+    "72634",
+    "45691",
+    "39457",
+    "73193",
+    "63708",
+    "76481",
+    "94116",
+    "53714"
+  ]
+}

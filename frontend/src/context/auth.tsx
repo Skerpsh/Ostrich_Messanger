@@ -8,6 +8,7 @@ import {
 } from "react";
 import * as api from "@/lib/api";
 import {
+  clearChatKeys,
   createAccountKeys,
   deriveFromOstrichId,
   formatOstrichId,
@@ -94,6 +95,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       removeItem(PENDING_OSTRICH_ID_KEY),
       removeItem(PRIVATE_KEY_KEY),
     ]);
+    clearChatKeys();
     setState({ status: "signedOut" });
   }, []);
 
@@ -112,7 +114,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      const privateKey = savedKey ? fromBase64(savedKey) : null;
+      let privateKey: Uint8Array | null;
+      let offlineUser: api.User;
+
+      try {
+        privateKey = savedKey ? fromBase64(savedKey) : null;
+        offlineUser = JSON.parse(savedUser);
+      } catch {
+        // Damaged storage: start over rather than hang on the splash screen.
+        await clearSession();
+        return;
+      }
 
       try {
         const user = await api.getMe(token);
@@ -129,12 +141,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setState({
           status: "signedIn",
           token,
-          user: JSON.parse(savedUser),
+          user: offlineUser,
           pendingOstrichId,
           privateKey,
         });
       }
-    })();
+    })().catch(() => setState({ status: "signedOut" }));
   }, [clearSession]);
 
   const startSession = async (

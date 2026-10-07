@@ -20,6 +20,7 @@ import {
   syncPushToken,
   useNotificationTaps,
 } from "@/lib/notifications";
+import { useLatest } from "@/lib/use-latest";
 
 // How long "typing…" shows after the last typing event.
 const TYPING_MS = 6000;
@@ -41,13 +42,14 @@ type ChatsContextValue = {
   setPeerReadAt: (chatId: string, lastReadAt: string | null) => void;
   // Chats where the other member is typing.
   typing: Set<string>;
-  // Pin / mute (for this user).
+  // Pin / mute (for this user). Shown right away; undone if it fails.
   updateChatSettings: (
     chatId: string,
     settings: { pinned?: boolean; muted?: boolean },
   ) => Promise<void>;
-  // Deletes the chat for both members.
-  removeChat: (chatId: string) => Promise<void>;
+  // Deletes the chat for both members ("everyone") or clears it for this
+  // user ("me").
+  removeChat: (chatId: string, scope: "everyone" | "me") => Promise<void>;
 };
 
 const ChatsContext = createContext<ChatsContextValue | null>(null);
@@ -60,6 +62,16 @@ const isAfter = (a: string, b: string | null) =>
 
 function openChat(chatId: string) {
   router.navigate({ pathname: "/chats/[chatId]", params: { chatId } });
+}
+
+// Moves a chat with a new message to the top: of the pinned chats if it is
+// pinned, otherwise right below them.
+function moveToTop(chats: Chat[], chat: Chat) {
+  const rest = chats.filter((c) => c.id !== chat.id);
+  const index = chat.pinned ? 0 : rest.findIndex((c) => !c.pinned);
+  const at = index < 0 ? rest.length : index;
+
+  return [...rest.slice(0, at), chat, ...rest.slice(at)];
 }
 
 // Whether the user can see the app (tab visible / app in the foreground).
@@ -90,8 +102,7 @@ function useAppVisible() {
 export function ChatsProvider({ children }: { children: ReactNode }) {
   const { state, withToken, updateUser } = useAuth();
   const privateKey = state.status === "signedIn" ? state.privateKey : null;
-  const privateKeyRef = useRef(privateKey);
-  privateKeyRef.current = privateKey;
+  const privateKeyRef = useLatest(privateKey);
   const [typingUntil, setTypingUntil] = useState<Record<string, number>>({});
   const { status, seedPresence, subscribeEvents } = useRealtime();
   const userId = state.status === "signedIn" ? state.user.id : null;
@@ -101,10 +112,16 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const visible = useAppVisible();
 
-  const chatsRef = useRef(chats);
-  chatsRef.current = chats;
-  const viewingRef = useRef<string | null>(null);
-  viewingRef.current = visible ? activeChatId : null;
+  // Another account: forget the previous one's chats.
+  const [chatsOwner, setChatsOwner] = useState(userId);
+
+  if (chatsOwner !== userId) {
+    setChatsOwner(userId);
+    setChats(null);
+  }
+
+  const chatsRef = useLatest(chats);
+  const viewingRef = useLatest(visible ? activeChatId : null);
 
   const reload = useCallback(async () => {
     try {
@@ -125,15 +142,10 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
 
   // Reloading after every (re)connect also picks up what was missed.
   useEffect(() => {
-    if (!userId) {
-      setChats(null);
-      return;
-    }
-
-    if (status === "online" || chatsRef.current === null) {
+    if (userId && (status === "online" || chatsRef.current === null)) {
       reload();
     }
-  }, [userId, status, reload]);
+  }, [userId, status, reload, chatsRef]);
 
   const sendRead = useCallback(
     (chatId: string, messageId: string) => {
@@ -158,7 +170,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
       );
       sendRead(chatId, message.id);
     },
-    [sendRead, userId],
+    [sendRead, userId, chatsRef],
   );
 
   // Coming back to the app with the active chat open marks it read.
@@ -177,7 +189,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
       );
       sendRead(activeChatId, chat.last_message.id);
     }
-  }, [visible, activeChatId, sendRead]);
+  }, [visible, activeChatId, sendRead, chatsRef]);
 
   useEffect(
     () =>
@@ -219,8 +231,8 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
                 incoming && !viewing ? chat.unread_count + 1 : chat.unread_count,
             };
 
-            // Most recently active first.
-            return [updated, ...current.filter((c) => c.id !== chat.id)];
+            // Most recently active first (after the pinned chats).
+            return moveToTop(current, updated);
           });
 
           if (incoming && viewing) {
@@ -238,7 +250,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
               showMessageNotification(
                 `@${chat.username}`,
                 decryptMessage(
-                  message.content,
+                  message,
                   privateKeyRef.current,
                   chat.public_key,
                   chat.id,
@@ -354,8 +366,17 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
           );
         },
       }),
-    [subscribeEvents, userId, reload, sendRead, withToken, updateUser],
-    // openChat and the refs are stable.
+    [
+      subscribeEvents,
+      userId,
+      reload,
+      sendRead,
+      withToken,
+      updateUser,
+      chatsRef,
+      viewingRef,
+      privateKeyRef,
+    ],
   );
 
   // "typing…" ends by itself.
@@ -385,16 +406,20 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
           current?.map((chat) => (chat.id === chatId ? { ...chat, ...settings } : chat)) ??
           current,
       );
-      await withToken((token) => api.setChatSettings(token, chatId, settings));
-      // Pinned chats move to the top.
-      await reload();
+
+      try {
+        await withToken((token) => api.setChatSettings(token, chatId, settings));
+      } finally {
+        // Pinned chats move to the top; a failed change is undone.
+        await reload();
+      }
     },
     [withToken, reload],
   );
 
   const removeChat = useCallback(
-    async (chatId: string) => {
-      await withToken((token) => api.deleteChat(token, chatId));
+    async (chatId: string, scope: "everyone" | "me") => {
+      await withToken((token) => api.deleteChat(token, chatId, scope));
       setChats((current) => current?.filter((chat) => chat.id !== chatId) ?? current);
     },
     [withToken],

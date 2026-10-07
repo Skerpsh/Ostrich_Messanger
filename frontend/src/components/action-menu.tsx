@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import Ionicons from "@expo/vector-icons/Ionicons";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text } from "react-native";
 import { useAppTheme } from "@/context/theme";
 import { radius } from "@/theme/colors";
 import type { IconName } from "./icon-button";

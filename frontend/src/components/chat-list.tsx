@@ -21,19 +21,18 @@ import Avatar from "@/components/avatar";
 import DevBadge from "@/components/dev-badge";
 import IconButton from "@/components/icon-button";
 import { noWebOutline } from "@/components/text-field";
-import { useAuth, useCurrentUser } from "@/context/auth";
+import { useCurrentUser } from "@/context/auth";
 import { useChats } from "@/context/chats";
 import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
-import { createChat, type Chat } from "@/lib/api";
+import type { Chat } from "@/lib/api";
 import { formatChatDate, previewText } from "@/lib/format";
 import { useIsWide } from "@/lib/layout";
 import { useChatCrypto } from "@/lib/use-chat-crypto";
 import { useMinuteTick } from "@/lib/use-minute-tick";
+import { useStartChat } from "@/lib/use-start-chat";
+import { cleanUsername, USERNAME_RE } from "@/lib/validation";
 import { radius } from "@/theme/colors";
-
-// Same rules as the backend.
-const USERNAME_RE = /^[A-Za-z0-9_.-]{3,32}$/;
 
 // The chats list: a screen on phones, the left column on wide screens.
 export default function ChatList() {
@@ -42,13 +41,14 @@ export default function ChatList() {
   const { colors } = useAppTheme();
   const insets = useSafeAreaInsets();
   const wide = useIsWide();
-  const { withToken } = useAuth();
   const user = useCurrentUser();
-  const { chats, error, reload, addChat, typing, updateChatSettings, removeChat } =
-    useChats();
+  const { chats, error, reload, typing, updateChatSettings, removeChat } = useChats();
+  const startChatWith = useStartChat();
   // The chat whose actions are shown (long press / right click).
   const [menuFor, setMenuFor] = useState<Chat | null>(null);
-  const { status, presence, seedPresence } = useRealtime();
+  // A failed pin, mute or delete from that menu.
+  const [actionError, setActionError] = useState<string | null>(null);
+  const { status, presence } = useRealtime();
   useMinuteTick();
 
   const [query, setQuery] = useState("");
@@ -61,7 +61,7 @@ export default function ChatList() {
   const selectedId = pathname.match(/^\/chats\/([0-9a-f-]{36})$/)?.[1];
 
   // "@alice" and "alice" both work.
-  const search = query.trim().replace(/^@/, "").toLowerCase();
+  const search = cleanUsername(query).toLowerCase();
 
   const shown = useMemo(
     () =>
@@ -90,21 +90,34 @@ export default function ChatList() {
     setStartError(null);
 
     try {
-      const chat = await withToken((token) => createChat(token, search));
-      seedPresence([
-        {
-          userId: chat.user_id,
-          presence: { online: chat.online, lastSeenAt: chat.last_seen_at },
-        },
-      ]);
-      addChat(chat);
-      openChat(chat);
+      openChat(await startChatWith(search));
     } catch (e) {
       setStartError(e instanceof Error ? e.message : "Failed to start chat");
     } finally {
       setStarting(false);
     }
   };
+
+  // Runs an action from the chat menu, showing its error in the list.
+  const runAction = async (action: () => Promise<void>) => {
+    setMenuFor(null);
+    setActionError(null);
+
+    try {
+      await action();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Something went wrong");
+    }
+  };
+
+  const deleteChat = (chatId: string, scope: "everyone" | "me") =>
+    runAction(async () => {
+      await removeChat(chatId, scope);
+
+      if (selectedId === chatId) {
+        router.replace("/chats");
+      }
+    });
 
   const refresh = async () => {
     setRefreshing(true);
@@ -239,8 +252,16 @@ export default function ChatList() {
                 </View>
               </Pressable>
             ) : null}
-            {error ? (
-              <Text style={[styles.notice, { color: colors.danger }]}>{error}</Text>
+            {error || actionError ? (
+              <Pressable
+                onPress={() => setActionError(null)}
+                disabled={!actionError}
+                accessibilityRole={actionError ? "button" : undefined}
+              >
+                <Text style={[styles.notice, { color: colors.danger }]}>
+                  {actionError ?? error}
+                </Text>
+              </Pressable>
             ) : null}
           </>
         }
@@ -304,33 +325,30 @@ export default function ChatList() {
               {
                 icon: menuFor.pinned ? "pin" : "pin-outline",
                 label: menuFor.pinned ? "Unpin" : "Pin to top",
-                onPress: () => {
-                  setMenuFor(null);
-                  updateChatSettings(menuFor.id, { pinned: !menuFor.pinned });
-                },
+                onPress: () => runAction(() =>
+                  updateChatSettings(menuFor.id, { pinned: !menuFor.pinned }),
+                ),
               },
               {
                 icon: menuFor.muted ? "notifications-outline" : "notifications-off-outline",
                 label: menuFor.muted ? "Unmute" : "Mute",
-                onPress: () => {
-                  setMenuFor(null);
-                  updateChatSettings(menuFor.id, { muted: !menuFor.muted });
-                },
+                onPress: () => runAction(() =>
+                  updateChatSettings(menuFor.id, { muted: !menuFor.muted }),
+                ),
+              },
+              {
+                icon: "eye-off-outline",
+                label: "Clear history for me",
+                confirmLabel: `Clear? @${menuFor.username} keeps the messages`,
+                danger: true,
+                onPress: () => deleteChat(menuFor.id, "me"),
               },
               {
                 icon: "trash-outline",
-                label: "Delete chat",
-                confirmLabel: "Delete for both of you?",
+                label: "Delete for both",
+                confirmLabel: "Delete the chat for both of you?",
                 danger: true,
-                onPress: () => {
-                  const chatId = menuFor.id;
-                  setMenuFor(null);
-                  removeChat(chatId).then(() => {
-                    if (selectedId === chatId) {
-                      router.replace("/chats");
-                    }
-                  });
-                },
+                onPress: () => deleteChat(menuFor.id, "everyone"),
               },
             ]}
           />
@@ -429,7 +447,7 @@ function ChatRow({
             ) : last ? (
               <>
                 {own ? <Text style={{ color: colors.textSoft }}>You: </Text> : null}
-                {previewText(decrypt(last.content).text)}
+                {previewText(decrypt(last).text)}
               </>
             ) : (
               <Text style={styles.italic}>No messages yet</Text>

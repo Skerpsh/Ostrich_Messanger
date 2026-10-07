@@ -45,8 +45,10 @@ export function formatPresence(
     return "online";
   }
 
+  // Hidden (privacy settings, or they have not written to you yet): say
+  // nothing precise.
   if (!presence.lastSeenAt) {
-    return "offline";
+    return "last seen recently";
   }
 
   const date = new Date(presence.lastSeenAt);

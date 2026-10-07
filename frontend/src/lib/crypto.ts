@@ -1,5 +1,6 @@
 // End-to-end encryption. The CLI (cli/crypto.go) implements the same
-// scheme; keep them in step.
+// scheme; keep them in step (crypto.test.ts and cli/crypto_test.go check
+// both against testdata/crypto-vectors.json).
 //
 // OstrichID: 20 random symbols from OSTRICH_ID_ALPHABET, generated on the
 // client and shown to the user once. It never reaches the server.
@@ -19,42 +20,44 @@
 // Chats: both members derive the same key
 //   chat key = HKDF(X25519(own private, other's public), salt chat id,
 //                   info "ostrich/v1 chat", 32)
-// Messages: "e1:" + base64(nonce(24) ‖ XChaCha20-Poly1305(chat key, nonce,
-//                   UTF-8 text, aad chat id))
+// Messages: "e2:" + base64(nonce(24) ‖ XChaCha20-Poly1305(chat key, nonce,
+//                   UTF-8 text, aad))
+//   aad = "ostrich/v2 message" 0 chat id 0 sender id 0 message id
+// The client chooses the message id, so the server can neither move a
+// message to another sender or message nor send it again as a new one.
+// "e1:" messages (older clients) use aad = chat id only.
+//
+// Safety code: both members compute the same 40 digits from the two
+// public keys; if they match on both devices, the server has not swapped
+// the keys (see safetyCode()).
 //
 // The OstrichID is ~99 random bits, so a fast KDF is enough: it cannot be
 // guessed from the auth key or from anything the server stores.
 
-import { getRandomValues } from "expo-crypto";
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { x25519 } from "@noble/curves/ed25519.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-
-// React Native has no Web Crypto; noble needs crypto.getRandomValues.
-const globalCrypto = globalThis as { crypto?: { getRandomValues?: unknown } };
-
-if (!globalCrypto.crypto?.getRandomValues) {
-  globalCrypto.crypto = {
-    ...(globalCrypto.crypto ?? {}),
-    getRandomValues,
-  };
-}
 
 const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 const ID_LENGTH = 20;
 const SALT = utf8("ostrich/v1");
 const PRIVATE_KEY_AAD = utf8("ostrich/v1 private-key");
 const CHAT_INFO = utf8("ostrich/v1 chat");
-const MESSAGE_PREFIX = "e1:";
+const SAFETY_INFO = utf8("ostrich/v1 safety");
+const MESSAGE_AAD = "ostrich/v2 message";
+const PREFIX_V1 = "e1:";
+const PREFIX_V2 = "e2:";
 
 function utf8(text: string) {
   return new TextEncoder().encode(text);
 }
 
+// The apps install crypto.getRandomValues (crypto-polyfill.ts); browsers
+// and Node have it.
 function randomBytes(length: number) {
   const bytes = new Uint8Array(length);
-  getRandomValues(bytes);
+  globalThis.crypto.getRandomValues(bytes);
   return bytes;
 }
 
@@ -167,7 +170,6 @@ export function createAccountKeys(derived: DerivedKeys): {
   privateKey: Uint8Array;
 } {
   const privateKey = randomBytes(32);
-  const publicKey = x25519.getPublicKey(privateKey);
   const nonce = randomBytes(24);
   const sealed = xchacha20poly1305(derived.wrapKey, nonce, PRIVATE_KEY_AAD).encrypt(
     privateKey,
@@ -177,7 +179,7 @@ export function createAccountKeys(derived: DerivedKeys): {
     privateKey,
     material: {
       auth_key: derived.authKey,
-      public_key: toBase64(publicKey),
+      public_key: publicKeyOf(privateKey),
       encrypted_private_key: toBase64(concat(nonce, sealed)),
     },
   };
@@ -197,12 +199,39 @@ export function openPrivateKey(
   ).decrypt(data.subarray(24));
 }
 
+// base64 of the public key that belongs to a private key.
+export function publicKeyOf(privateKey: Uint8Array) {
+  return toBase64(x25519.getPublicKey(privateKey));
+}
+
+// --- safety code ---
+
+// 40 digits in 8 groups, the same for both members of a chat: SHA-256 of
+// the two public keys (in a fixed order), each 4 bytes taken mod 100000.
+export function safetyCode(publicKeyA: string, publicKeyB: string): string[] {
+  const [first, second] = [publicKeyA, publicKeyB].sort();
+  const hash = sha256(concat(SAFETY_INFO, concat(fromBase64(first), fromBase64(second))));
+  const view = new DataView(hash.buffer, hash.byteOffset, hash.byteLength);
+  const groups: string[] = [];
+
+  for (let i = 0; i < 8; i++) {
+    groups.push(String(view.getUint32(i * 4) % 100000).padStart(5, "0"));
+  }
+
+  return groups;
+}
+
 // --- messages ---
 
+// Chat keys by own private key, peer key and chat; forgotten on logout.
 const chatKeys = new Map<string, Uint8Array>();
 
+export function clearChatKeys() {
+  chatKeys.clear();
+}
+
 function chatKey(privateKey: Uint8Array, peerPublicKey: string, chatId: string) {
-  const cacheKey = `${chatId}:${peerPublicKey}`;
+  const cacheKey = `${toHex(privateKey.subarray(0, 8))}:${chatId}:${peerPublicKey}`;
   let key = chatKeys.get(cacheKey);
 
   if (!key) {
@@ -214,8 +243,29 @@ function chatKey(privateKey: Uint8Array, peerPublicKey: string, chatId: string) 
   return key;
 }
 
+function messageAad(chatId: string, senderId: string, messageId: string) {
+  return utf8(`${MESSAGE_AAD}\0${chatId}\0${senderId}\0${messageId}`);
+}
+
+// A random UUID (v4) for a new message: the encryption is bound to it.
+export function newMessageId() {
+  const bytes = randomBytes(16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = toHex(bytes);
+
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+// Who wrote a message and its id: the encryption is bound to both.
+export type MessageRef = {
+  id: string;
+  sender_id: string;
+};
+
 export function encryptMessage(
   text: string,
+  message: MessageRef,
   privateKey: Uint8Array,
   peerPublicKey: string,
   chatId: string,
@@ -224,45 +274,49 @@ export function encryptMessage(
   const sealed = xchacha20poly1305(
     chatKey(privateKey, peerPublicKey, chatId),
     nonce,
-    utf8(chatId),
+    messageAad(chatId, message.sender_id, message.id),
   ).encrypt(utf8(text));
 
-  return MESSAGE_PREFIX + toBase64(concat(nonce, sealed));
+  return PREFIX_V2 + toBase64(concat(nonce, sealed));
 }
 
-export type Decrypted =
-  | { ok: true; text: string; encrypted: boolean }
-  | { ok: false; text: string; encrypted: true };
+// ok: decrypted; plain: not encrypted at all (from before end-to-end
+// encryption, or put there by the server); error: cannot be decrypted.
+export type Decrypted = {
+  status: "ok" | "plain" | "error";
+  text: string;
+};
 
 const UNREADABLE = "Can't decrypt this message";
 
-// Messages from before end-to-end encryption are plain text and shown as
-// they are.
 export function decryptMessage(
-  content: string,
+  message: MessageRef & { content: string },
   privateKey: Uint8Array | null,
   peerPublicKey: string | null,
   chatId: string,
 ): Decrypted {
-  if (!content.startsWith(MESSAGE_PREFIX)) {
-    return { ok: true, text: content, encrypted: false };
+  const { content } = message;
+  const v2 = content.startsWith(PREFIX_V2);
+
+  if (!v2 && !content.startsWith(PREFIX_V1)) {
+    return { status: "plain", text: content };
   }
 
   if (!privateKey || !peerPublicKey) {
-    return { ok: false, text: UNREADABLE, encrypted: true };
+    return { status: "error", text: UNREADABLE };
   }
 
   try {
-    const data = fromBase64(content.slice(MESSAGE_PREFIX.length));
+    const data = fromBase64(content.slice(PREFIX_V2.length));
     const plain = xchacha20poly1305(
       chatKey(privateKey, peerPublicKey, chatId),
       data.subarray(0, 24),
-      utf8(chatId),
+      v2 ? messageAad(chatId, message.sender_id, message.id) : utf8(chatId),
     ).decrypt(data.subarray(24));
 
-    return { ok: true, text: new TextDecoder().decode(plain), encrypted: true };
+    return { status: "ok", text: new TextDecoder().decode(plain) };
   } catch {
-    return { ok: false, text: UNREADABLE, encrypted: true };
+    return { status: "error", text: UNREADABLE };
   }
 }
 

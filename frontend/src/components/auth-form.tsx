@@ -15,11 +15,14 @@ import Button from "@/components/button";
 import TextField from "@/components/text-field";
 import { useAuth } from "@/context/auth";
 import { useAppTheme } from "@/context/theme";
+import {
+  cleanUsername,
+  MAX_PASSWORD,
+  MIN_PASSWORD,
+  USERNAME_RE,
+  USERNAME_RULES,
+} from "@/lib/validation";
 import { radius } from "@/theme/colors";
-
-// Same rules as the backend.
-const USERNAME_RE = /^[A-Za-z0-9_.-]{3,32}$/;
-const MIN_PASSWORD = 8;
 
 type AuthFormProps = {
   mode: "login" | "register";
@@ -46,7 +49,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
 
   const submit = async () => {
     // "@alice" works too.
-    const name = username.trim().replace(/^@/, "");
+    const name = cleanUsername(username);
 
     if (!name || !password) {
       setError("Username and password are required");
@@ -60,7 +63,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
 
     if (isRegister) {
       if (!USERNAME_RE.test(name)) {
-        setError("Username: 3–32 characters, letters, digits, _ . - only");
+        setError(USERNAME_RULES);
         return;
       }
 
@@ -147,7 +150,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
                 placeholder="••••••••"
                 value={password}
                 onChangeText={setPassword}
-                maxLength={128}
+                maxLength={MAX_PASSWORD}
                 secureTextEntry
                 autoComplete={isRegister ? "new-password" : "current-password"}
                 textContentType={isRegister ? "newPassword" : "password"}
@@ -183,7 +186,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
                   placeholder="••••••••"
                   value={confirmPassword}
                   onChangeText={setConfirmPassword}
-                  maxLength={128}
+                  maxLength={MAX_PASSWORD}
                   secureTextEntry
                   autoComplete="new-password"
                   textContentType="newPassword"
