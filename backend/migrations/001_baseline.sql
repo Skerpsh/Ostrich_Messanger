@@ -1,6 +1,7 @@
--- Ostrich database schema.
--- Idempotent: safe to run on an empty database and on an existing one
--- (npm run db:migrate).
+-- Ostrich database schema as it was before numbered migrations.
+-- Idempotent: it brings both an empty database and any database created
+-- by the old schema.sql to the same state, so it is safe as the first
+-- migration everywhere. Later changes go into new numbered files.
 
 CREATE TABLE IF NOT EXISTS users (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
