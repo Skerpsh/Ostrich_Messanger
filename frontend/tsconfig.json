@@ -2,6 +2,8 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true,
+    // Lets node run the crypto tests straight from the .ts sources.
+    "allowImportingTsExtensions": true,
     "paths": {
       "@/*": [
         "./src/*"
