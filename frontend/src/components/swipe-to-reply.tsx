@@ -20,7 +20,7 @@ const REPLY_OFFSET = 56;
 // The message slides back without bouncing past its place.
 const RETURN_ANIMATION = { duration: 180, easing: Easing.out(Easing.quad) };
 
-// Like Telegram: drag a message to the left to reply to it.
+// Drag a message to the right to reply to it.
 export default function SwipeToReply({
   onReply,
   children,
@@ -32,17 +32,16 @@ export default function SwipeToReply({
   const offset = useSharedValue(0);
 
   const pan = Gesture.Pan()
-    // Only a horizontal drag to the left starts it; vertical movement is
-    // left to the list's scrolling, and a drag to the right to the
-    // navigator's back gesture.
-    .activeOffsetX([-12, Number.MAX_SAFE_INTEGER])
-    .failOffsetX([Number.MIN_SAFE_INTEGER, 12])
+    // Only a horizontal drag to the right starts it; vertical movement is
+    // left to the list's scrolling.
+    .activeOffsetX([Number.MIN_SAFE_INTEGER, 12])
+    .failOffsetX([-12, Number.MAX_SAFE_INTEGER])
     .failOffsetY([-12, 12])
     .onUpdate((event) => {
-      offset.value = Math.max(-MAX_OFFSET, Math.min(0, event.translationX));
+      offset.value = Math.min(MAX_OFFSET, Math.max(0, event.translationX));
     })
     .onEnd(() => {
-      if (offset.value <= -REPLY_OFFSET) {
+      if (offset.value >= REPLY_OFFSET) {
         scheduleOnRN(onReply);
       }
 
@@ -63,8 +62,8 @@ export default function SwipeToReply({
   const iconStyle = useAnimatedStyle(() => {
     const progress = interpolate(
       offset.value,
-      [-REPLY_OFFSET, 0],
-      [1, 0],
+      [0, REPLY_OFFSET],
+      [0, 1],
       Extrapolation.CLAMP,
     );
 
@@ -96,7 +95,7 @@ export default function SwipeToReply({
 const styles = StyleSheet.create({
   icon: {
     position: "absolute",
-    right: 4,
+    left: 4,
     top: "50%",
     marginTop: -16,
     width: 32,
