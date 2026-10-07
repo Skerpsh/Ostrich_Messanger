@@ -7,7 +7,7 @@
 #
 # Run daily by ops/ostrich-backup.timer (see ops/README.md).
 # Restore: pg_restore --clean --if-exists -d ostrich_db <file>
-set -euo pipefail
+set -Eeuo pipefail
 
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/ostrich}"
 KEEP="${KEEP:-7}"
@@ -16,10 +16,27 @@ KEEP="${KEEP:-7}"
 ENV_FILE="${ENV_FILE:-/opt/ostrich/backend/.env}"
 # Space that must stay free on the disk besides the new backup.
 MIN_FREE_MB="${MIN_FREE_MB:-500}"
+# Optional: a Healthchecks.io ping URL (see ops/README.md). A backup pings
+# it, a failure pings its /fail, and no ping for a day raises an alarm.
+HEALTHCHECK_URL="${HEALTHCHECK_URL:-}"
+
+ping_healthcheck() {
+  if [ -n "$HEALTHCHECK_URL" ]; then
+    curl -fsS -m 10 --retry 3 -o /dev/null "$HEALTHCHECK_URL$1" || true
+  fi
+}
+
+# Any failing command reports the failure.
+trap 'ping_healthcheck /fail' ERR
+
+fail() {
+  echo "backup: $*" >&2
+  ping_healthcheck /fail
+  exit 1
+}
 
 if [ ! -r "$ENV_FILE" ]; then
-  echo "backup: cannot read $ENV_FILE" >&2
-  exit 1
+  fail "cannot read $ENV_FILE"
 fi
 
 # Reads KEY=VALUE lines without running the file as a script (a password
@@ -60,9 +77,8 @@ free_bytes="$(df --output=avail -B1 "$BACKUP_DIR" | tail -n 1 | tr -d ' ')"
 needed_bytes=$((db_bytes + MIN_FREE_MB * 1024 * 1024))
 
 if [ "$free_bytes" -lt "$needed_bytes" ]; then
-  echo "backup: skipped, not enough disk space in $BACKUP_DIR" \
-    "($((free_bytes / 1024 / 1024)) MB free, need $((needed_bytes / 1024 / 1024)) MB)" >&2
-  exit 1
+  fail "skipped, not enough disk space in $BACKUP_DIR" \
+    "($((free_bytes / 1024 / 1024)) MB free, need $((needed_bytes / 1024 / 1024)) MB)"
 fi
 
 file="$BACKUP_DIR/ostrich-$(date +%Y%m%d-%H%M%S).dump"
@@ -81,3 +97,4 @@ find "$BACKUP_DIR" -maxdepth 1 -name 'ostrich-*.dump' -printf '%T@ %p\n' \
 
 count="$(find "$BACKUP_DIR" -maxdepth 1 -name 'ostrich-*.dump' | wc -l)"
 echo "backup: $file ($(du -h "$file" | cut -f1)), $count kept in $BACKUP_DIR"
+ping_healthcheck ""

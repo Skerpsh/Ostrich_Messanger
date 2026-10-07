@@ -1,0 +1,41 @@
+# Builds the CLI for Linux, macOS and Windows when a version tag is pushed
+# (git tag v1.2.0 && git push --tags) and publishes them as a GitHub
+# release, with SHA-256 checksums and notes from the commits.
+name: Release CLI
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+      - run: go vet ./... && go test ./...
+      - name: Build
+        run: |
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            name="ostrich-$os-$arch"
+            [ "$os" = windows ] && name="$name.exe"
+            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -trimpath \
+              -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" -o "dist/$name" .
+          done
+          cp install.sh dist/
+          (cd dist && sha256sum ostrich-* install.sh > SHA256SUMS)
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Ostrich CLI $GITHUB_REF_NAME" --generate-notes

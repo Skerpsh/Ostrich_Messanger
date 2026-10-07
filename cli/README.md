@@ -5,11 +5,35 @@ the apps, laid out like the web app (chats on the left, the chat on the
 right; one at a time in a narrow terminal). Works with the keyboard and the
 mouse.
 
+## Install
+
+Linux and macOS:
+
 ```bash
-cd cli
-go build -o ostrich .
-./ostrich
+curl -fsSL https://github.com/Skerpsh/Ostrich_Messenger/releases/latest/download/install.sh | sh
 ```
+
+It downloads the build for your system from the latest release, checks its
+SHA-256 and puts it in `~/.local/bin/ostrich`. Windows: download
+`ostrich-windows-amd64.exe` from the
+[latest release](https://github.com/Skerpsh/Ostrich_Messenger/releases/latest)
+(SmartScreen asks once: *More info* → *Run anyway*).
+
+`ostrich --version` shows the version; at start the CLI says when a newer
+release is out (`OSTRICH_NO_UPDATE_CHECK=1` turns that off).
+
+From the source: `cd cli && go build -o ostrich . && ./ostrich`.
+
+## Releasing
+
+```bash
+git tag v1.2.0 && git push origin v1.2.0
+```
+
+The *Release CLI* workflow tests and builds the CLI for Linux, macOS and
+Windows (x86 and ARM) and publishes the files, `install.sh` and
+`SHA256SUMS` as the release, with notes from the commits since the last
+tag.
 
 `OSTRICH_SERVER=http://localhost:3000 ./ostrich` uses another backend.
 

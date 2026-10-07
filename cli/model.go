@@ -218,7 +218,7 @@ func (m *model) applyTheme() {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(tea.SetWindowTitle("Ostrich"), clockTick(), m.initCmd)
+	return tea.Batch(tea.SetWindowTitle("Ostrich"), clockTick(), m.initCmd, checkForUpdate())
 }
 
 // --- background work ---

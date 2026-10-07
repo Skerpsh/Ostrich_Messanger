@@ -55,6 +55,43 @@ header {
 
 Then `systemctl reload caddy`.
 
+## Monitoring
+
+Two free services watch the server from outside and write to Telegram:
+
+- **UptimeRobot** checks every 5 minutes that the backend answers and sees
+  its database.
+- **Healthchecks.io** expects a ping from every daily backup and raises the
+  alarm when one fails or none comes.
+
+### Server down: UptimeRobot
+
+1. Sign up at <https://uptimerobot.com>.
+2. *Integrations* → *Telegram* → follow the link to their bot and press
+   *Start*: Telegram becomes an alert contact.
+3. *New monitor* → type **Keyword**, URL `https://<api address>/api/health`,
+   keyword `connected` (*Alert when keyword does not exist*), interval
+   5 minutes, alert contact Telegram.
+
+The health check answers `{"status":"ok","database":"connected"}` only when
+the backend runs and reaches PostgreSQL, so a stopped database alerts too.
+
+### Backups: Healthchecks.io
+
+1. Sign up at <https://healthchecks.io>, *Integrations* → *Telegram* →
+   follow the link to their bot.
+2. *Add check*: name "Ostrich backup", period **1 day**, grace **2 hours**.
+   Copy its ping URL (`https://hc-ping.com/…`).
+3. On the server (put your URL in):
+
+```bash
+mkdir -p /etc/systemd/system/ostrich-backup.service.d && printf '[Service]\nEnvironment=HEALTHCHECK_URL=https://hc-ping.com/YOUR-UUID\n' > /etc/systemd/system/ostrich-backup.service.d/healthcheck.conf && systemctl daemon-reload && systemctl start ostrich-backup.service
+```
+
+The last command runs a backup now: the check turns green. From then on a
+failed backup (disk full, database down, …) alerts right away, and a backup
+that does not run at all alerts after a day and two hours.
+
 ## Backups
 
 `ops/backup.sh` writes a compressed `pg_dump` to `/var/backups/ostrich` and

@@ -386,3 +386,22 @@ func TestMouse(t *testing.T) {
 		t.Fatal("register tab not selected")
 	}
 }
+
+func TestNewerVersion(t *testing.T) {
+	for _, c := range []struct {
+		a, b  string
+		newer bool
+	}{
+		{"v1.2.4", "v1.2.3", true},
+		{"v1.10.0", "v1.9.9", true},
+		{"v2.0.0", "v1.99.99", true},
+		{"v1.2.3", "v1.2.3", false},
+		{"v1.2.2", "v1.2.3", false},
+		{"v1.2.3", "dev", false},
+		{"garbage", "v1.0.0", false},
+	} {
+		if got := newerVersion(c.a, c.b); got != c.newer {
+			t.Errorf("newerVersion(%q, %q) = %v", c.a, c.b, got)
+		}
+	}
+}
