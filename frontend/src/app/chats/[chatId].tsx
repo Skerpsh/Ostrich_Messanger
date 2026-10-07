@@ -4,8 +4,10 @@ import * as Clipboard from "expo-clipboard";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
   ActivityIndicator,
+  Animated,
   FlatList,
   KeyboardAvoidingView,
+  PanResponder,
   Platform,
   Pressable,
   StyleSheet,
@@ -41,6 +43,18 @@ const MAX_MESSAGE_LENGTH = 4096;
 
 // Messages of one sender closer than this are drawn as one group.
 const GROUP_GAP_MS = 5 * 60 * 1000;
+
+// Phones and tablets (also their browsers): swipe left to reply, long press
+// for the menu. Mouse users get a reply button on hover instead, and can
+// select text by dragging.
+const TOUCH_UI =
+  Platform.OS !== "web" ||
+  (typeof window !== "undefined" &&
+    Boolean(window.matchMedia?.("(pointer: coarse)").matches));
+
+// How far a bubble follows the finger, and how far it must go to reply.
+const SWIPE_MAX = 72;
+const SWIPE_REPLY_AT = 48;
 
 const INPUT_MIN_HEIGHT = 22;
 const INPUT_MAX_HEIGHT = 140;
@@ -656,6 +670,7 @@ function Bubble({
   const { colors } = useAppTheme();
   const [hovered, setHovered] = useState(false);
   const { message, own, joinedAbove, joinedBelow } = row;
+  const swipe = useSwipeToReply(onReply);
   const quote = message.reply_to;
 
   // The corners next to the bubble's neighbours in its group are smaller.
@@ -668,9 +683,9 @@ function Bubble({
   const textColor = own ? colors.onAccent : colors.text;
   const metaColor = own ? colors.onAccent : colors.muted;
 
-  // Web: a reply button next to the hovered bubble.
+  // Mouse: a reply button next to the hovered bubble.
   const replyButton =
-    Platform.OS === "web" && hovered ? (
+    !TOUCH_UI && hovered ? (
       <IconButton
         icon="arrow-undo-outline"
         label="Reply"
@@ -682,23 +697,29 @@ function Bubble({
     ) : null;
 
   return (
-    <Pressable
-      onLongPress={onMenu}
-      delayLongPress={350}
-      onHoverIn={() => setHovered(true)}
-      onHoverOut={() => setHovered(false)}
-      // The whole row, so the hover button does not flicker away.
+    <View
+      // pointerenter/leave are not fired when the pointer moves onto the
+      // reply button inside the row, so the button stays while used.
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
+      {...swipe.handlers}
       style={[
         styles.row,
         own ? styles.rowOwn : styles.rowOther,
         { marginTop: joinedAbove ? 2 : 10 },
         highlighted && { backgroundColor: colors.accentSoft },
         styles.rowHighlightable,
+        TOUCH_UI && styles.rowTouch,
       ]}
     >
       {own ? replyButton : null}
 
-      <View
+      <Animated.View
+        style={[styles.bubbleWrap, { transform: [{ translateX: swipe.offset }] }]}
+      >
+      <Pressable
+        onLongPress={onMenu}
+        delayLongPress={350}
         style={[
           styles.bubble,
           corners,
@@ -737,9 +758,9 @@ function Bubble({
         ) : null}
 
         <Text
-          // Phones copy through the long-press menu; selecting text there
-          // would take over the long press.
-          selectable={Platform.OS === "web"}
+          // Touch screens copy through the long-press menu; selecting text
+          // there would take over the long press.
+          selectable={!TOUCH_UI}
           style={[styles.content, { color: textColor }]}
         >
           {message.content}
@@ -757,11 +778,78 @@ function Bubble({
             />
           ) : null}
         </View>
-      </View>
+      </Pressable>
+      </Animated.View>
 
       {own ? null : replyButton}
-    </Pressable>
+
+      {TOUCH_UI ? (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.swipeIcon,
+            { backgroundColor: colors.panelAlt, opacity: swipe.progress, transform: [{ scale: swipe.progress }] },
+          ]}
+        >
+          <Ionicons name="arrow-undo" size={18} color={colors.accent} />
+        </Animated.View>
+      ) : null}
+    </View>
   );
+}
+
+// Swipe a bubble to the left to reply: it follows the finger up to
+// SWIPE_MAX, an arrow fades in on the right, and letting go past
+// SWIPE_REPLY_AT replies. Only clearly horizontal moves to the left are
+// taken, so scrolling the chat keeps working.
+function useSwipeToReply(onReply: () => void) {
+  const offset = useRef(new Animated.Value(0)).current;
+  const onReplyRef = useRef(onReply);
+  onReplyRef.current = onReply;
+
+  const handlers = useMemo(() => {
+    if (!TOUCH_UI) {
+      return {};
+    }
+
+    const settle = () =>
+      Animated.spring(offset, {
+        toValue: 0,
+        useNativeDriver: Platform.OS !== "web",
+        speed: 20,
+        bounciness: 6,
+      }).start();
+
+    const isSwipe = (dx: number, dy: number) =>
+      dx < -10 && Math.abs(dx) > Math.abs(dy) * 1.5;
+
+    return PanResponder.create({
+      // Capture: take the gesture from the bubble's long press once the
+      // finger clearly moves left.
+      onMoveShouldSetPanResponderCapture: (_, g) => isSwipe(g.dx, g.dy),
+      onMoveShouldSetPanResponder: (_, g) => isSwipe(g.dx, g.dy),
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderMove: (_, g) =>
+        offset.setValue(Math.max(-SWIPE_MAX, Math.min(0, g.dx))),
+      onPanResponderRelease: (_, g) => {
+        if (g.dx <= -SWIPE_REPLY_AT) {
+          onReplyRef.current();
+        }
+
+        settle();
+      },
+      onPanResponderTerminate: settle,
+    }).panHandlers;
+  }, [offset]);
+
+  // 0 at rest, 1 once the swipe would reply.
+  const progress = offset.interpolate({
+    inputRange: [-SWIPE_REPLY_AT, 0],
+    outputRange: [1, 0],
+    extrapolate: "clamp",
+  });
+
+  return { offset, progress, handlers };
 }
 
 const styles = StyleSheet.create({
@@ -856,6 +944,25 @@ const styles = StyleSheet.create({
 
   rowHighlightable: {
     borderRadius: radius.bubble,
+  },
+
+  // Browsers keep vertical scrolling and leave horizontal moves to the
+  // swipe.
+  rowTouch: Platform.OS === "web" ? ({ touchAction: "pan-y" } as object) : {},
+
+  bubbleWrap: {
+    flexShrink: 1,
+    maxWidth: 560,
+  },
+
+  swipeIcon: {
+    position: "absolute",
+    right: 4,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
   },
 
   hoverReply: {
