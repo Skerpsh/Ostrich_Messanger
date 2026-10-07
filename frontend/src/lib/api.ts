@@ -26,6 +26,10 @@ export type Message = {
   sender_username: string;
   content: string;
   created_at: string;
+  // The replied-to message; null if this is not a reply.
+  reply_to_id: string | null;
+  reply_sender_username: string | null;
+  reply_content: string | null;
 };
 
 export type AuthResponse = {
@@ -167,11 +171,12 @@ export async function sendMessage(
   token: string,
   chatId: string,
   content: string,
+  replyToId?: string,
 ) {
   const { message } = await request<{ message: Message }>(
     "POST",
     `/api/chats/${encodeURIComponent(chatId)}/messages`,
-    { token, body: { content } },
+    { token, body: { content, reply_to_id: replyToId } },
   );
 
   return message;

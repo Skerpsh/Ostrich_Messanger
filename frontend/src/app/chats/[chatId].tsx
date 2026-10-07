@@ -15,6 +15,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AppHeader from "@/components/app-header";
+import SwipeToReply from "@/components/swipe-to-reply";
 import { useAuth, useCurrentUser } from "@/context/auth";
 import { usePresence, useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
@@ -24,6 +25,9 @@ import { useMinuteTick } from "@/lib/use-minute-tick";
 import { radius } from "@/theme/colors";
 
 const MAX_MESSAGE_LENGTH = 4096;
+
+// How long a message stays highlighted after jumping to it from a reply.
+const HIGHLIGHT_MS = 1200;
 
 // Adds messages, dropping duplicates (a message can arrive both from the
 // websocket and from a history reload), oldest first.
@@ -71,8 +75,22 @@ export default function ChatScreen() {
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  // The message being replied to (shown above the input).
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
 
   const inputRef = useRef<TextInput>(null);
+  const listRef = useRef<FlatList<Message>>(null);
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (highlightTimer.current) {
+        clearTimeout(highlightTimer.current);
+      }
+    },
+    [],
+  );
 
   const goBack = () =>
     router.canGoBack() ? router.back() : router.replace("/chats");
@@ -141,17 +159,23 @@ export default function ChatScreen() {
       return;
     }
 
+    const replying = replyTo;
+
     setSending(true);
     // Clear right away so the user can type the next message meanwhile.
     setDraft("");
+    setReplyTo(null);
 
     try {
-      const message = await withToken((t) => sendMessage(t, chatId, content));
+      const message = await withToken((t) =>
+        sendMessage(t, chatId, content, replying?.id),
+      );
       setMessages((current) => mergeMessages(current ?? [], [message]));
       setError(null);
     } catch (e) {
       // Give the unsent text back unless something new was typed.
       setDraft((current) => current || content);
+      setReplyTo((current) => current ?? replying);
       setError(e instanceof Error ? e.message : "Failed to send message");
     } finally {
       setSending(false);
@@ -159,13 +183,23 @@ export default function ChatScreen() {
     }
   };
 
-  // Web: Enter sends, Shift+Enter makes a new line.
+  const startReply = (message: Message) => {
+    setReplyTo(message);
+    inputRef.current?.focus();
+  };
+
+  // Web: Enter sends, Shift+Enter makes a new line, Escape cancels a reply.
   const onKeyPress = (
     event: NativeSyntheticEvent<TextInputKeyPressEventData>,
   ) => {
     const nativeEvent = event.nativeEvent as TextInputKeyPressEventData & {
       shiftKey?: boolean;
     };
+
+    if (Platform.OS === "web" && nativeEvent.key === "Escape") {
+      setReplyTo(null);
+      return;
+    }
 
     if (
       Platform.OS === "web" &&
@@ -179,6 +213,27 @@ export default function ChatScreen() {
 
   // The list is inverted so it starts at the newest message.
   const reversed = useMemo(() => [...(messages ?? [])].reverse(), [messages]);
+
+  // Tapping a quote scrolls to the original message and highlights it.
+  const jumpTo = (messageId: string) => {
+    const index = reversed.findIndex((message) => message.id === messageId);
+
+    if (index === -1) {
+      return;
+    }
+
+    listRef.current?.scrollToIndex({ index, viewPosition: 0.5 });
+    setHighlightedId(messageId);
+
+    if (highlightTimer.current) {
+      clearTimeout(highlightTimer.current);
+    }
+
+    highlightTimer.current = setTimeout(
+      () => setHighlightedId(null),
+      HIGHLIGHT_MS,
+    );
+  };
 
   // The peer's presence is only known while we are connected ourselves.
   const peerOnline = status === "online" && Boolean(peerPresence?.online);
@@ -214,11 +269,24 @@ export default function ChatScreen() {
           <ActivityIndicator color={colors.text} style={styles.loader} />
         ) : (
           <FlatList
+            ref={listRef}
             inverted
             data={reversed}
             keyExtractor={(message) => message.id}
             contentContainerStyle={styles.list}
             keyboardShouldPersistTaps="handled"
+            // Messages have different heights, so an index far off screen
+            // cannot be scrolled to directly: get closer, then retry.
+            onScrollToIndexFailed={({ index, averageItemLength }) => {
+              listRef.current?.scrollToOffset({
+                offset: index * averageItemLength,
+              });
+              setTimeout(
+                () =>
+                  listRef.current?.scrollToIndex({ index, viewPosition: 0.5 }),
+                100,
+              );
+            }}
             ListEmptyComponent={
               <Text style={[styles.empty, { color: colors.muted }]}>
                 No messages yet. Say hi!
@@ -226,46 +294,77 @@ export default function ChatScreen() {
             }
             renderItem={({ item }) => {
               const own = item.sender_id === user?.id;
+              const textColor = own ? colors.buttonText : colors.text;
 
               return (
-                <View
-                  style={[styles.row, own ? styles.rowOwn : styles.rowOther]}
-                >
+                <SwipeToReply onReply={() => startReply(item)}>
                   <View
                     style={[
-                      styles.bubble,
-                      own
-                        ? {
-                            backgroundColor: colors.buttonBg,
-                            borderColor: colors.buttonBg,
-                          }
-                        : {
-                            backgroundColor: colors.panel,
-                            borderColor: colors.line,
-                          },
-                      own ? styles.bubbleOwn : styles.bubbleOther,
+                      styles.row,
+                      own ? styles.rowOwn : styles.rowOther,
+                      item.id === highlightedId && {
+                        backgroundColor: colors.line,
+                      },
                     ]}
                   >
-                    <Text
-                      selectable
+                    <View
                       style={[
-                        styles.content,
-                        { color: own ? colors.buttonText : colors.text },
+                        styles.bubble,
+                        own
+                          ? {
+                              backgroundColor: colors.buttonBg,
+                              borderColor: colors.buttonBg,
+                            }
+                          : {
+                              backgroundColor: colors.panel,
+                              borderColor: colors.line,
+                            },
+                        own ? styles.bubbleOwn : styles.bubbleOther,
                       ]}
                     >
-                      {item.content}
-                    </Text>
-                    <Text
-                      style={[
-                        styles.time,
-                        { color: own ? colors.buttonText : colors.muted },
-                        own && styles.timeOwn,
-                      ]}
-                    >
-                      {formatTime(item.created_at)}
-                    </Text>
+                      {item.reply_to_id ? (
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={`Reply to ${item.reply_sender_username}`}
+                          onPress={() => jumpTo(item.reply_to_id!)}
+                          style={[styles.quote, { borderLeftColor: textColor }]}
+                        >
+                          <Text
+                            numberOfLines={1}
+                            style={[styles.quoteName, { color: textColor }]}
+                          >
+                            {item.reply_sender_username}
+                          </Text>
+                          <Text
+                            numberOfLines={2}
+                            style={[styles.quoteText, { color: textColor }]}
+                          >
+                            {item.reply_content}
+                          </Text>
+                        </Pressable>
+                      ) : null}
+
+                      <Text
+                        selectable
+                        style={[
+                          styles.content,
+                          { color: own ? colors.buttonText : colors.text },
+                        ]}
+                      >
+                        {item.content}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.time,
+                          { color: own ? colors.buttonText : colors.muted },
+                          own && styles.timeOwn,
+                        ]}
+                      >
+                        {formatTime(item.created_at)}
+                      </Text>
+                    </View>
                   </View>
-                </View>
+                </SwipeToReply>
               );
             }}
           />
@@ -285,6 +384,35 @@ export default function ChatScreen() {
             },
           ]}
         >
+          {replyTo ? (
+            <View style={[styles.replyBar, { borderLeftColor: colors.text }]}>
+              <View style={styles.replyBarText}>
+                <Text
+                  numberOfLines={1}
+                  style={[styles.quoteName, { color: colors.text }]}
+                >
+                  Reply to {replyTo.sender_username}
+                </Text>
+                <Text
+                  numberOfLines={1}
+                  style={[styles.quoteText, { color: colors.muted }]}
+                >
+                  {replyTo.content}
+                </Text>
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Cancel reply"
+                onPress={() => setReplyTo(null)}
+                hitSlop={10}
+              >
+                <Text style={[styles.replyClose, { color: colors.muted }]}>
+                  ✕
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
+
           <View style={styles.composerRow}>
             <TextInput
               ref={inputRef}
@@ -414,6 +542,44 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingTop: 12,
     borderTopWidth: 1,
+  },
+
+  quote: {
+    borderLeftWidth: 2,
+    paddingLeft: 8,
+    marginBottom: 6,
+    opacity: 0.8,
+  },
+
+  quoteName: {
+    fontSize: 13,
+    fontWeight: "700",
+  },
+
+  quoteText: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+
+  replyBar: {
+    width: "100%",
+    maxWidth: 820,
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    borderLeftWidth: 2,
+    paddingLeft: 10,
+    marginBottom: 10,
+  },
+
+  replyBarText: {
+    flex: 1,
+  },
+
+  replyClose: {
+    fontSize: 18,
+    paddingHorizontal: 6,
   },
 
   composerRow: {

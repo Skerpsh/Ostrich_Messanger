@@ -1,7 +1,11 @@
 import { FastifyInstance } from "fastify";
 import type { WebSocket } from "ws";
 import { isChatMember } from "../database.js";
-import { findUserByToken, getBearerToken } from "../middleware/auth.js";
+import {
+  findUserByToken,
+  getBearerToken,
+  hashToken,
+} from "../middleware/auth.js";
 import { createMessage, MAX_MESSAGE_LENGTH } from "../messages.js";
 import {
   broadcast,
@@ -9,8 +13,10 @@ import {
   saveLastSeenForAll,
   setRealtimeLogger,
   subscribe,
+  trackSession,
   unsubscribe,
   unsubscribeAll,
+  untrackSession,
   userConnected,
   userDisconnected,
 } from "../realtime.js";
@@ -27,10 +33,12 @@ type ClientMessage = {
   type?: unknown;
   chatId?: unknown;
   content?: unknown;
+  replyToId?: unknown;
 };
 
 // Protocol (JSON messages):
-//   client -> server: join {chatId}, leave {chatId}, message {chatId, content}
+//   client -> server: join {chatId}, leave {chatId},
+//                     message {chatId, content, replyToId?}
 //   server -> client: connected, joined {chatId}, left {chatId},
 //                     message {message}, presence {userId, online, lastSeenAt},
 //                     error {error}
@@ -70,17 +78,19 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
         const user = token ? await findUserByToken(token) : null;
 
-        if (!user) {
+        if (!token || !user) {
           return reply.status(401).send({
             error: "Invalid or expired token",
           });
         }
 
         request.user = user;
+        request.token = token;
       },
     },
     (socket, request) => {
       const user = request.user;
+      const tokenHash = hashToken(request.token);
 
       const send = (payload: unknown) => {
         if (socket.readyState === socket.OPEN) {
@@ -90,20 +100,26 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
       const sendError = (error: string) => send({ type: "error", error });
 
-      const validChatId = (chatId: unknown): chatId is string =>
-        typeof chatId === "string" && UUID_RE.test(chatId);
+      const isUuid = (value: unknown): value is string =>
+        typeof value === "string" && UUID_RE.test(value);
 
       const handle = async (data: ClientMessage) => {
         if (data.type === "join") {
           const { chatId } = data;
 
-          if (!validChatId(chatId)) {
+          if (!isUuid(chatId)) {
             sendError("Valid chatId is required");
             return;
           }
 
           if (!(await isChatMember(chatId, user.id))) {
             sendError("You are not a member of this chat");
+            return;
+          }
+
+          // The socket may have closed while the membership was checked;
+          // subscribing it now would leak it (close already cleaned up).
+          if (socket.readyState !== socket.OPEN) {
             return;
           }
 
@@ -120,7 +136,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
         if (data.type === "leave") {
           const { chatId } = data;
 
-          if (!validChatId(chatId)) {
+          if (!isUuid(chatId)) {
             sendError("Valid chatId is required");
             return;
           }
@@ -135,7 +151,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
           const content =
             typeof data.content === "string" ? data.content.trim() : "";
 
-          if (!validChatId(chatId) || content.length === 0) {
+          if (!isUuid(chatId) || content.length === 0) {
             sendError("chatId and content are required");
             return;
           }
@@ -147,7 +163,13 @@ export default async function websocketRoutes(server: FastifyInstance) {
             return;
           }
 
-          const message = await createMessage(chatId, user.id, content);
+          const replyToId = isUuid(data.replyToId) ? data.replyToId : null;
+          const message = await createMessage(
+            chatId,
+            user.id,
+            content,
+            replyToId,
+          );
 
           if (!message) {
             sendError("You are not a member of this chat");
@@ -195,9 +217,11 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
       socket.on("close", () => {
         unsubscribeAll(socket);
+        untrackSession(tokenHash, socket);
         userDisconnected(user.id, socket);
       });
 
+      trackSession(tokenHash, socket);
       userConnected(user.id, socket);
 
       send({

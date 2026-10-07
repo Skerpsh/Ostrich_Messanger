@@ -4,11 +4,15 @@ import {
   StyleSheet,
   Text,
   type PressableProps,
+  type PressableStateCallbackType,
   type StyleProp,
   type ViewStyle,
 } from "react-native";
 import { useAppTheme } from "@/context/theme";
 import { radius } from "@/theme/colors";
+
+// react-native-web adds `hovered` to the press state; RN's types lack it.
+export type WebPressState = PressableStateCallbackType & { hovered?: boolean };
 
 type ButtonProps = Omit<PressableProps, "style"> & {
   title: string;
@@ -35,7 +39,8 @@ export default function Button({
     <Pressable
       accessibilityRole="button"
       disabled={inactive}
-      style={({ pressed, hovered }) => {
+      style={(state) => {
+        const { pressed, hovered } = state as WebPressState;
         // Like .btn:hover on the website: colors invert.
         const inverted = !inactive && (pressed || hovered) ? !filled : filled;
 
@@ -52,7 +57,8 @@ export default function Button({
       }}
       {...props}
     >
-      {({ pressed, hovered }) => {
+      {(state) => {
+        const { pressed, hovered } = state as WebPressState;
         const inverted = !inactive && (pressed || hovered) ? !filled : filled;
         const textColor = inverted ? colors.buttonText : colors.text;
 
