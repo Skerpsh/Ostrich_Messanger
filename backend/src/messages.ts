@@ -2,6 +2,44 @@ import { db } from "./database.js";
 
 export const MAX_MESSAGE_LENGTH = 4096;
 
+// Flood protection: at most MESSAGE_RATE_MAX messages per user per window,
+// over REST and websocket together. Kept in memory (single process, like
+// realtime.ts).
+const MESSAGE_RATE_MAX = 20;
+const MESSAGE_RATE_WINDOW_MS = 10_000;
+const messageCounters = new Map<string, { count: number; resetAt: number }>();
+
+export function takeMessageSlot(userId: string): boolean {
+  const now = Date.now();
+  const counter = messageCounters.get(userId);
+
+  if (!counter || counter.resetAt <= now) {
+    messageCounters.set(userId, {
+      count: 1,
+      resetAt: now + MESSAGE_RATE_WINDOW_MS,
+    });
+    return true;
+  }
+
+  if (counter.count >= MESSAGE_RATE_MAX) {
+    return false;
+  }
+
+  counter.count++;
+  return true;
+}
+
+// Drops finished windows so the map does not grow with every user ever seen.
+setInterval(() => {
+  const now = Date.now();
+
+  for (const [userId, counter] of messageCounters) {
+    if (counter.resetAt <= now) {
+      messageCounters.delete(userId);
+    }
+  }
+}, 60_000).unref();
+
 export type ChatMessage = {
   id: string;
   chat_id: string;

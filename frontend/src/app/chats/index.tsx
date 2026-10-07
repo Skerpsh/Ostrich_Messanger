@@ -14,7 +14,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AppHeader from "@/components/app-header";
 import Avatar from "@/components/avatar";
-import Button from "@/components/button";
+import Button, { type WebPressState } from "@/components/button";
 import { useAuth, useCurrentUser } from "@/context/auth";
 import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
@@ -181,14 +181,18 @@ export default function ChatsScreen() {
           return (
             <Pressable
               onPress={() => openChat(item)}
-              style={({ pressed, hovered }) => [
-                styles.chat,
-                {
-                  backgroundColor:
-                    pressed || hovered ? colors.panelAlt : colors.panel,
-                  borderColor: colors.line,
-                },
-              ]}
+              style={(state) => {
+                const { pressed, hovered } = state as WebPressState;
+
+                return [
+                  styles.chat,
+                  {
+                    backgroundColor:
+                      pressed || hovered ? colors.panelAlt : colors.panel,
+                    borderColor: colors.line,
+                  },
+                ];
+              }}
             >
               <Avatar name={item.username} online={peer?.online} />
               <View style={styles.chatText}>

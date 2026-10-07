@@ -83,6 +83,45 @@ export function broadcast(chatId: string, payload: unknown) {
   }
 }
 
+// --- sessions ---
+
+// Open sockets of each session (by token hash), closed on logout.
+const sessionSockets = new Map<string, Set<WebSocket>>();
+
+// Close code for sockets of a session that has ended.
+export const SESSION_ENDED_CLOSE_CODE = 4001;
+
+export function trackSession(tokenHash: string, socket: WebSocket) {
+  let sockets = sessionSockets.get(tokenHash);
+
+  if (!sockets) {
+    sockets = new Set();
+    sessionSockets.set(tokenHash, sockets);
+  }
+
+  sockets.add(socket);
+}
+
+export function untrackSession(tokenHash: string, socket: WebSocket) {
+  const sockets = sessionSockets.get(tokenHash);
+
+  if (!sockets) {
+    return;
+  }
+
+  sockets.delete(socket);
+
+  if (sockets.size === 0) {
+    sessionSockets.delete(tokenHash);
+  }
+}
+
+export function closeSession(tokenHash: string) {
+  for (const socket of sessionSockets.get(tokenHash) ?? []) {
+    socket.close(SESSION_ENDED_CLOSE_CODE, "Session ended");
+  }
+}
+
 // --- presence ---
 
 export function isOnline(userId: string) {

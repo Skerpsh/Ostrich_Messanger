@@ -1,7 +1,11 @@
 import { FastifyInstance } from "fastify";
 import { db, isChatMember } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
-import { createMessage, MAX_MESSAGE_LENGTH } from "../messages.js";
+import {
+  createMessage,
+  MAX_MESSAGE_LENGTH,
+  takeMessageSlot,
+} from "../messages.js";
 import { broadcast } from "../realtime.js";
 
 const chatParamsSchema = {
@@ -43,6 +47,12 @@ export default async function messagesRoutes(server: FastifyInstance) {
       if (content.length === 0) {
         return reply.status(400).send({
           error: "Message content is required",
+        });
+      }
+
+      if (!takeMessageSlot(request.user.id)) {
+        return reply.status(429).send({
+          error: "Too many messages, slow down",
         });
       }
 

@@ -3,6 +3,7 @@ import argon2 from "argon2";
 import crypto from "node:crypto";
 import { db, isPgError, PG_UNIQUE_VIOLATION } from "../database.js";
 import { authenticate, hashToken } from "../middleware/auth.js";
+import { closeSession } from "../realtime.js";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -167,13 +168,18 @@ export default async function authRoutes(server: FastifyInstance) {
       preHandler: authenticate,
     },
     async (request) => {
+      const tokenHash = hashToken(request.token);
+
       await db.query(
         `
         DELETE FROM sessions
         WHERE token_hash = $1
         `,
-        [hashToken(request.token)],
+        [tokenHash],
       );
+
+      // Open websockets of this session must not keep receiving messages.
+      closeSession(tokenHash);
 
       return {
         message: "Logout successful",

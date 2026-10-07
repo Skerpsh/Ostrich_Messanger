@@ -1,16 +1,26 @@
 import { FastifyInstance } from "fastify";
 import type { WebSocket } from "ws";
 import { isChatMember } from "../database.js";
-import { findUserByToken, getBearerToken } from "../middleware/auth.js";
-import { createMessage, MAX_MESSAGE_LENGTH } from "../messages.js";
+import {
+  findUserByToken,
+  getBearerToken,
+  hashToken,
+} from "../middleware/auth.js";
+import {
+  createMessage,
+  MAX_MESSAGE_LENGTH,
+  takeMessageSlot,
+} from "../messages.js";
 import {
   broadcast,
   chatPresence,
   saveLastSeenForAll,
   setRealtimeLogger,
   subscribe,
+  trackSession,
   unsubscribe,
   unsubscribeAll,
+  untrackSession,
   userConnected,
   userDisconnected,
 } from "../realtime.js";
@@ -70,17 +80,19 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
         const user = token ? await findUserByToken(token) : null;
 
-        if (!user) {
+        if (!token || !user) {
           return reply.status(401).send({
             error: "Invalid or expired token",
           });
         }
 
         request.user = user;
+        request.token = token;
       },
     },
     (socket, request) => {
       const user = request.user;
+      const tokenHash = hashToken(request.token);
 
       const send = (payload: unknown) => {
         if (socket.readyState === socket.OPEN) {
@@ -104,6 +116,12 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
           if (!(await isChatMember(chatId, user.id))) {
             sendError("You are not a member of this chat");
+            return;
+          }
+
+          // The socket may have closed while the membership was checked;
+          // subscribing it now would leak it (close already cleaned up).
+          if (socket.readyState !== socket.OPEN) {
             return;
           }
 
@@ -144,6 +162,11 @@ export default async function websocketRoutes(server: FastifyInstance) {
             sendError(
               `Message is too long (max ${MAX_MESSAGE_LENGTH} characters)`,
             );
+            return;
+          }
+
+          if (!takeMessageSlot(user.id)) {
+            sendError("Too many messages, slow down");
             return;
           }
 
@@ -195,9 +218,11 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
       socket.on("close", () => {
         unsubscribeAll(socket);
+        untrackSession(tokenHash, socket);
         userDisconnected(user.id, socket);
       });
 
+      trackSession(tokenHash, socket);
       userConnected(user.id, socket);
 
       send({
