@@ -24,9 +24,11 @@ export function formatChatDate(iso: string) {
     : `${dayMonth}.${date.getFullYear()}`;
 }
 
-// "1234 5678 9012 3456": login IDs are easier to read in groups of four.
-export function formatLoginId(loginId: string) {
-  return loginId.replace(/(\d{4})(?=\d)/g, "$1 ");
+// "12.09.2025".
+export function formatDate(iso: string) {
+  const date = new Date(iso);
+
+  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()}`;
 }
 
 // "online", "last seen just now", "last seen 5 min ago",

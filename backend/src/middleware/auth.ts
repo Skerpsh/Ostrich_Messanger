@@ -38,9 +38,9 @@ export async function findSessionByHash(
     `
     SELECT
       users.id,
-      users.login_id,
       users.username,
       users.created_at,
+      users.username_changed_at,
       sessions.expires_at
     FROM sessions
     JOIN users ON users.id = sessions.user_id

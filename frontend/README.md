@@ -5,10 +5,13 @@ mobile apps; styled after the Ostrich website.
 
 ## Features
 
-- Log in / create account (session is remembered: Keychain/Keystore on
-  mobile, localStorage on web)
-- Chats list with your login ID (tap to copy), pull to refresh
-- New chat by the other user's login ID
+- Log in with @username + password + OstrichID; create account (session is
+  remembered: Keychain/Keystore on mobile, localStorage on web)
+- OstrichID shown once after registration, until the user confirms saving it
+- Chats list with your @username (tap to copy), pull to refresh
+- New chat by the other user's exact @username
+- Settings: change username (once per 28 days), change password, log out of
+  all devices
 - Chat with live updates over WebSocket, automatic reconnect
 - Light / dark theme (same switch as on the website)
 
@@ -20,6 +23,8 @@ src/
     _layout.tsx     providers, routes guarded by login state
     index.tsx       welcome screen
     login.tsx, register.tsx
+    ostrich-id.tsx  new OstrichID, shown once until saved
+    settings.tsx    username, password, log out everywhere
     chats/index.tsx chats list
     chats/new.tsx   new chat
     chats/[chatId].tsx chat

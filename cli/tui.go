@@ -91,6 +91,8 @@ const (
 	stageChats
 	stageChat
 	stageSettings
+	// Showing a new OstrichID that must be saved before going on.
+	stageOstrichID
 )
 
 type authMode int
@@ -118,7 +120,11 @@ type tuiModel struct {
 	username        textinput.Model
 	password        textinput.Model
 	confirmPassword textinput.Model
+	ostrichIDInput  textinput.Model
 	focus           int
+
+	// Ctrl+C was pressed once on the OstrichID screen; a second press quits.
+	quitArmed bool
 
 	loading bool
 	err     error
@@ -132,8 +138,8 @@ type tuiModel struct {
 	selected int
 
 	// "New chat" prompt on the chats screen.
-	creatingChat bool
-	loginIDInput textinput.Model
+	creatingChat      bool
+	chatUsernameInput textinput.Model
 
 	// ID of the chat being opened; results for any other chat are stale
 	// and get discarded.
@@ -231,22 +237,30 @@ func newLoginModel() tuiModel {
 	messageInput.CharLimit = 4096
 	messageInput.Width = 60
 
-	loginIDInput := textinput.New()
-	loginIDInput.Placeholder = "Login ID"
-	loginIDInput.CharLimit = 18
-	loginIDInput.Width = 30
+	ostrichIDInput := textinput.New()
+	ostrichIDInput.Placeholder = "XXXX-XXXX-XXXX-XXXX-XXXX"
+	ostrichIDInput.CharLimit = 40
+	ostrichIDInput.Width = 40
+	ostrichIDInput.EchoMode = textinput.EchoPassword
+	ostrichIDInput.EchoCharacter = '•'
+
+	chatUsernameInput := textinput.New()
+	chatUsernameInput.Placeholder = "@username"
+	chatUsernameInput.CharLimit = 33
+	chatUsernameInput.Width = 34
 
 	return tuiModel{
-		stage:           stageLogin,
-		authMode:        authLogin,
-		username:        username,
-		password:        password,
-		confirmPassword: confirmPassword,
-		focus:           0,
-		messageInput:    messageInput,
-		loginIDInput:    loginIDInput,
-		presence:        map[string]presence{},
-		settingsInputs:  newSettingsInputs(),
+		stage:             stageLogin,
+		authMode:          authLogin,
+		username:          username,
+		password:          password,
+		confirmPassword:   confirmPassword,
+		ostrichIDInput:    ostrichIDInput,
+		focus:             0,
+		messageInput:      messageInput,
+		chatUsernameInput: chatUsernameInput,
+		presence:          map[string]presence{},
+		settingsInputs:    newSettingsInputs(),
 	}
 }
 
@@ -272,9 +286,9 @@ func sanitize(s string) string {
 	}, s)
 }
 
-func createChatCmd(token, loginID string) tea.Cmd {
+func createChatCmd(token, username string) tea.Cmd {
 	return func() tea.Msg {
-		chat, err := createChat(token, loginID)
+		chat, err := createChat(token, username)
 
 		if err != nil {
 			return chatCreateErrorMsg{err: err}
@@ -384,7 +398,7 @@ func (m tuiModel) signedOut(err error, notice string) (tea.Model, tea.Cmd) {
 	m.closeConnection()
 
 	m.messageInput.Blur()
-	m.loginIDInput.Blur()
+	m.chatUsernameInput.Blur()
 	m.settingsInputs = newSettingsInputs()
 	m.confirmLogoutAll = false
 	m.creatingChat = false
@@ -398,6 +412,8 @@ func (m tuiModel) signedOut(err error, notice string) (tea.Model, tea.Cmd) {
 	m.authMode = authLogin
 	m.password.SetValue("")
 	m.confirmPassword.SetValue("")
+	m.ostrichIDInput.SetValue("")
+	m.quitArmed = false
 	m.focus = 0
 	m.moveFocus(0)
 	m.err = err
@@ -475,9 +491,19 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.user = msg.result
 		m.err = nil
 		m.presence = map[string]presence{}
+		m.password.SetValue("")
+		m.confirmPassword.SetValue("")
+		m.ostrichIDInput.SetValue("")
 
 		m.closeConnection()
 		m.connStatus = connConnecting
+
+		// A new OstrichID: show it first. Chats load in the background
+		// (they switch the screen only from the login stage).
+		if msg.result.OstrichID != "" {
+			m.loading = false
+			m.stage = stageOstrichID
+		}
 
 		return m, tea.Batch(
 			loadChatsCmd(msg.result.Token),
@@ -535,8 +561,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatCreatedMsg:
 		m.creatingChat = false
-		m.loginIDInput.Blur()
-		m.loginIDInput.SetValue("")
+		m.chatUsernameInput.Blur()
+		m.chatUsernameInput.SetValue("")
 		m.setPresence(msg.chat.UserID, msg.chat.Online, msg.chat.LastSeenAt)
 
 		// Open the chat right away and refresh the list in the background.
@@ -606,7 +632,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 
-	case passwordChangedMsg, passwordChangeErrorMsg,
+	case usernameChangedMsg, usernameChangeErrorMsg,
+		passwordChangedMsg, passwordChangeErrorMsg,
 		loggedOutAllMsg, logoutAllErrorMsg:
 		return m.updateSettingsResult(msg)
 
@@ -703,6 +730,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 
 		if msg.String() == "ctrl+c" {
+			// Quitting loses the OstrichID for good: ask once more.
+			if m.stage == stageOstrichID && !m.quitArmed {
+				m.quitArmed = true
+				return m, nil
+			}
+
 			return m.quit()
 		}
 
@@ -718,6 +751,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case stageSettings:
 			return m.updateSettings(msg)
+
+		case stageOstrichID:
+			return m.updateOstrichID(msg)
 		}
 	}
 
@@ -740,17 +776,16 @@ func (m tuiModel) hasMessage(id string) bool {
 
 // moveFocus moves the login form focus by delta fields, wrapping around.
 func (m *tuiModel) moveFocus(delta int) {
-	fields := 2
-
-	if m.authMode == authRegister {
-		fields = 3
-	}
+	// Login: username, password, OstrichID.
+	// Register: username, password, confirm password.
+	const fields = 3
 
 	m.focus = ((m.focus+delta)%fields + fields) % fields
 
 	m.username.Blur()
 	m.password.Blur()
 	m.confirmPassword.Blur()
+	m.ostrichIDInput.Blur()
 
 	switch m.focus {
 	case 0:
@@ -760,7 +795,11 @@ func (m *tuiModel) moveFocus(delta int) {
 		m.password.Focus()
 
 	case 2:
-		m.confirmPassword.Focus()
+		if m.authMode == authRegister {
+			m.confirmPassword.Focus()
+		} else {
+			m.ostrichIDInput.Focus()
+		}
 	}
 }
 
@@ -809,7 +848,8 @@ func (m tuiModel) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "enter":
-		username := strings.TrimSpace(m.username.Value())
+		// "@alice" works too.
+		username := strings.TrimPrefix(strings.TrimSpace(m.username.Value()), "@")
 		password := m.password.Value()
 
 		if username == "" {
@@ -822,7 +862,11 @@ func (m tuiModel) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		auth := loginWithCredentials
+		ostrichID := strings.TrimSpace(m.ostrichIDInput.Value())
+
+		auth := func() (*LoginResponse, error) {
+			return loginWithCredentials(username, password, ostrichID)
+		}
 
 		if m.authMode == authRegister {
 			confirmPassword := m.confirmPassword.Value()
@@ -837,7 +881,9 @@ func (m tuiModel) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			auth = registerWithCredentials
+			auth = func() (*LoginResponse, error) {
+				return registerWithCredentials(username, password)
+			}
 		}
 
 		m.loading = true
@@ -846,7 +892,7 @@ func (m tuiModel) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.notice = ""
 
 		return m, func() tea.Msg {
-			result, err := auth(username, password)
+			result, err := auth()
 
 			if err != nil {
 				return authErrorMsg{err: err}
@@ -867,7 +913,11 @@ func (m tuiModel) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.password, cmd = m.password.Update(msg)
 
 	case 2:
-		m.confirmPassword, cmd = m.confirmPassword.Update(msg)
+		if m.authMode == authRegister {
+			m.confirmPassword, cmd = m.confirmPassword.Update(msg)
+		} else {
+			m.ostrichIDInput, cmd = m.ostrichIDInput.Update(msg)
+		}
 	}
 
 	return m, cmd
@@ -890,9 +940,9 @@ func (m tuiModel) updateChats(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		m.creatingChat = true
 		m.err = nil
-		m.loginIDInput.SetValue("")
+		m.chatUsernameInput.SetValue("")
 
-		return m, m.loginIDInput.Focus()
+		return m, m.chatUsernameInput.Focus()
 
 	case "r":
 		m.err = nil
@@ -928,35 +978,37 @@ func (m tuiModel) updateNewChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "esc":
 		m.creatingChat = false
-		m.loginIDInput.Blur()
+		m.chatUsernameInput.Blur()
 		m.err = nil
 
 		return m, nil
 
 	case "enter":
-		loginID := strings.TrimSpace(m.loginIDInput.Value())
+		// "@alice" and "alice" both work.
+		username := strings.TrimPrefix(
+			strings.TrimSpace(m.chatUsernameInput.Value()),
+			"@",
+		)
 
-		if loginID == "" {
-			m.err = fmt.Errorf("login ID is required")
+		if !validUsername(username) {
+			m.err = errInvalidUsername
 			return m, nil
 		}
 
-		for _, r := range loginID {
-			if r < '0' || r > '9' {
-				m.err = fmt.Errorf("login ID must contain only digits")
-				return m, nil
-			}
+		if strings.EqualFold(username, m.user.User.Username) {
+			m.err = fmt.Errorf("this is your own username")
+			return m, nil
 		}
 
 		m.loading = true
 		m.err = nil
 
-		return m, createChatCmd(m.user.Token, loginID)
+		return m, createChatCmd(m.user.Token, username)
 	}
 
 	var cmd tea.Cmd
 
-	m.loginIDInput, cmd = m.loginIDInput.Update(msg)
+	m.chatUsernameInput, cmd = m.chatUsernameInput.Update(msg)
 
 	return m, cmd
 }
@@ -1049,6 +1101,9 @@ func (m tuiModel) View() string {
 
 	case stageSettings:
 		return m.settingsView()
+
+	case stageOstrichID:
+		return m.ostrichIDView()
 	}
 
 	return ""
@@ -1132,8 +1187,25 @@ func (m tuiModel) loginView() string {
 	b.WriteString(inputStyle.Render(m.password.View()))
 	b.WriteString("\n")
 
+	if m.authMode == authLogin {
+		b.WriteString("\n")
+		b.WriteString(labelStyle.Render("OstrichID"))
+		b.WriteString("\n")
+		b.WriteString(inputStyle.Render(m.ostrichIDInput.View()))
+		b.WriteString("\n")
+		b.WriteString(hintStyle.Render(
+			"Account created before OstrichIDs? Leave it empty once to get yours.",
+		))
+		b.WriteString("\n")
+	}
+
 	if m.authMode == authRegister {
 		b.WriteString("\n")
+		b.WriteString(hintStyle.Render(
+			"After registration you get an OstrichID: you need it to log in,\n" +
+				"and it is shown only once.",
+		))
+		b.WriteString("\n\n")
 
 		b.WriteString(
 			labelStyle.Render("Confirm password"),
@@ -1234,7 +1306,7 @@ func (m tuiModel) chatsView() string {
 
 	if m.user != nil {
 		b.WriteString("\n")
-		b.WriteString(hintStyle.Render("Your login ID: " + m.user.User.LoginID))
+		b.WriteString(hintStyle.Render("Share your @" + sanitize(m.user.User.Username) + " to start a chat"))
 	}
 
 	b.WriteString("\n\n")
@@ -1267,7 +1339,7 @@ func (m tuiModel) chatsView() string {
 				name = selectedChatStyle.Render(name)
 			}
 
-			chatList.WriteString(name + "\n  " + chat.LoginID)
+			chatList.WriteString(name + "\n  @" + sanitize(chat.Username))
 
 			if status := m.presenceText(chat.UserID); status != "" {
 				chatList.WriteString("  " + status)
@@ -1298,8 +1370,8 @@ func (m tuiModel) chatsView() string {
 
 	if m.creatingChat {
 		rightText = "New chat\n\n" +
-			"Enter the login ID of the user:\n\n" +
-			m.loginIDInput.View()
+			"Enter the exact @username of the user:\n\n" +
+			m.chatUsernameInput.View()
 
 		if m.loading {
 			rightText += "\n\nCreating chat..."
@@ -1355,7 +1427,7 @@ func (m tuiModel) chatListWindow() (start, end int) {
 
 	// Everything except the list itself: header (4 lines), box border and
 	// padding (4), "Chats" title (2), "more" markers (4), hints and error (4).
-	// Each chat takes 3 lines (name, login ID, blank line).
+	// Each chat takes 3 lines (name, @username, blank line).
 	visible := max((height-18)/3, 1)
 
 	start = max(m.selected-visible+1, 0)

@@ -4,7 +4,6 @@
 
 CREATE TABLE IF NOT EXISTS users (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  login_id      BIGINT NOT NULL UNIQUE,
   username      VARCHAR(32) NOT NULL,
   password_hash TEXT NOT NULL,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -13,6 +12,18 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- When the user was last connected (for "last seen"); NULL if never.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+
+-- Users find each other by @username; the numeric login_id is gone.
+ALTER TABLE users DROP COLUMN IF EXISTS login_id;
+
+-- SHA-256 of the user's OstrichID, the second secret needed to log in.
+-- NULL for accounts created before OstrichIDs: they get one at their
+-- next login.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS ostrich_id_hash TEXT;
+
+-- Last username change; NULL if never changed (the first change after
+-- registration is allowed right away, then once per 28 days).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username_changed_at TIMESTAMPTZ;
 
 -- Usernames are unique case-insensitively ("Alice" and "alice" are the
 -- same user), which also protects registration from races.

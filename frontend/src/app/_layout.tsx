@@ -57,6 +57,8 @@ function RootNavigator() {
   }
 
   const signedIn = state.status === "signedIn";
+  // A new OstrichID must be saved before anything else.
+  const mustSaveOstrichId = signedIn && state.pendingOstrichId !== null;
   const baseTheme = mode === "dark" ? DarkTheme : DefaultTheme;
 
   return (
@@ -87,7 +89,11 @@ function RootNavigator() {
           <Stack.Screen name="register" />
         </Stack.Protected>
 
-        <Stack.Protected guard={signedIn}>
+        <Stack.Protected guard={mustSaveOstrichId}>
+          <Stack.Screen name="ostrich-id" />
+        </Stack.Protected>
+
+        <Stack.Protected guard={signedIn && !mustSaveOstrichId}>
           <Stack.Screen name="chats/index" />
           <Stack.Screen name="chats/[chatId]" />
           <Stack.Screen name="chats/new" options={{ presentation: "modal" }} />

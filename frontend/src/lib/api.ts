@@ -2,8 +2,9 @@ import { API_URL } from "./config";
 
 export type User = {
   id: string;
-  login_id: string;
   username: string;
+  // When the username can be changed again; null if it can be now.
+  next_username_change_at: string | null;
 };
 
 export type Chat = {
@@ -12,7 +13,6 @@ export type Chat = {
   created_at: string;
   updated_at: string;
   user_id: string;
-  login_id: string;
   username: string;
   // Presence of the other user.
   online: boolean;
@@ -31,6 +31,9 @@ export type Message = {
 export type AuthResponse = {
   token: string;
   user: User;
+  // Only right after registration, or the first login of an account
+  // created before OstrichIDs. Shown to the user once, never again.
+  ostrich_id?: string;
 };
 
 export class ApiError extends Error {
@@ -103,9 +106,15 @@ async function request<T>(
   return data as T;
 }
 
-export function login(username: string, password: string) {
+export function login(username: string, password: string, ostrichId: string) {
   return request<AuthResponse>("POST", "/api/auth/login", {
-    body: { username, password },
+    body: {
+      username,
+      password,
+      // Left out when empty: accounts created before OstrichIDs log in
+      // without one once.
+      ...(ostrichId ? { ostrich_id: ostrichId } : {}),
+    },
   });
 }
 
@@ -136,6 +145,21 @@ export function changePassword(
   });
 }
 
+// Allowed right after registration, then once per 28 days.
+export async function changeUsername(
+  token: string,
+  username: string,
+  password: string,
+) {
+  const { user } = await request<{ user: User }>(
+    "POST",
+    "/api/auth/username",
+    { token, body: { username, password } },
+  );
+
+  return user;
+}
+
 // Single-use credential for opening the websocket from a browser.
 export async function getWsTicket(token: string) {
   const { ticket } = await request<{ ticket: string }>(
@@ -163,18 +187,18 @@ export async function getChats(token: string) {
   return chats;
 }
 
-// Opens (or returns the existing) direct chat with the user.
-export async function createChat(token: string, loginId: string) {
+// Opens (or returns the existing) direct chat with the user that has
+// exactly this username.
+export async function createChat(token: string, username: string) {
   const { chat, user } = await request<{
     chat: { id: string; type: string; created_at: string };
-    user: User & { online?: boolean; last_seen_at?: string | null };
-  }>("POST", "/api/chats", { token, body: { login_id: loginId } });
+    user: { id: string; username: string; online?: boolean; last_seen_at?: string | null };
+  }>("POST", "/api/chats", { token, body: { username } });
 
   return {
     ...chat,
     updated_at: chat.created_at,
     user_id: user.id,
-    login_id: user.login_id,
     username: user.username,
     online: user.online ?? false,
     last_seen_at: user.last_seen_at ?? null,

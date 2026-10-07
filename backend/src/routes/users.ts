@@ -1,36 +1,42 @@
 import { FastifyInstance } from "fastify";
+import { usernameSchema } from "../accounts.js";
 import { db } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
 
+// Exact lookups only (no search by part of a name), so the list of users
+// cannot be enumerated; also rate limited per IP.
+export const userLookupRateLimit = {
+  rateLimit: {
+    max: 30,
+    timeWindow: "1 minute",
+  },
+};
+
 export default async function usersRoutes(server: FastifyInstance) {
-  server.get<{ Params: { loginId: string } }>(
-    "/api/users/:loginId",
+  // FIND a user by their exact @username (case-insensitive)
+  server.get<{ Params: { username: string } }>(
+    "/api/users/:username",
     {
       preHandler: authenticate,
+      config: userLookupRateLimit,
       schema: {
         params: {
           type: "object",
-          required: ["loginId"],
+          required: ["username"],
           properties: {
-            loginId: { type: "string", pattern: "^[0-9]{1,18}$" },
+            username: usernameSchema,
           },
         },
       },
     },
     async (request, reply) => {
-      const { loginId } = request.params;
-
       const result = await db.query(
         `
-        SELECT
-          id,
-          login_id,
-          username,
-          created_at
+        SELECT id, username
         FROM users
-        WHERE login_id = $1
+        WHERE LOWER(username) = LOWER($1)
         `,
-        [loginId],
+        [request.params.username],
       );
 
       if (result.rows.length === 0) {

@@ -14,9 +14,11 @@ import { useAuth, useCurrentUser } from "@/context/auth";
 import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
 import { createChat } from "@/lib/api";
-import { formatLoginId } from "@/lib/format";
 import { rememberPeer } from "@/lib/peers";
 import { radius } from "@/theme/colors";
+
+// Same rules as the backend.
+const USERNAME_RE = /^[A-Za-z0-9_.-]{3,32}$/;
 
 export default function NewChatScreen() {
   const router = useRouter();
@@ -25,7 +27,7 @@ export default function NewChatScreen() {
   const user = useCurrentUser();
   const { seedPresence } = useRealtime();
 
-  const [loginId, setLoginId] = useState("");
+  const [username, setUsername] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -33,16 +35,16 @@ export default function NewChatScreen() {
     router.canGoBack() ? router.back() : router.replace("/chats");
 
   const submit = async () => {
-    // Allow pasting IDs with spaces ("1234 5678 ...").
-    const id = loginId.replace(/\s/g, "");
+    // "@alice" and "alice" both work.
+    const name = username.trim().replace(/^@/, "");
 
-    if (!/^\d{1,18}$/.test(id)) {
-      setError("Login ID must contain only digits");
+    if (!USERNAME_RE.test(name)) {
+      setError("Username: 3–32 characters, letters, digits, _ . - only");
       return;
     }
 
-    if (id === user?.login_id) {
-      setError("This is your own login ID");
+    if (name.toLowerCase() === user?.username.toLowerCase()) {
+      setError("This is your own username");
       return;
     }
 
@@ -50,7 +52,7 @@ export default function NewChatScreen() {
     setLoading(true);
 
     try {
-      const chat = await withToken((token) => createChat(token, id));
+      const chat = await withToken((token) => createChat(token, name));
 
       seedPresence([
         {
@@ -62,7 +64,6 @@ export default function NewChatScreen() {
       rememberPeer(chat.id, {
         userId: chat.user_id,
         username: chat.username,
-        loginId: chat.login_id,
       });
       router.replace({
         pathname: "/chats/[chatId]",
@@ -89,19 +90,16 @@ export default function NewChatScreen() {
           ]}
         >
           <Text style={[styles.text, { color: colors.textSoft }]}>
-            Enter the login ID of the person you want to chat with. They can
-            find it on their chats screen.
+            Enter the exact @username of the person you want to chat with.
+            They can find it on their chats screen.
           </Text>
 
           <TextField
-            label="Login ID"
-            placeholder={
-              user ? formatLoginId(user.login_id).replace(/\d/g, "0") : ""
-            }
-            value={loginId}
-            onChangeText={setLoginId}
-            keyboardType="number-pad"
-            maxLength={24}
+            label="Username"
+            placeholder="@username"
+            value={username}
+            onChangeText={setUsername}
+            maxLength={33}
             autoFocus
             returnKeyType="go"
             onSubmitEditing={submit}

@@ -19,7 +19,7 @@ import { useAuth, useCurrentUser } from "@/context/auth";
 import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
 import { getChats, type Chat } from "@/lib/api";
-import { formatChatDate, formatLoginId, formatPresence } from "@/lib/format";
+import { formatChatDate, formatPresence } from "@/lib/format";
 import { rememberPeer } from "@/lib/peers";
 import { useMinuteTick } from "@/lib/use-minute-tick";
 import { radius } from "@/theme/colors";
@@ -68,12 +68,12 @@ export default function ChatsScreen() {
     setRefreshing(false);
   };
 
-  const copyLoginId = async () => {
+  const copyUsername = async () => {
     if (!user) {
       return;
     }
 
-    await Clipboard.setStringAsync(user.login_id);
+    await Clipboard.setStringAsync(`@${user.username}`);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -82,7 +82,6 @@ export default function ChatsScreen() {
     rememberPeer(chat.id, {
       userId: chat.user_id,
       username: chat.username,
-      loginId: chat.login_id,
     });
     router.push({ pathname: "/chats/[chatId]", params: { chatId: chat.id } });
   };
@@ -132,19 +131,19 @@ export default function ChatsScreen() {
         ListHeaderComponent={
           <View style={styles.listHeader}>
             <Pressable
-              onPress={copyLoginId}
+              onPress={copyUsername}
               accessibilityRole="button"
-              accessibilityLabel="Copy your login ID"
+              accessibilityLabel="Copy your username"
               style={[
                 styles.idCard,
                 { backgroundColor: colors.panel, borderColor: colors.line },
               ]}
             >
               <Text style={[styles.eyebrow, { color: colors.muted }]}>
-                Your login ID
+                Your username
               </Text>
-              <Text selectable style={[styles.loginId, { color: colors.text }]}>
-                {formatLoginId(user.login_id)}
+              <Text selectable style={[styles.username, { color: colors.text }]}>
+                @{user.username}
               </Text>
               <Text style={[styles.hint, { color: colors.muted }]}>
                 {copied ? "Copied!" : "Tap to copy · share it to start a chat"}
@@ -180,7 +179,7 @@ export default function ChatsScreen() {
             <ActivityIndicator color={colors.text} style={styles.empty} />
           ) : (
             <Text style={[styles.emptyText, { color: colors.muted }]}>
-              No chats yet.{"\n"}Start one with a friend's login ID.
+              No chats yet.{"\n"}Start one with a friend&apos;s @username.
             </Text>
           )
         }
@@ -217,7 +216,7 @@ export default function ChatsScreen() {
                       {"  ·  "}
                     </Text>
                   ) : null}
-                  {formatLoginId(item.login_id)}
+                  @{item.username}
                 </Text>
               </View>
               <Text style={[styles.chatMeta, { color: colors.muted }]}>
@@ -274,7 +273,7 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
   },
 
-  loginId: {
+  username: {
     fontSize: 24,
     fontWeight: "700",
     letterSpacing: 1,

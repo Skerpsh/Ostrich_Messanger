@@ -4,21 +4,33 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// Settings screen: change password, log out of all devices.
+// Settings screen: change username, change password, log out of all
+// devices.
 
 const minPasswordLength = 8
 
 const (
-	settingsCurrent = iota
+	settingsNewUsername = iota
+	settingsUsernamePassword
+	settingsCurrent
 	settingsNew
 	settingsConfirm
 	settingsFields
 )
+
+type usernameChangedMsg struct {
+	account *Account
+}
+
+type usernameChangeErrorMsg struct {
+	err error
+}
 
 type passwordChangedMsg struct{}
 
@@ -44,10 +56,28 @@ func newPasswordInput(placeholder string) textinput.Model {
 }
 
 func newSettingsInputs() [settingsFields]textinput.Model {
+	username := textinput.New()
+	username.Placeholder = "@username"
+	username.CharLimit = 33
+	username.Width = 40
+
 	return [settingsFields]textinput.Model{
+		username,
+		newPasswordInput("Password"),
 		newPasswordInput("Current password"),
 		newPasswordInput("New password"),
 		newPasswordInput("Confirm new password"),
+	}
+}
+
+func changeUsernameCmd(token, username, password string) tea.Cmd {
+	return func() tea.Msg {
+		account, err := changeUsername(token, username, password)
+		if err != nil {
+			return usernameChangeErrorMsg{err: err}
+		}
+
+		return usernameChangedMsg{account: account}
 	}
 }
 
@@ -96,13 +126,32 @@ func (m *tuiModel) focusSetting(index int) tea.Cmd {
 func (m tuiModel) updateSettingsResult(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
+	case usernameChangedMsg:
+		m.loading = false
+		m.err = nil
+		m.user.User = *msg.account
+		m.notice = "Username changed. Use the new one to log in."
+		m.settingsInputs = newSettingsInputs()
+
+		return m, m.focusSetting(m.settingsFocus)
+
+	case usernameChangeErrorMsg:
+		if errors.Is(msg.err, errSessionExpired) {
+			return m.sessionExpired()
+		}
+
+		m.loading = false
+		m.err = msg.err
+
+		return m, nil
+
 	case passwordChangedMsg:
 		m.loading = false
 		m.err = nil
 		m.notice = "Password changed. Other devices have been logged out."
 		m.settingsInputs = newSettingsInputs()
 
-		return m, m.focusSetting(0)
+		return m, m.focusSetting(m.settingsFocus)
 
 	case passwordChangeErrorMsg:
 		if errors.Is(msg.err, errSessionExpired) {
@@ -179,6 +228,10 @@ func (m tuiModel) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, logoutAllCmd(m.user.Token)
 
 	case "enter":
+		if m.settingsFocus <= settingsUsernamePassword {
+			return m.submitUsername()
+		}
+
 		current := m.settingsInputs[settingsCurrent].Value()
 		newPassword := m.settingsInputs[settingsNew].Value()
 		confirm := m.settingsInputs[settingsConfirm].Value()
@@ -216,6 +269,44 @@ func (m tuiModel) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m tuiModel) submitUsername() (tea.Model, tea.Cmd) {
+	username := strings.TrimPrefix(
+		strings.TrimSpace(m.settingsInputs[settingsNewUsername].Value()),
+		"@",
+	)
+	password := m.settingsInputs[settingsUsernamePassword].Value()
+
+	m.notice = ""
+
+	switch {
+	case !validUsername(username):
+		m.err = errInvalidUsername
+
+	case password == "":
+		m.err = fmt.Errorf("password is required")
+
+	default:
+		m.loading = true
+		m.err = nil
+
+		return m, changeUsernameCmd(m.user.Token, username, password)
+	}
+
+	return m, nil
+}
+
+// nextUsernameChange returns when the username can be changed again, or ""
+// if it can be now.
+func (m tuiModel) nextUsernameChange() string {
+	next := parseTime(m.user.User.NextUsernameChangeAt)
+
+	if next == nil || !next.After(time.Now()) {
+		return ""
+	}
+
+	return next.Local().Format("02.01.2006")
+}
+
 func (m tuiModel) settingsView() string {
 	var b strings.Builder
 
@@ -225,11 +316,33 @@ func (m tuiModel) settingsView() string {
 
 	var form strings.Builder
 
+	form.WriteString("Username\n")
+	form.WriteString(hintStyle.Render(
+		"You are @" + sanitize(m.user.User.Username) +
+			". You log in with it; it can be changed once every 28 days.",
+	))
+	form.WriteString("\n")
+
+	if next := m.nextUsernameChange(); next != "" {
+		form.WriteString(hintStyle.Render("You can change it again on " + next + "."))
+		form.WriteString("\n")
+	}
+
+	form.WriteString("\n")
+	form.WriteString(labelStyle.Render("New username"))
+	form.WriteString("\n")
+	form.WriteString(inputStyle.Render(m.settingsInputs[settingsNewUsername].View()))
+	form.WriteString("\n\n")
+	form.WriteString(labelStyle.Render("Password"))
+	form.WriteString("\n")
+	form.WriteString(inputStyle.Render(m.settingsInputs[settingsUsernamePassword].View()))
+	form.WriteString("\n\n\n")
+
 	form.WriteString("Change password\n")
 	form.WriteString(hintStyle.Render("Your other devices will be logged out."))
 	form.WriteString("\n\n")
 
-	labels := [settingsFields]string{
+	labels := []string{
 		"Current password",
 		"New password",
 		"Confirm new password",
@@ -238,9 +351,9 @@ func (m tuiModel) settingsView() string {
 	for i, label := range labels {
 		form.WriteString(labelStyle.Render(label))
 		form.WriteString("\n")
-		form.WriteString(inputStyle.Render(m.settingsInputs[i].View()))
+		form.WriteString(inputStyle.Render(m.settingsInputs[settingsCurrent+i].View()))
 
-		if i < settingsFields-1 {
+		if i < len(labels)-1 {
 			form.WriteString("\n\n")
 		}
 	}
@@ -264,7 +377,7 @@ func (m tuiModel) settingsView() string {
 		b.WriteString("Please wait...")
 	} else {
 		b.WriteString(hintStyle.Render(
-			"↑↓ Field   Enter Change password   Ctrl+O Log out everywhere   Esc Back",
+			"↑↓ Field   Enter Save the focused section   Ctrl+O Log out everywhere   Esc Back",
 		))
 	}
 

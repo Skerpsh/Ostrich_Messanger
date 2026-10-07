@@ -11,21 +11,39 @@ import { getItem, removeItem, setItem } from "@/lib/storage";
 
 const TOKEN_KEY = "ostrich-token";
 const USER_KEY = "ostrich-user";
+// An OstrichID the user has not confirmed saving yet. Kept on the device
+// until then, so it is not lost if the app closes on the screen showing it
+// (the server cannot show it again).
+const PENDING_OSTRICH_ID_KEY = "ostrich-pending-id";
 
 type AuthState =
   | { status: "loading" }
   | { status: "signedOut" }
-  | { status: "signedIn"; token: string; user: api.User };
+  | {
+      status: "signedIn";
+      token: string;
+      user: api.User;
+      // Shown until the user confirms they have saved it.
+      pendingOstrichId: string | null;
+    };
 
 type AuthContextValue = {
   state: AuthState;
   // Message shown on the login screen, e.g. after the session expired.
   notice: string | null;
-  signIn: (username: string, password: string) => Promise<void>;
+  signIn: (
+    username: string,
+    password: string,
+    ostrichId: string,
+  ) => Promise<void>;
   signUp: (username: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   // Ends all sessions of the user (every device), then signs out here.
   signOutEverywhere: () => Promise<void>;
+  // The user has saved their OstrichID: forget it on this device.
+  confirmOstrichIdSaved: () => Promise<void>;
+  // Replaces the signed-in user, e.g. after a username change.
+  updateUser: (user: api.User) => Promise<void>;
   // Runs an authorized request; logs out if the session has expired.
   withToken: <T>(fn: (token: string) => Promise<T>) => Promise<T>;
 };
@@ -37,16 +55,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [notice, setNotice] = useState<string | null>(null);
 
   const clearSession = useCallback(async () => {
-    await Promise.all([removeItem(TOKEN_KEY), removeItem(USER_KEY)]);
+    await Promise.all([
+      removeItem(TOKEN_KEY),
+      removeItem(USER_KEY),
+      removeItem(PENDING_OSTRICH_ID_KEY),
+    ]);
     setState({ status: "signedOut" });
   }, []);
 
   // Restore the saved session on startup.
   useEffect(() => {
     (async () => {
-      const [token, savedUser] = await Promise.all([
+      const [token, savedUser, pendingOstrichId] = await Promise.all([
         getItem(TOKEN_KEY),
         getItem(USER_KEY),
+        getItem(PENDING_OSTRICH_ID_KEY),
       ]);
 
       if (!token || !savedUser) {
@@ -57,7 +80,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const user = await api.getMe(token);
         await setItem(USER_KEY, JSON.stringify(user));
-        setState({ status: "signedIn", token, user });
+        setState({ status: "signedIn", token, user, pendingOstrichId });
       } catch (error) {
         if (error instanceof api.SessionExpiredError) {
           setNotice(error.message);
@@ -66,22 +89,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
 
         // Offline: keep the saved session, requests will retry later.
-        setState({ status: "signedIn", token, user: JSON.parse(savedUser) });
+        setState({
+          status: "signedIn",
+          token,
+          user: JSON.parse(savedUser),
+          pendingOstrichId,
+        });
       }
     })();
   }, [clearSession]);
 
-  const startSession = async ({ token, user }: api.AuthResponse) => {
+  const startSession = async ({ token, user, ostrich_id }: api.AuthResponse) => {
     await Promise.all([
       setItem(TOKEN_KEY, token),
       setItem(USER_KEY, JSON.stringify(user)),
+      ostrich_id
+        ? setItem(PENDING_OSTRICH_ID_KEY, ostrich_id)
+        : removeItem(PENDING_OSTRICH_ID_KEY),
     ]);
     setNotice(null);
-    setState({ status: "signedIn", token, user });
+    setState({
+      status: "signedIn",
+      token,
+      user,
+      pendingOstrichId: ostrich_id ?? null,
+    });
   };
 
-  const signIn = async (username: string, password: string) => {
-    await startSession(await api.login(username, password));
+  const signIn = async (
+    username: string,
+    password: string,
+    ostrichId: string,
+  ) => {
+    await startSession(await api.login(username, password, ostrichId));
   };
 
   const signUp = async (username: string, password: string) => {
@@ -105,6 +145,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     await clearSession();
+  };
+
+  const confirmOstrichIdSaved = async () => {
+    await removeItem(PENDING_OSTRICH_ID_KEY);
+    setState((current) =>
+      current.status === "signedIn"
+        ? { ...current, pendingOstrichId: null }
+        : current,
+    );
+  };
+
+  const updateUser = async (user: api.User) => {
+    await setItem(USER_KEY, JSON.stringify(user));
+    setState((current) =>
+      current.status === "signedIn" ? { ...current, user } : current,
+    );
   };
 
   const token = state.status === "signedIn" ? state.token : null;
@@ -138,6 +194,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signUp,
         signOut,
         signOutEverywhere,
+        confirmOstrichIdSaved,
+        updateUser,
         withToken,
       }}
     >

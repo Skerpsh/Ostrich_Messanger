@@ -40,15 +40,23 @@ var httpClient = &http.Client{Timeout: requestTimeout}
 // errSessionExpired is returned when the server rejects the auth token.
 var errSessionExpired = errors.New("session expired, please log in again")
 
-type LoginResponse struct {
-	Message string `json:"message"`
-	Token   string `json:"token"`
+// Account is the logged-in user as the server returns it to its owner.
+type Account struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
 
-	User struct {
-		ID       string `json:"id"`
-		LoginID  string `json:"login_id"`
-		Username string `json:"username"`
-	} `json:"user"`
+	// When the username can be changed again; nil if it can be now.
+	NextUsernameChangeAt *string `json:"next_username_change_at"`
+}
+
+type LoginResponse struct {
+	Message string  `json:"message"`
+	Token   string  `json:"token"`
+	User    Account `json:"user"`
+
+	// Only right after registration, or the first login of an account
+	// created before OstrichIDs. Shown to the user once, never again.
+	OstrichID string `json:"ostrich_id"`
 }
 
 type Chat struct {
@@ -57,7 +65,6 @@ type Chat struct {
 	Created  string `json:"created_at"`
 	Updated  string `json:"updated_at"`
 	UserID   string `json:"user_id"`
-	LoginID  string `json:"login_id"`
 	Username string `json:"username"`
 
 	// Presence of the other user.
@@ -69,35 +76,29 @@ type ChatsResponse struct {
 	Chats []Chat `json:"chats"`
 }
 
-func loginWithCredentials(username, password string) (*LoginResponse, error) {
-	var result LoginResponse
-
-	if err := authRequest("/api/auth/login", username, password, &result); err != nil {
-		return nil, err
+// loginWithCredentials logs in with username, password and OstrichID.
+// ostrichID may be empty for accounts created before OstrichIDs: they
+// get one in the response.
+func loginWithCredentials(username, password, ostrichID string) (*LoginResponse, error) {
+	body := map[string]string{
+		"username": username,
+		"password": password,
 	}
 
-	if result.Token == "" {
-		return nil, fmt.Errorf(
-			"server did not return authentication token",
-		)
+	if ostrichID != "" {
+		body["ostrich_id"] = ostrichID
 	}
 
-	return &result, nil
+	return authRequest("/api/auth/login", body)
 }
 
+// registerWithCredentials creates the account; the response carries its
+// OstrichID.
 func registerWithCredentials(username, password string) (*LoginResponse, error) {
-	var result LoginResponse
-
-	if err := authRequest("/api/auth/register", username, password, &result); err != nil {
-		return nil, err
-	}
-
-	if result.Token != "" {
-		return &result, nil
-	}
-
-	// Older backends do not return a token on registration.
-	return loginWithCredentials(username, password)
+	return authRequest("/api/auth/register", map[string]string{
+		"username": username,
+		"password": password,
+	})
 }
 
 func logout(token string) error {
@@ -116,6 +117,24 @@ func logoutAll(token string) error {
 	return authorizedPost(token, "/api/auth/logout-all", struct{}{}, nil)
 }
 
+// changeUsername sets a new username (allowed right after registration,
+// then once per 28 days) and returns the updated account.
+func changeUsername(token, username, password string) (*Account, error) {
+	var result struct {
+		User Account `json:"user"`
+	}
+
+	err := authorizedPost(token, "/api/auth/username", map[string]string{
+		"username": username,
+		"password": password,
+	}, &result)
+	if err != nil {
+		return nil, err
+	}
+
+	return &result.User, nil
+}
+
 // changePassword changes the password and ends all other sessions.
 func changePassword(token, currentPassword, newPassword string) error {
 	return authorizedPost(token, "/api/auth/password", map[string]string{
@@ -124,20 +143,11 @@ func changePassword(token, currentPassword, newPassword string) error {
 	}, nil)
 }
 
-// authRequest posts credentials to an auth endpoint and decodes the
-// response into out (if out is not nil).
-func authRequest(
-	endpoint string,
-	username string,
-	password string,
-	out any,
-) error {
-	body, err := json.Marshal(map[string]string{
-		"username": username,
-		"password": password,
-	})
+// authRequest posts credentials to an auth endpoint.
+func authRequest(endpoint string, credentials map[string]string) (*LoginResponse, error) {
+	body, err := json.Marshal(credentials)
 	if err != nil {
-		return fmt.Errorf("failed to encode request: %w", err)
+		return nil, fmt.Errorf("failed to encode request: %w", err)
 	}
 
 	req, err := http.NewRequest(
@@ -146,12 +156,22 @@ func authRequest(
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
-	return doJSON(req, out)
+	var result LoginResponse
+
+	if err := doJSON(req, &result); err != nil {
+		return nil, err
+	}
+
+	if result.Token == "" {
+		return nil, fmt.Errorf("server did not return authentication token")
+	}
+
+	return &result, nil
 }
 
 // authorizedPost sends v as JSON in an authenticated POST request and
@@ -264,7 +284,6 @@ type createChatResponse struct {
 
 	User struct {
 		ID         string  `json:"id"`
-		LoginID    string  `json:"login_id"`
 		Username   string  `json:"username"`
 		Online     bool    `json:"online"`
 		LastSeenAt *string `json:"last_seen_at"`
@@ -272,12 +291,12 @@ type createChatResponse struct {
 }
 
 // createChat opens (or returns the existing) direct chat with the user
-// that has the given login ID.
-func createChat(token, loginID string) (Chat, error) {
+// that has exactly this username.
+func createChat(token, username string) (Chat, error) {
 	var result createChatResponse
 
 	err := authorizedPost(token, "/api/chats", map[string]string{
-		"login_id": loginID,
+		"username": username,
 	}, &result)
 	if err != nil {
 		return Chat{}, fmt.Errorf("failed to create chat: %w", err)
@@ -288,7 +307,6 @@ func createChat(token, loginID string) (Chat, error) {
 		Type:     result.Chat.Type,
 		Created:  result.Chat.Created,
 		UserID:   result.User.ID,
-		LoginID:  result.User.LoginID,
 		Username: result.User.Username,
 
 		Online:     result.User.Online,

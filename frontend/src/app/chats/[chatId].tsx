@@ -19,7 +19,7 @@ import { useAuth, useCurrentUser } from "@/context/auth";
 import { usePresence, useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
 import { getChats, getMessages, sendMessage, type Message } from "@/lib/api";
-import { formatLoginId, formatPresence, formatTime } from "@/lib/format";
+import { formatPresence, formatTime } from "@/lib/format";
 import { knownPeer, rememberPeer } from "@/lib/peers";
 import { useMinuteTick } from "@/lib/use-minute-tick";
 import { radius } from "@/theme/colors";
@@ -77,7 +77,6 @@ export default function ChatScreen() {
           const verified = {
             userId: chat.user_id,
             username: chat.username,
-            loginId: chat.login_id,
           };
 
           rememberPeer(chat.id, verified);
@@ -190,8 +189,8 @@ export default function ChatScreen() {
               <Text style={{ color: colors.online }}>● </Text>
             ) : null}
             {statusText}
-            {statusText && peer?.loginId ? "  ·  " : ""}
-            {peer?.loginId ? formatLoginId(peer.loginId) : ""}
+            {statusText && peer ? "  ·  " : ""}
+            {peer ? `@${peer.username}` : ""}
           </>
         }
       />

@@ -7,6 +7,17 @@ import {
   PG_UNIQUE_VIOLATION,
   withTransaction,
 } from "../database.js";
+import {
+  accountView,
+  formatOstrichId,
+  generateOstrichId,
+  hashOstrichId,
+  OSTRICH_ID_INPUT_PATTERN,
+  ostrichIdMatches,
+  passwordSchema,
+  usernameSchema,
+  USERNAME_CHANGE_INTERVAL_DAYS,
+} from "../accounts.js";
 import { authenticate, hashToken } from "../middleware/auth.js";
 import {
   closeSessionSockets,
@@ -16,24 +27,28 @@ import {
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-// Letters, digits, "_", "." and "-" only: usernames are shown in terminals,
-// so control characters and look-alike whitespace are not allowed.
-const credentialsSchema = {
+const registerSchema = {
   body: {
     type: "object",
     required: ["username", "password"],
     properties: {
-      username: {
-        type: "string",
-        minLength: 3,
-        maxLength: 32,
-        pattern: "^[A-Za-z0-9_.-]+$",
-      },
-      password: {
-        type: "string",
-        minLength: 8,
-        maxLength: 128,
-      },
+      username: usernameSchema,
+      password: passwordSchema,
+    },
+  },
+} as const;
+
+// Login accepts any password length: the rules for new passwords may have
+// changed since an account was created.
+const loginSchema = {
+  body: {
+    type: "object",
+    required: ["username", "password"],
+    properties: {
+      username: { type: "string", maxLength: 64 },
+      password: { type: "string", maxLength: 128 },
+      // Optional only for accounts created before OstrichIDs existed.
+      ostrich_id: { type: "string", pattern: OSTRICH_ID_INPUT_PATTERN },
     },
   },
 } as const;
@@ -44,15 +59,34 @@ const changePasswordSchema = {
     required: ["current_password", "new_password"],
     properties: {
       current_password: { type: "string", maxLength: 128 },
-      new_password: credentialsSchema.body.properties.password,
+      new_password: passwordSchema,
     },
   },
 } as const;
 
-type Credentials = {
+const changeUsernameSchema = {
+  body: {
+    type: "object",
+    required: ["username", "password"],
+    properties: {
+      username: usernameSchema,
+      password: { type: "string", maxLength: 128 },
+    },
+  },
+} as const;
+
+type RegisterBody = {
   username: string;
   password: string;
 };
+
+type LoginBody = {
+  username: string;
+  password: string;
+  ostrich_id?: string;
+};
+
+const USER_COLUMNS = "id, username, created_at, username_changed_at";
 
 // Brute-force protection for endpoints that check passwords.
 const authRateLimit = {
@@ -120,70 +154,70 @@ function recordFailedLogin(username: string) {
 const dummyPasswordHash = argon2.hash(crypto.randomBytes(16).toString("hex"));
 
 export default async function authRoutes(server: FastifyInstance) {
-  // REGISTER
-  server.post<{ Body: Credentials }>(
+  // REGISTER: creates the account and its OstrichID, which is returned
+  // only in this response.
+  server.post<{ Body: RegisterBody }>(
     "/api/auth/register",
     {
-      schema: credentialsSchema,
+      schema: registerSchema,
       config: authRateLimit,
     },
     async (request, reply) => {
       const { username, password } = request.body;
 
       const passwordHash = await argon2.hash(password);
+      const ostrichId = generateOstrichId();
 
-      // login_id is random, retry on the (unlikely) collision.
-      for (let attempt = 0; attempt < 5; attempt++) {
-        try {
-          const result = await db.query(
-            `
-            INSERT INTO users (
-              login_id,
-              username,
-              password_hash
-            )
-            VALUES ($1, $2, $3)
-            RETURNING id, login_id, username, created_at
-            `,
-            [generateLoginId(), username, passwordHash],
-          );
+      let user;
 
-          const user = result.rows[0];
-          const token = await createSession(user.id);
+      try {
+        const result = await db.query(
+          `
+          INSERT INTO users (
+            username,
+            password_hash,
+            ostrich_id_hash
+          )
+          VALUES ($1, $2, $3)
+          RETURNING ${USER_COLUMNS}
+          `,
+          [username, passwordHash, hashOstrichId(ostrichId)],
+        );
 
-          return reply.status(201).send({
-            message: "Registration successful",
-            token,
-            user,
+        user = result.rows[0];
+      } catch (error) {
+        if (isPgError(error, PG_UNIQUE_VIOLATION)) {
+          return reply.status(409).send({
+            error: "Username is already taken",
           });
-        } catch (error) {
-          if (!isPgError(error, PG_UNIQUE_VIOLATION)) {
-            throw error;
-          }
-
-          const constraint = (error as { constraint?: string }).constraint;
-
-          if (constraint !== "users_login_id_key") {
-            return reply.status(409).send({
-              error: "Username already exists",
-            });
-          }
         }
+
+        throw error;
       }
 
-      throw new Error("Failed to generate a unique login_id");
+      const token = await createSession(user.id);
+
+      return reply.status(201).send({
+        message: "Registration successful",
+        token,
+        user: accountView(user),
+        ostrich_id: formatOstrichId(ostrichId),
+      });
     },
   );
 
-  // LOGIN
-  server.post<{ Body: Credentials }>(
+  // LOGIN: username + password + OstrichID. Accounts created before
+  // OstrichIDs log in without one once and get their ID in the response.
+  server.post<{ Body: LoginBody }>(
     "/api/auth/login",
     {
-      schema: credentialsSchema,
+      schema: loginSchema,
       config: authRateLimit,
     },
     async (request, reply) => {
-      const { username, password } = request.body;
+      const { password, ostrich_id } = request.body;
+      // "@alice" works too.
+      const username = request.body.username.replace(/^@/, "");
 
       if (loginBlocked(username)) {
         return reply.status(429).send({
@@ -193,7 +227,7 @@ export default async function authRoutes(server: FastifyInstance) {
 
       const result = await db.query(
         `
-        SELECT id, login_id, username, password_hash
+        SELECT ${USER_COLUMNS}, password_hash, ostrich_id_hash
         FROM users
         WHERE LOWER(username) = LOWER($1)
         `,
@@ -207,12 +241,43 @@ export default async function authRoutes(server: FastifyInstance) {
         password,
       );
 
-      if (!user || !passwordValid) {
+      // Accounts without an OstrichID yet need none (it is issued below).
+      const ostrichIdValid =
+        user?.ostrich_id_hash == null ||
+        ostrichIdMatches(ostrich_id ?? "", user.ostrich_id_hash);
+
+      if (!user || !passwordValid || !ostrichIdValid) {
         recordFailedLogin(username);
 
         return reply.status(401).send({
-          error: "Invalid username or password",
+          error: "Invalid username, password or OstrichID",
         });
+      }
+
+      let issuedOstrichId: string | null = null;
+
+      if (user.ostrich_id_hash == null) {
+        const ostrichId = generateOstrichId();
+
+        // Only if no concurrent login has issued one in the meantime:
+        // otherwise this client would show an ID that does not work.
+        const updated = await db.query(
+          `
+          UPDATE users
+          SET ostrich_id_hash = $2, updated_at = NOW()
+          WHERE id = $1
+            AND ostrich_id_hash IS NULL
+          `,
+          [user.id, hashOstrichId(ostrichId)],
+        );
+
+        if (updated.rowCount === 0) {
+          return reply.status(401).send({
+            error: "Invalid username, password or OstrichID",
+          });
+        }
+
+        issuedOstrichId = formatOstrichId(ostrichId);
       }
 
       failedLogins.delete(username.toLowerCase());
@@ -222,11 +287,9 @@ export default async function authRoutes(server: FastifyInstance) {
       return reply.send({
         message: "Login successful",
         token,
-        user: {
-          id: user.id,
-          login_id: user.login_id,
-          username: user.username,
-        },
+        user: accountView(user),
+        // Only when the account has just been given its OstrichID.
+        ...(issuedOstrichId ? { ostrich_id: issuedOstrichId } : {}),
       });
     },
   );
@@ -239,7 +302,7 @@ export default async function authRoutes(server: FastifyInstance) {
     },
     async (request) => {
       return {
-        user: request.user,
+        user: accountView(request.user),
       };
     },
   );
@@ -354,6 +417,85 @@ export default async function authRoutes(server: FastifyInstance) {
     },
   );
 
+  // CHANGE USERNAME: allowed right after registration, then once per
+  // USERNAME_CHANGE_INTERVAL_DAYS. Needs the password: the username is a
+  // login credential, so a stolen session must not be enough to change it.
+  server.post<{ Body: { username: string; password: string } }>(
+    "/api/auth/username",
+    {
+      preHandler: authenticate,
+      schema: changeUsernameSchema,
+      config: authRateLimit,
+    },
+    async (request, reply) => {
+      const { username, password } = request.body;
+
+      const current = await db.query(
+        `
+        SELECT password_hash
+        FROM users
+        WHERE id = $1
+        `,
+        [request.user.id],
+      );
+
+      if (!(await argon2.verify(current.rows[0].password_hash, password))) {
+        return reply.status(403).send({
+          error: "Password is incorrect",
+        });
+      }
+
+      if (username === request.user.username) {
+        return reply.status(400).send({
+          error: "This is already your username",
+        });
+      }
+
+      let result;
+
+      try {
+        result = await db.query(
+          `
+          UPDATE users
+          SET username = $2,
+              username_changed_at = NOW(),
+              updated_at = NOW()
+          WHERE id = $1
+            AND (
+              username_changed_at IS NULL
+              OR username_changed_at
+                <= NOW() - make_interval(days => $3)
+            )
+          RETURNING ${USER_COLUMNS}
+          `,
+          [request.user.id, username, USERNAME_CHANGE_INTERVAL_DAYS],
+        );
+      } catch (error) {
+        if (isPgError(error, PG_UNIQUE_VIOLATION)) {
+          return reply.status(409).send({
+            error: "Username is already taken",
+          });
+        }
+
+        throw error;
+      }
+
+      if (result.rowCount === 0) {
+        const { next_username_change_at } = accountView(request.user);
+
+        return reply.status(429).send({
+          error: `The username can be changed once every ${USERNAME_CHANGE_INTERVAL_DAYS} days`,
+          next_username_change_at,
+        });
+      }
+
+      return {
+        message: "Username changed",
+        user: accountView(result.rows[0]),
+      };
+    },
+  );
+
   // WEBSOCKET TICKET: single-use, short-lived credential for /ws?ticket=,
   // so browsers do not have to put the session token in the URL.
   server.post(
@@ -386,19 +528,4 @@ async function createSession(userId: string): Promise<string> {
   );
 
   return token;
-}
-
-// 16-digit numeric ID that users share to start a chat.
-function generateLoginId(): string {
-  const first = crypto.randomInt(
-    1_000_000,
-    10_000_000,
-  );
-
-  const second = crypto.randomInt(
-    100_000_000,
-    1_000_000_000,
-  );
-
-  return `${first}${second}`;
 }

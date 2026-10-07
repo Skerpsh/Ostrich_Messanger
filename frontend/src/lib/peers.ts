@@ -5,7 +5,6 @@
 export type Peer = {
   userId: string;
   username: string;
-  loginId: string;
 };
 
 const peers = new Map<string, Peer>();

@@ -34,16 +34,19 @@ export default function AuthForm({ mode }: AuthFormProps) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [ostrichId, setOstrichId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const passwordRef = useRef<TextInput>(null);
   const confirmRef = useRef<TextInput>(null);
+  const ostrichIdRef = useRef<TextInput>(null);
 
   const isRegister = mode === "register";
 
   const submit = async () => {
-    const name = username.trim();
+    // "@alice" works too.
+    const name = username.trim().replace(/^@/, "");
 
     if (!name || !password) {
       setError("Username and password are required");
@@ -71,7 +74,9 @@ export default function AuthForm({ mode }: AuthFormProps) {
     setLoading(true);
 
     try {
-      await (isRegister ? signUp : signIn)(name, password);
+      await (isRegister
+        ? signUp(name, password)
+        : signIn(name, password, ostrichId.trim()));
       // The navigator switches to the chats screen on its own.
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
@@ -116,10 +121,10 @@ export default function AuthForm({ mode }: AuthFormProps) {
             <View style={styles.fields}>
               <TextField
                 label="Username"
-                placeholder="username"
+                placeholder="@username"
                 value={username}
                 onChangeText={setUsername}
-                maxLength={32}
+                maxLength={33}
                 autoComplete="username"
                 textContentType="username"
                 returnKeyType="next"
@@ -138,12 +143,33 @@ export default function AuthForm({ mode }: AuthFormProps) {
                 secureTextEntry
                 autoComplete={isRegister ? "new-password" : "current-password"}
                 textContentType={isRegister ? "newPassword" : "password"}
-                returnKeyType={isRegister ? "next" : "go"}
+                returnKeyType="next"
                 submitBehavior="submit"
                 onSubmitEditing={() =>
-                  isRegister ? confirmRef.current?.focus() : submit()
+                  (isRegister ? confirmRef : ostrichIdRef).current?.focus()
                 }
               />
+
+              {isRegister ? null : (
+                <View style={styles.idField}>
+                  <TextField
+                    ref={ostrichIdRef}
+                    label="OstrichID"
+                    placeholder="XXXX-XXXX-XXXX-XXXX-XXXX"
+                    value={ostrichId}
+                    onChangeText={setOstrichId}
+                    maxLength={40}
+                    autoCapitalize="characters"
+                    autoComplete="off"
+                    returnKeyType="go"
+                    onSubmitEditing={submit}
+                  />
+                  <Text style={[styles.fieldHint, { color: colors.muted }]}>
+                    Account created before OstrichIDs? Leave it empty once to
+                    get yours.
+                  </Text>
+                </View>
+              )}
 
               {isRegister ? (
                 <TextField
@@ -161,6 +187,13 @@ export default function AuthForm({ mode }: AuthFormProps) {
                 />
               ) : null}
             </View>
+
+            {isRegister ? (
+              <Text style={[styles.note, { color: colors.textSoft }]}>
+                After you create the account, Ostrich gives you an OstrichID.
+                You will need it to log in, and it is shown only once.
+              </Text>
+            ) : null}
 
             {shownError ? (
               <Text style={[styles.error, { color: colors.danger }]}>
@@ -230,6 +263,21 @@ const styles = StyleSheet.create({
 
   fields: {
     gap: 18,
+  },
+
+  idField: {
+    gap: 8,
+  },
+
+  fieldHint: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+
+  note: {
+    marginTop: 18,
+    fontSize: 14,
+    lineHeight: 20,
   },
 
   error: {

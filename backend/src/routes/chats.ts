@@ -1,4 +1,5 @@
 import { FastifyInstance } from "fastify";
+import { usernameSchema } from "../accounts.js";
 import { db, withTransaction } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
 import { isOnline } from "../realtime.js";
@@ -11,8 +12,9 @@ const createChatRateLimit = {
 };
 
 export default async function chatsRoutes(server: FastifyInstance) {
-  // CREATE (or return the existing) direct chat with a user
-  server.post<{ Body: { login_id: string } }>(
+  // CREATE (or return the existing) direct chat with a user, found by
+  // their exact @username
+  server.post<{ Body: { username: string } }>(
     "/api/chats",
     {
       preHandler: authenticate,
@@ -20,29 +22,23 @@ export default async function chatsRoutes(server: FastifyInstance) {
       schema: {
         body: {
           type: "object",
-          required: ["login_id"],
+          required: ["username"],
           properties: {
-            login_id: { type: "string", pattern: "^[0-9]{1,18}$" },
+            username: usernameSchema,
           },
         },
       },
     },
     async (request, reply) => {
-      const { login_id } = request.body;
-
-      if (login_id === request.user.login_id) {
-        return reply.status(400).send({
-          error: "You cannot create a chat with yourself",
-        });
-      }
+      const { username } = request.body;
 
       const targetUser = await db.query(
         `
-        SELECT id, login_id, username, last_seen_at
+        SELECT id, username, last_seen_at
         FROM users
-        WHERE login_id = $1
+        WHERE LOWER(username) = LOWER($1)
         `,
-        [login_id],
+        [username],
       );
 
       if (targetUser.rows.length === 0) {
@@ -52,6 +48,12 @@ export default async function chatsRoutes(server: FastifyInstance) {
       }
 
       const otherUser = targetUser.rows[0];
+
+      if (otherUser.id === request.user.id) {
+        return reply.status(400).send({
+          error: "You cannot create a chat with yourself",
+        });
+      }
 
       const { chat, created } = await withTransaction(async (client) => {
         // Serialize creation per pair of users so two simultaneous requests
@@ -114,7 +116,6 @@ export default async function chatsRoutes(server: FastifyInstance) {
         },
         user: {
           id: otherUser.id,
-          login_id: otherUser.login_id,
           username: otherUser.username,
           last_seen_at: otherUser.last_seen_at,
           online: isOnline(otherUser.id),
@@ -139,7 +140,6 @@ export default async function chatsRoutes(server: FastifyInstance) {
           chats.created_at,
           chats.updated_at,
           users.id AS user_id,
-          users.login_id,
           users.username,
           users.last_seen_at
         FROM chats

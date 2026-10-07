@@ -11,18 +11,28 @@ import {
 import AppHeader from "@/components/app-header";
 import Button from "@/components/button";
 import TextField from "@/components/text-field";
-import { useAuth } from "@/context/auth";
+import { useAuth, useCurrentUser } from "@/context/auth";
 import { useAppTheme } from "@/context/theme";
-import { changePassword } from "@/lib/api";
+import { changePassword, changeUsername } from "@/lib/api";
+import { formatDate } from "@/lib/format";
 import { radius } from "@/theme/colors";
 
 const MIN_PASSWORD = 8;
 const MAX_PASSWORD = 128;
+// Same rules as the backend.
+const USERNAME_RE = /^[A-Za-z0-9_.-]{3,32}$/;
 
 export default function SettingsScreen() {
   const router = useRouter();
   const { colors } = useAppTheme();
-  const { withToken, signOutEverywhere } = useAuth();
+  const { withToken, signOutEverywhere, updateUser } = useAuth();
+  const user = useCurrentUser();
+
+  const [newUsername, setNewUsername] = useState("");
+  const [usernamePassword, setUsernamePassword] = useState("");
+  const [usernameError, setUsernameError] = useState<string | null>(null);
+  const [usernameDone, setUsernameDone] = useState(false);
+  const [savingUsername, setSavingUsername] = useState(false);
 
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -38,6 +48,51 @@ export default function SettingsScreen() {
 
   const close = () =>
     router.canGoBack() ? router.back() : router.replace("/chats");
+
+  // The username can be changed once per 28 days (the first time right
+  // after registration).
+  const nextUsernameChange =
+    user?.next_username_change_at &&
+    new Date(user.next_username_change_at) > new Date()
+      ? user.next_username_change_at
+      : null;
+
+  const submitUsername = async () => {
+    setUsernameDone(false);
+
+    const name = newUsername.trim().replace(/^@/, "");
+
+    if (!USERNAME_RE.test(name)) {
+      setUsernameError(
+        "Username: 3–32 characters, letters, digits, _ . - only",
+      );
+      return;
+    }
+
+    if (!usernamePassword) {
+      setUsernameError("Password is required");
+      return;
+    }
+
+    setUsernameError(null);
+    setSavingUsername(true);
+
+    try {
+      const updated = await withToken((token) =>
+        changeUsername(token, name, usernamePassword),
+      );
+      await updateUser(updated);
+      setNewUsername("");
+      setUsernamePassword("");
+      setUsernameDone(true);
+    } catch (e) {
+      setUsernameError(
+        e instanceof Error ? e.message : "Failed to change username",
+      );
+    } finally {
+      setSavingUsername(false);
+    }
+  };
 
   const submitPassword = async () => {
     setPasswordDone(false);
@@ -109,6 +164,65 @@ export default function SettingsScreen() {
           contentContainerStyle={styles.body}
           keyboardShouldPersistTaps="handled"
         >
+          <View
+            style={[
+              styles.card,
+              { backgroundColor: colors.panel, borderColor: colors.line },
+            ]}
+          >
+            <Text style={[styles.section, { color: colors.text }]}>
+              Username
+            </Text>
+            <Text style={[styles.text, { color: colors.textSoft }]}>
+              You are @{user?.username}. Others find you by your username, and
+              you use it to log in. It can be changed once every 28 days.
+            </Text>
+
+            {usernameDone ? (
+              <Text style={[styles.message, { color: colors.online }]}>
+                Username changed. Use the new one to log in.
+              </Text>
+            ) : null}
+
+            {nextUsernameChange ? (
+              <Text style={[styles.message, { color: colors.muted }]}>
+                You can change it again on {formatDate(nextUsernameChange)}.
+              </Text>
+            ) : (
+              <>
+                <TextField
+                  label="New username"
+                  placeholder="@username"
+                  value={newUsername}
+                  onChangeText={setNewUsername}
+                  maxLength={33}
+                />
+                <TextField
+                  label="Password"
+                  value={usernamePassword}
+                  onChangeText={setUsernamePassword}
+                  secureTextEntry
+                  autoComplete="current-password"
+                  maxLength={MAX_PASSWORD}
+                  returnKeyType="go"
+                  onSubmitEditing={submitUsername}
+                />
+
+                {usernameError ? (
+                  <Text style={[styles.message, { color: colors.danger }]}>
+                    {usernameError}
+                  </Text>
+                ) : null}
+
+                <Button
+                  title="Change username"
+                  loading={savingUsername}
+                  onPress={submitUsername}
+                />
+              </>
+            )}
+          </View>
+
           <View
             style={[
               styles.card,
