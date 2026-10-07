@@ -7,7 +7,11 @@ import {
   hashToken,
   type Session,
 } from "../middleware/auth.js";
-import { createMessage, MAX_MESSAGE_LENGTH } from "../messages.js";
+import {
+  CREATE_MESSAGE_ERRORS,
+  createMessage,
+  MAX_MESSAGE_LENGTH,
+} from "../messages.js";
 import {
   chatPresence,
   closeEndedSessions,
@@ -46,12 +50,15 @@ type ClientMessage = {
   type?: unknown;
   chatId?: unknown;
   content?: unknown;
+  replyTo?: unknown;
 };
 
 // Protocol (JSON messages):
-//   client -> server: join {chatId}, leave {chatId}, message {chatId, content}
+//   client -> server: join {chatId}, leave {chatId},
+//                     message {chatId, content, replyTo?}
 //   server -> client: connected, joined {chatId}, left {chatId},
 //                     message {message}, read {chatId, userId, lastReadAt},
+//                     profile {userId, username, avatarId},
 //                     presence {userId, online, lastSeenAt}, error {error}
 //
 // "message" and "read" events of all the user's chats are sent to all their
@@ -196,14 +203,29 @@ export default async function websocketRoutes(server: FastifyInstance) {
             return;
           }
 
-          const message = await createMessage(chatId, user.id, content);
+          const { replyTo } = data;
 
-          if (!message) {
-            sendError("You are not a member of this chat");
+          if (replyTo != null && !validChatId(replyTo)) {
+            sendError("replyTo must be a message id");
             return;
           }
 
-          await sendToChatMembers(chatId, { type: "message", message });
+          const result = await createMessage(
+            chatId,
+            user.id,
+            content,
+            replyTo ?? null,
+          );
+
+          if ("error" in result) {
+            sendError(CREATE_MESSAGE_ERRORS[result.error]);
+            return;
+          }
+
+          await sendToChatMembers(chatId, {
+            type: "message",
+            message: result.message,
+          });
           return;
         }
 

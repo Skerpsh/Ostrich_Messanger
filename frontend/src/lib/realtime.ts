@@ -18,6 +18,13 @@ export type PresenceEvent = {
   lastSeenAt: string | null;
 };
 
+// A contact (or the user, on another device) changed username or avatar.
+export type ProfileEvent = {
+  userId: string;
+  username: string;
+  avatarId: string | null;
+};
+
 type Handlers = {
   onStatus: (status: ConnectionStatus) => void;
   // Called after every (re)join, so screens can reload missed history.
@@ -25,6 +32,7 @@ type Handlers = {
   // Messages of all the user's chats, not only joined ones.
   onMessage: (message: Message) => void;
   onRead: (event: ReadEvent) => void;
+  onProfile: (event: ProfileEvent) => void;
   onPresence: (event: PresenceEvent) => void;
   onError: (error: string) => void;
   // Web only: a single-use ticket for the websocket URL, so the session
@@ -154,6 +162,8 @@ export class RealtimeConnection {
         online?: boolean;
         lastSeenAt?: string | null;
         lastReadAt?: string;
+        username?: string;
+        avatarId?: string | null;
         error?: string;
       };
 
@@ -191,6 +201,16 @@ export class RealtimeConnection {
               chatId: data.chatId,
               userId: data.userId,
               lastReadAt: data.lastReadAt,
+            });
+          }
+          break;
+
+        case "profile":
+          if (data.userId && data.username) {
+            this.handlers.onProfile({
+              userId: data.userId,
+              username: data.username,
+              avatarId: data.avatarId ?? null,
             });
           }
           break;

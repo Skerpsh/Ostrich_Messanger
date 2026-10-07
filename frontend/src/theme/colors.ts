@@ -65,6 +65,106 @@ export const themes: Record<ThemeMode, ThemeColors> = {
   },
 };
 
+// Accent colors the user can choose (Settings → Appearance). Each has a
+// bright variant for the dark theme (with dark text on it) and a deep one
+// for the light theme (with white text on it); all pass WCAG AA (4.5:1)
+// for the text on the accent and for the accent on the page background.
+export type AccentId =
+  | "orange"
+  | "red"
+  | "pink"
+  | "purple"
+  | "blue"
+  | "teal"
+  | "green"
+  | "gold"
+  | "mono";
+
+type AccentVariant = { accent: string; onAccent: string };
+
+export const accents: {
+  id: AccentId;
+  name: string;
+  dark: AccentVariant;
+  light: AccentVariant;
+}[] = [
+  {
+    id: "orange",
+    name: "Orange",
+    dark: { accent: "#ff8a3d", onAccent: "#1a0e04" },
+    light: { accent: "#b84e08", onAccent: "#ffffff" },
+  },
+  {
+    id: "red",
+    name: "Red",
+    dark: { accent: "#ff7070", onAccent: "#2a0505" },
+    light: { accent: "#c0262d", onAccent: "#ffffff" },
+  },
+  {
+    id: "pink",
+    name: "Pink",
+    dark: { accent: "#ff7ab6", onAccent: "#2b0418" },
+    light: { accent: "#b3206a", onAccent: "#ffffff" },
+  },
+  {
+    id: "purple",
+    name: "Purple",
+    dark: { accent: "#b392ff", onAccent: "#170838" },
+    light: { accent: "#6a3cd0", onAccent: "#ffffff" },
+  },
+  {
+    id: "blue",
+    name: "Blue",
+    dark: { accent: "#5aa9ff", onAccent: "#04162b" },
+    light: { accent: "#1c5fc4", onAccent: "#ffffff" },
+  },
+  {
+    id: "teal",
+    name: "Teal",
+    dark: { accent: "#3ed6c5", onAccent: "#03211d" },
+    light: { accent: "#0a756a", onAccent: "#ffffff" },
+  },
+  {
+    id: "green",
+    name: "Green",
+    dark: { accent: "#6fdc6f", onAccent: "#062006" },
+    light: { accent: "#2b7a30", onAccent: "#ffffff" },
+  },
+  {
+    id: "gold",
+    name: "Gold",
+    dark: { accent: "#f5c542", onAccent: "#2a2000" },
+    light: { accent: "#856400", onAccent: "#ffffff" },
+  },
+  {
+    id: "mono",
+    name: "Mono",
+    dark: { accent: "#f5f5f5", onAccent: "#111113" },
+    light: { accent: "#111113", onAccent: "#ffffff" },
+  },
+];
+
+export const DEFAULT_ACCENT: AccentId = "orange";
+
+// "#rrggbb" → "rgba(r, g, b, alpha)".
+function withAlpha(hex: string, alpha: number) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
+// The theme's colors with the chosen accent.
+export function themeColors(mode: ThemeMode, accentId: AccentId): ThemeColors {
+  const accent = accents.find((a) => a.id === accentId) ?? accents[0];
+  const variant = accent[mode];
+
+  return {
+    ...themes[mode],
+    accent: variant.accent,
+    onAccent: variant.onAccent,
+    accentSoft: withAlpha(variant.accent, mode === "dark" ? 0.14 : 0.1),
+  };
+}
+
 export const radius = {
   card: 18,
   bubble: 18,

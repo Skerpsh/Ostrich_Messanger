@@ -156,12 +156,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     );
   };
 
-  const updateUser = async (user: api.User) => {
+  const updateUser = useCallback(async (user: api.User) => {
     await setItem(USER_KEY, JSON.stringify(user));
     setState((current) =>
       current.status === "signedIn" ? { ...current, user } : current,
     );
-  };
+  }, []);
 
   const token = state.status === "signedIn" ? state.token : null;
 

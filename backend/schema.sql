@@ -72,3 +72,18 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS messages_chat_id_created_at_idx
   ON messages (chat_id, created_at);
+
+-- The message this one replies to (same chat); NULL if not a reply.
+ALTER TABLE messages
+  ADD COLUMN IF NOT EXISTS reply_to_id UUID REFERENCES messages(id) ON DELETE SET NULL;
+
+-- Profile pictures: 512x512 WebP, re-encoded by the server (no metadata).
+-- The id is random and new for every upload, so it works as an
+-- unguessable, cacheable URL (/api/avatars/:id) that only reaches other
+-- users through authenticated API responses.
+CREATE TABLE IF NOT EXISTS avatars (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  image      BYTEA NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

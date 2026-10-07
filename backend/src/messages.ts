@@ -2,6 +2,16 @@ import { db } from "./database.js";
 
 export const MAX_MESSAGE_LENGTH = 4096;
 
+// Length of the quoted text of the message a reply refers to.
+const REPLY_PREVIEW_LENGTH = 200;
+
+export type ReplyPreview = {
+  id: string;
+  sender_id: string;
+  sender_username: string;
+  content: string;
+};
+
 export type ChatMessage = {
   id: string;
   chat_id: string;
@@ -9,31 +19,78 @@ export type ChatMessage = {
   sender_username: string;
   content: string;
   created_at: Date;
+  reply_to: ReplyPreview | null;
 };
 
-// Saves a message and bumps the chat's updated_at in one statement.
-// Returns null if the sender is not a member of the chat.
+// Columns of the replied-to message, joined as "reply" and "reply_sender".
+export const REPLY_COLUMNS = `
+  reply.id AS reply_id,
+  reply.sender_id AS reply_sender_id,
+  reply_sender.username AS reply_sender_username,
+  LEFT(reply.content, ${REPLY_PREVIEW_LENGTH}) AS reply_content
+`;
+
+// Turns the flat reply_* columns of a row into the reply_to object.
+export function withReply<
+  T extends {
+    reply_id: string | null;
+    reply_sender_id: string | null;
+    reply_sender_username: string | null;
+    reply_content: string | null;
+  },
+>({ reply_id, reply_sender_id, reply_sender_username, reply_content, ...row }: T) {
+  return {
+    ...row,
+    reply_to: reply_id
+      ? {
+          id: reply_id,
+          sender_id: reply_sender_id!,
+          sender_username: reply_sender_username!,
+          content: reply_content!,
+        }
+      : null,
+  };
+}
+
+export type CreateMessageResult =
+  | { message: ChatMessage }
+  | { error: "not_member" | "reply_not_found" };
+
+// Saves a message, bumps the chat's updated_at and the sender's read
+// position in one statement. A reply must refer to a message of the same
+// chat.
 export async function createMessage(
   chatId: string,
   senderId: string,
   content: string,
-): Promise<ChatMessage | null> {
+  replyToId: string | null = null,
+): Promise<CreateMessageResult> {
   const result = await db.query(
     `
     WITH inserted AS (
       INSERT INTO messages (
         chat_id,
         sender_id,
-        content
+        content,
+        reply_to_id
       )
-      SELECT $1, $2, $3
+      SELECT $1, $2, $3, $4
       WHERE EXISTS (
         SELECT 1
         FROM chat_members
         WHERE chat_id = $1
           AND user_id = $2
       )
-      RETURNING id, chat_id, sender_id, content, created_at
+      AND (
+        $4::uuid IS NULL
+        OR EXISTS (
+          SELECT 1
+          FROM messages
+          WHERE id = $4
+            AND chat_id = $1
+        )
+      )
+      RETURNING id, chat_id, sender_id, content, created_at, reply_to_id
     ),
     touched AS (
       UPDATE chats
@@ -53,12 +110,35 @@ export async function createMessage(
       inserted.sender_id,
       users.username AS sender_username,
       inserted.content,
-      inserted.created_at
+      inserted.created_at,
+      ${REPLY_COLUMNS}
     FROM inserted
     JOIN users ON users.id = inserted.sender_id
+    LEFT JOIN messages reply ON reply.id = inserted.reply_to_id
+    LEFT JOIN users reply_sender ON reply_sender.id = reply.sender_id
     `,
-    [chatId, senderId, content],
+    [chatId, senderId, content, replyToId],
   );
 
-  return result.rows[0] ?? null;
+  if (result.rows[0]) {
+    return { message: withReply(result.rows[0]) as ChatMessage };
+  }
+
+  // Nothing inserted: tell why.
+  const member = await db.query(
+    `
+    SELECT 1
+    FROM chat_members
+    WHERE chat_id = $1
+      AND user_id = $2
+    `,
+    [chatId, senderId],
+  );
+
+  return { error: member.rows.length > 0 ? "reply_not_found" : "not_member" };
 }
+
+export const CREATE_MESSAGE_ERRORS = {
+  not_member: "You are not a member of this chat",
+  reply_not_found: "The message you reply to is not in this chat",
+} as const;

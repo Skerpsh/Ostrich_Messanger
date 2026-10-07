@@ -9,6 +9,7 @@ import authRoutes from "./routes/auth.js";
 import usersRoutes from "./routes/users.js";
 import chatsRoutes from "./routes/chats.js";
 import messagesRoutes from "./routes/messages.js";
+import avatarsRoutes from "./routes/avatars.js";
 import websocketRoutes from "./routes/websocket.js";
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -120,6 +121,8 @@ const start = async () => {
 
     await server.register(cors, {
       origin: CORS_ORIGINS ?? true,
+      // PUT/DELETE: avatar upload and removal from the web app.
+      methods: ["GET", "HEAD", "POST", "PUT", "DELETE"],
     });
 
     await server.register(rateLimit, {
@@ -139,6 +142,7 @@ const start = async () => {
     await server.register(usersRoutes);
     await server.register(chatsRoutes);
     await server.register(messagesRoutes);
+    await server.register(avatarsRoutes);
 
     await server.listen({
       port: PORT,

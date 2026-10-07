@@ -1,7 +1,13 @@
 import { FastifyInstance } from "fastify";
 import { db, isChatMember } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
-import { createMessage, MAX_MESSAGE_LENGTH } from "../messages.js";
+import {
+  CREATE_MESSAGE_ERRORS,
+  createMessage,
+  MAX_MESSAGE_LENGTH,
+  REPLY_COLUMNS,
+  withReply,
+} from "../messages.js";
 import { sendToChatMembers } from "../realtime.js";
 
 const chatParamsSchema = {
@@ -34,7 +40,10 @@ type ChatParams = {
 
 export default async function messagesRoutes(server: FastifyInstance) {
   // SEND MESSAGE
-  server.post<{ Params: ChatParams; Body: { content: string } }>(
+  server.post<{
+    Params: ChatParams;
+    Body: { content: string; reply_to?: string };
+  }>(
     "/api/chats/:chatId/messages",
     {
       preHandler: authenticate,
@@ -49,6 +58,8 @@ export default async function messagesRoutes(server: FastifyInstance) {
               type: "string",
               maxLength: MAX_MESSAGE_LENGTH,
             },
+            // Id of the message (in this chat) this one replies to.
+            reply_to: { type: "string", format: "uuid" },
           },
         },
       },
@@ -63,13 +74,20 @@ export default async function messagesRoutes(server: FastifyInstance) {
         });
       }
 
-      const message = await createMessage(chatId, request.user.id, content);
+      const result = await createMessage(
+        chatId,
+        request.user.id,
+        content,
+        request.body.reply_to ?? null,
+      );
 
-      if (!message) {
-        return reply.status(403).send({
-          error: "You are not a member of this chat",
-        });
+      if ("error" in result) {
+        return reply
+          .status(result.error === "not_member" ? 403 : 400)
+          .send({ error: CREATE_MESSAGE_ERRORS[result.error] });
       }
+
+      const { message } = result;
 
       // Deliver to clients connected over websocket.
       await sendToChatMembers(chatId, {
@@ -122,9 +140,12 @@ export default async function messagesRoutes(server: FastifyInstance) {
             messages.sender_id,
             users.username AS sender_username,
             messages.content,
-            messages.created_at
+            messages.created_at,
+            ${REPLY_COLUMNS}
           FROM messages
           JOIN users ON users.id = messages.sender_id
+          LEFT JOIN messages reply ON reply.id = messages.reply_to_id
+          LEFT JOIN users reply_sender ON reply_sender.id = reply.sender_id
           WHERE messages.chat_id = $1
           ORDER BY messages.created_at DESC, messages.id DESC
           LIMIT $2
@@ -148,7 +169,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
       );
 
       return reply.send({
-        messages: result.rows,
+        messages: result.rows.map(withReply),
         last_read_at: reads.rows[0].last_read_at,
         peer_last_read_at: reads.rows[0].peer_last_read_at,
       });

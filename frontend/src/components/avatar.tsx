@@ -1,14 +1,19 @@
+import { Image } from "expo-image";
 import { StyleSheet, Text, View } from "react-native";
 import { useAppTheme } from "@/context/theme";
+import { avatarUrl } from "@/lib/api";
 
 export default function Avatar({
   name,
+  avatarId,
   size = 48,
   online = false,
   // Background behind the online dot's ring (the surface the avatar is on).
   ringColor,
 }: {
   name: string;
+  // The profile picture; the first letter of the name without one.
+  avatarId?: string | null;
   size?: number;
   // Shows the green "online" dot.
   online?: boolean;
@@ -29,11 +34,26 @@ export default function Avatar({
         },
       ]}
     >
-      <Text
-        style={[styles.letter, { color: colors.textSoft, fontSize: size * 0.4 }]}
-      >
-        {name.charAt(0).toUpperCase() || "?"}
-      </Text>
+      {avatarId ? (
+        <Image
+          source={{ uri: avatarUrl(avatarId) }}
+          style={{ width: size, height: size, borderRadius: size / 2 }}
+          contentFit="cover"
+          // The URL changes with every upload, so caching is safe.
+          cachePolicy="memory-disk"
+          transition={120}
+          accessibilityIgnoresInvertColors
+        />
+      ) : (
+        <Text
+          style={[
+            styles.letter,
+            { color: colors.textSoft, fontSize: size * 0.4 },
+          ]}
+        >
+          {name.charAt(0).toUpperCase() || "?"}
+        </Text>
+      )}
 
       {online ? (
         <View

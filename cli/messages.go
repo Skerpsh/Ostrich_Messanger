@@ -12,6 +12,9 @@ type Message struct {
 	SenderUsername string `json:"sender_username"`
 	Content        string `json:"content"`
 	CreatedAt      string `json:"created_at"`
+
+	// The message this one replies to, if any.
+	ReplyTo *ReplyPreview `json:"reply_to"`
 }
 
 type MessagesResponse struct {

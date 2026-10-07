@@ -65,7 +65,7 @@ function useAppVisible() {
 // from websocket events; shared by the list, the chat screen and the
 // sidebar on wide screens.
 export function ChatsProvider({ children }: { children: ReactNode }) {
-  const { state, withToken } = useAuth();
+  const { state, withToken, updateUser } = useAuth();
   const { status, seedPresence, subscribeEvents } = useRealtime();
   const userId = state.status === "signedIn" ? state.user.id : null;
 
@@ -232,8 +232,26 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
             reload();
           }
         },
+        onProfile: ({ userId: changedId, username, avatarId }) => {
+          if (changedId === userId) {
+            // Changed on another device; also refreshes the date of the
+            // next allowed username change.
+            withToken(api.getMe)
+              .then(updateUser)
+              .catch(() => {});
+            return;
+          }
+
+          setChats((current) =>
+            current?.map((chat) =>
+              chat.user_id === changedId
+                ? { ...chat, username, avatar_id: avatarId }
+                : chat,
+            ) ?? current,
+          );
+        },
       }),
-    [subscribeEvents, userId, reload, sendRead],
+    [subscribeEvents, userId, reload, sendRead, withToken, updateUser],
   );
 
   const addChat = useCallback((chat: Chat) => {

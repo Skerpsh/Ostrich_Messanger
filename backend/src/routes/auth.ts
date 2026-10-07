@@ -9,6 +9,7 @@ import {
 } from "../database.js";
 import {
   accountView,
+  AVATAR_ID_COLUMN,
   formatOstrichId,
   generateOstrichId,
   hashOstrichId,
@@ -23,6 +24,7 @@ import {
   closeSessionSockets,
   closeUserSockets,
   createTicket,
+  sendToContacts,
 } from "../realtime.js";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -86,7 +88,7 @@ type LoginBody = {
   ostrich_id?: string;
 };
 
-const USER_COLUMNS = "id, username, created_at, username_changed_at";
+const USER_COLUMNS = `id, username, created_at, username_changed_at, ${AVATAR_ID_COLUMN}`;
 
 // Brute-force protection for endpoints that check passwords.
 const authRateLimit = {
@@ -489,9 +491,20 @@ export default async function authRoutes(server: FastifyInstance) {
         });
       }
 
+      const user = accountView(result.rows[0]);
+
+      // Chats lists of the user's contacts and other devices show the new
+      // name right away.
+      await sendToContacts(user.id, {
+        type: "profile",
+        userId: user.id,
+        username: user.username,
+        avatarId: user.avatar_id,
+      });
+
       return {
         message: "Username changed",
-        user: accountView(result.rows[0]),
+        user,
       };
     },
   );

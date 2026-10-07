@@ -20,10 +20,16 @@ import type { IconName } from "@/components/icon-button";
 import TextField from "@/components/text-field";
 import { useAuth, useCurrentUser } from "@/context/auth";
 import { useAppTheme, type ThemePreference } from "@/context/theme";
-import { changePassword, changeUsername } from "@/lib/api";
+import {
+  changePassword,
+  changeUsername,
+  removeAvatar,
+  uploadAvatar,
+} from "@/lib/api";
+import { pickAvatar } from "@/lib/avatar-picker";
 import { formatDate } from "@/lib/format";
 import { useIsWide } from "@/lib/layout";
-import { radius } from "@/theme/colors";
+import { accents, radius } from "@/theme/colors";
 
 const MIN_PASSWORD = 8;
 const MAX_PASSWORD = 128;
@@ -39,7 +45,8 @@ const THEME_OPTIONS: { value: ThemePreference; label: string; icon: IconName }[]
 
 export default function SettingsScreen() {
   const router = useRouter();
-  const { colors, preference, setPreference } = useAppTheme();
+  const { colors, mode, preference, setPreference, accentId, setAccent } =
+    useAppTheme();
   const insets = useSafeAreaInsets();
   const wide = useIsWide();
   const { signOut, signOutEverywhere } = useAuth();
@@ -107,7 +114,7 @@ export default function SettingsScreen() {
           keyboardShouldPersistTaps="handled"
         >
           <View style={[styles.profile, { backgroundColor: colors.panel }]}>
-            <Avatar name={user.username} size={72} />
+            <ProfilePhoto />
             <Text style={[styles.username, { color: colors.text }]}>
               @{user.username}
             </Text>
@@ -171,6 +178,45 @@ export default function SettingsScreen() {
                 );
               })}
             </View>
+            <Divider full />
+            <View style={styles.accentBlock}>
+              <Text style={[styles.accentLabel, { color: colors.textSoft }]}>
+                Accent color
+              </Text>
+              <View style={styles.swatches}>
+                {accents.map((accent) => {
+                  const selected = accent.id === accentId;
+                  const variant = accent[mode];
+
+                  return (
+                    <Pressable
+                      key={accent.id}
+                      onPress={() => setAccent(accent.id)}
+                      accessibilityRole="radio"
+                      accessibilityLabel={accent.name}
+                      accessibilityState={{ checked: selected }}
+                      {...({ title: accent.name } as object)}
+                      style={[
+                        styles.swatchRing,
+                        { borderColor: selected ? variant.accent : "transparent" },
+                      ]}
+                    >
+                      <View
+                        style={[styles.swatch, { backgroundColor: variant.accent }]}
+                      >
+                        {selected ? (
+                          <Ionicons
+                            name="checkmark"
+                            size={18}
+                            color={variant.onAccent}
+                          />
+                        ) : null}
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
           </Section>
 
           <Section title="Account">
@@ -223,6 +269,89 @@ export default function SettingsScreen() {
   );
 }
 
+// The profile picture, with upload and removal.
+function ProfilePhoto() {
+  const { colors } = useAppTheme();
+  const { withToken, updateUser } = useAuth();
+  const user = useCurrentUser();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!user) {
+    return null;
+  }
+
+  const change = async () => {
+    setError(null);
+
+    try {
+      const image = await pickAvatar();
+
+      if (!image) {
+        return;
+      }
+
+      setBusy(true);
+      await updateUser(await withToken((token) => uploadAvatar(token, image)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to set the photo");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    setError(null);
+    setBusy(true);
+
+    try {
+      await updateUser(await withToken(removeAvatar));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to remove the photo");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <View style={styles.photo}>
+      <Pressable
+        onPress={change}
+        disabled={busy}
+        accessibilityRole="button"
+        accessibilityLabel={user.avatar_id ? "Change photo" : "Set a photo"}
+        style={({ hovered }) => hovered && styles.hovered}
+      >
+        <Avatar name={user.username} avatarId={user.avatar_id} size={88} />
+        <View
+          style={[
+            styles.photoBadge,
+            { backgroundColor: colors.accent, borderColor: colors.panel },
+          ]}
+        >
+          {busy ? (
+            <ActivityIndicator size="small" color={colors.onAccent} />
+          ) : (
+            <Ionicons name="camera" size={16} color={colors.onAccent} />
+          )}
+        </View>
+      </Pressable>
+
+      {user.avatar_id && !busy ? (
+        <Pressable onPress={remove} accessibilityRole="button" hitSlop={6}>
+          <Text style={[styles.photoAction, { color: colors.muted }]}>
+            Remove photo
+          </Text>
+        </Pressable>
+      ) : null}
+
+      {error ? (
+        <Text style={[styles.photoError, { color: colors.danger }]}>{error}</Text>
+      ) : null}
+    </View>
+  );
+}
+
 function Section({
   title,
   footer,
@@ -253,10 +382,19 @@ function Section({
   );
 }
 
-function Divider() {
+// Rows with icons have the divider start after the icon.
+function Divider({ full = false }: { full?: boolean }) {
   const { colors } = useAppTheme();
 
-  return <View style={[styles.divider, { backgroundColor: colors.line }]} />;
+  return (
+    <View
+      style={[
+        styles.divider,
+        full && styles.dividerFull,
+        { backgroundColor: colors.line },
+      ]}
+    />
+  );
 }
 
 function Row({
@@ -559,6 +697,64 @@ const styles = StyleSheet.create({
     gap: 8,
   },
 
+  photo: {
+    alignItems: "center",
+    gap: 8,
+  },
+
+  photoBadge: {
+    position: "absolute",
+    right: -2,
+    bottom: -2,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    borderWidth: 3,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  photoAction: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+
+  photoError: {
+    fontSize: 13,
+    textAlign: "center",
+  },
+
+  accentBlock: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 14,
+    gap: 12,
+  },
+
+  accentLabel: {
+    fontSize: 15,
+  },
+
+  swatches: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+
+  swatchRing: {
+    padding: 3,
+    borderRadius: 22,
+    borderWidth: 2,
+  },
+
+  swatch: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
   sectionTitle: {
     fontSize: 13,
     fontWeight: "600",
@@ -621,6 +817,10 @@ const styles = StyleSheet.create({
   divider: {
     height: StyleSheet.hairlineWidth,
     marginLeft: 50,
+  },
+
+  dividerFull: {
+    marginLeft: 0,
   },
 
   form: {

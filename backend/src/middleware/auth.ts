@@ -1,5 +1,6 @@
 import { FastifyRequest, FastifyReply } from "fastify";
 import crypto from "node:crypto";
+import { AVATAR_ID_COLUMN } from "../accounts.js";
 import { db } from "../database.js";
 
 export type AuthUser = FastifyRequest["user"];
@@ -41,6 +42,7 @@ export async function findSessionByHash(
       users.username,
       users.created_at,
       users.username_changed_at,
+      ${AVATAR_ID_COLUMN},
       sessions.expires_at
     FROM sessions
     JOIN users ON users.id = sessions.user_id

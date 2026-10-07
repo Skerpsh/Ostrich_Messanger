@@ -19,6 +19,7 @@ import {
   RealtimeConnection,
   type ConnectionStatus,
   type PresenceEvent,
+  type ProfileEvent,
   type ReadEvent,
 } from "@/lib/realtime";
 
@@ -36,6 +37,7 @@ type ChatListener = {
 export type EventListener = {
   onMessage: (message: Message) => void;
   onRead: (event: ReadEvent) => void;
+  onProfile: (event: ProfileEvent) => void;
 };
 
 type RealtimeContextValue = {
@@ -91,6 +93,11 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       onRead: (event) => {
         for (const listener of eventListeners) {
           listener.onRead(event);
+        }
+      },
+      onProfile: (event) => {
+        for (const listener of eventListeners) {
+          listener.onProfile(event);
         }
       },
       onPresence: ({ userId, online, lastSeenAt }: PresenceEvent) =>

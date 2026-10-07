@@ -7,6 +7,7 @@ declare module "fastify" {
       username: string;
       created_at: Date;
       username_changed_at: Date | null;
+      avatar_id: string | null;
     };
     token: string;
   }

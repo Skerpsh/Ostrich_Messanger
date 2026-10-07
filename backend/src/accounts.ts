@@ -101,12 +101,19 @@ export function nextUsernameChangeAt(changedAt: Date | null): Date | null {
   return next > new Date() ? next : null;
 }
 
+// SQL for the user's current avatar id (null without one), for queries
+// that select from "users".
+export const AVATAR_ID_COLUMN = `(
+  SELECT avatars.id FROM avatars WHERE avatars.user_id = users.id
+) AS avatar_id`;
+
 // The user as the API returns it to its owner.
 export function accountView(row: {
   id: string;
   username: string;
   created_at: Date;
   username_changed_at: Date | null;
+  avatar_id?: string | null;
 }) {
   return {
     id: row.id,
@@ -114,5 +121,6 @@ export function accountView(row: {
     created_at: row.created_at,
     // null when the username can be changed now.
     next_username_change_at: nextUsernameChangeAt(row.username_changed_at),
+    avatar_id: row.avatar_id ?? null,
   };
 }

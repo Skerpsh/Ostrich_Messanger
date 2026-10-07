@@ -152,6 +152,12 @@ type tuiModel struct {
 	// Number of newest messages scrolled out of view; 0 follows the latest.
 	messageScroll int
 
+	// Replies (see replies.go): selecting a message, and the message the
+	// next one replies to.
+	selecting       bool
+	selectedMessage int
+	replyTo         *Message
+
 	// The session's websocket, open for as long as the user is logged in.
 	conn       *websocket.Conn
 	connStatus connStatus
@@ -606,6 +612,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentChat = msg.chat
 		m.messages = nil
 		m.messageScroll = 0
+		m.resetReply()
 		m.mergeMessages(msg.messages)
 		m.stage = stageChat
 		m.err = nil
@@ -1033,9 +1040,30 @@ func (m tuiModel) updateNewChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m tuiModel) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.selecting {
+		return m.updateSelecting(msg)
+	}
+
 	switch msg.String() {
 
+	case "up":
+		// With an empty input, ↑ picks a message to reply to.
+		if m.messageInput.Value() == "" && len(m.messages) > 0 {
+			m.selecting = true
+			m.selectedMessage = len(m.messages) - 1
+			m.keepSelectionVisible()
+			m.messageInput.Blur()
+
+			return m, nil
+		}
+
 	case "esc":
+		if m.replyTo != nil {
+			m.replyTo = nil
+
+			return m, nil
+		}
+
 		// The connection stays open (keeps the user online); only stop
 		// receiving this chat's messages.
 		m.leaveChatIfConnected(m.currentChat.ID)
@@ -1044,6 +1072,7 @@ func (m tuiModel) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.stage = stageChats
 		m.err = nil
 		m.messageScroll = 0
+		m.resetReply()
 
 		// Chat order may have changed while the chat was open.
 		return m, loadChatsCmd(m.user.Token)
@@ -1082,17 +1111,24 @@ func (m tuiModel) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		err := writeWebSocketJSON(m.conn, map[string]string{
+		payload := map[string]string{
 			"type":    "message",
 			"chatId":  m.currentChat.ID,
 			"content": content,
-		})
+		}
+
+		if m.replyTo != nil {
+			payload["replyTo"] = m.replyTo.ID
+		}
+
+		err := writeWebSocketJSON(m.conn, payload)
 
 		if err != nil {
 			m.err = err
 			return m, nil
 		}
 
+		m.replyTo = nil
 		m.messageInput.SetValue("")
 		m.messageScroll = 0
 
@@ -1479,9 +1515,17 @@ func (m tuiModel) chatFooter(boxWidth int) string {
 		Padding(0, 1).
 		Render(input.View())
 
-	footer += "\n\n" + hintStyle.Width(boxWidth+2).Render(
-		"Enter Send   PgUp/PgDown Scroll   Home/End Jump   Esc Back   Ctrl+C Quit",
-	)
+	if bar := m.replyBar(); bar != "" {
+		footer = lipgloss.NewStyle().Width(boxWidth+2).Render(bar) + "\n" + footer
+	}
+
+	hint := "Enter Send   ↑ Reply to a message   PgUp/PgDown Scroll   Home/End Jump   Esc Back   Ctrl+C Quit"
+
+	if m.selecting {
+		hint = "↑↓ Select a message   Enter / r Reply   Esc Cancel"
+	}
+
+	footer += "\n\n" + hintStyle.Width(boxWidth+2).Render(hint)
 
 	if m.err != nil {
 		footer += "\n" + errorStyle.
@@ -1535,7 +1579,17 @@ func (m tuiModel) renderMessages(textWidth int) []string {
 				Align(lipgloss.Right)
 		}
 
-		rendered[i] = style.Render(sanitize(name) + ": " + sanitize(message.Content))
+		text := sanitize(name) + ": " + sanitize(message.Content)
+
+		if m.selecting && i == m.selectedMessage {
+			text = selectedChatStyle.Render("▶ ") + text
+		}
+
+		if message.ReplyTo != nil {
+			text = m.quoteLine(message.ReplyTo) + "\n" + text
+		}
+
+		rendered[i] = style.Render(text)
 	}
 
 	return rendered

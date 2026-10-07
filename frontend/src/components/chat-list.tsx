@@ -136,7 +136,7 @@ export default function ChatList() {
               },
             ]}
           >
-            <Avatar name={user.username} size={36} />
+            <Avatar name={user.username} avatarId={user.avatar_id} size={36} />
           </Pressable>
         }
         title="Chats"
@@ -319,6 +319,7 @@ function ChatRow({
     >
       <Avatar
         name={chat.username}
+        avatarId={chat.avatar_id}
         online={online}
         ringColor={selected ? colors.surface : undefined}
       />

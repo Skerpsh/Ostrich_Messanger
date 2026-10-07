@@ -1,5 +1,5 @@
 import { FastifyInstance } from "fastify";
-import { usernameSchema } from "../accounts.js";
+import { AVATAR_ID_COLUMN, usernameSchema } from "../accounts.js";
 import { db, withTransaction } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
 import { isOnline } from "../realtime.js";
@@ -34,7 +34,7 @@ export default async function chatsRoutes(server: FastifyInstance) {
 
       const targetUser = await db.query(
         `
-        SELECT id, username, last_seen_at
+        SELECT id, username, last_seen_at, ${AVATAR_ID_COLUMN}
         FROM users
         WHERE LOWER(username) = LOWER($1)
         `,
@@ -117,6 +117,7 @@ export default async function chatsRoutes(server: FastifyInstance) {
         user: {
           id: otherUser.id,
           username: otherUser.username,
+          avatar_id: otherUser.avatar_id,
           last_seen_at: otherUser.last_seen_at,
           online: isOnline(otherUser.id),
         },
@@ -142,6 +143,7 @@ export default async function chatsRoutes(server: FastifyInstance) {
           users.id AS user_id,
           users.username,
           users.last_seen_at,
+          ${AVATAR_ID_COLUMN},
           other_member.last_read_at AS peer_last_read_at,
           last_message.id AS last_message_id,
           last_message.sender_id AS last_message_sender_id,

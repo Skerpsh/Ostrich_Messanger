@@ -5,7 +5,15 @@ export type User = {
   username: string;
   // When the username can be changed again; null if it can be now.
   next_username_change_at: string | null;
+  // null without a profile picture; see avatarUrl().
+  avatar_id: string | null;
 };
+
+// Profile pictures are plain image URLs: the id is random and new for
+// every upload, so they can be cached for good.
+export function avatarUrl(avatarId: string) {
+  return `${API_URL}/api/avatars/${encodeURIComponent(avatarId)}`;
+}
 
 export type LastMessage = {
   id: string;
@@ -22,6 +30,7 @@ export type Chat = {
   updated_at: string;
   user_id: string;
   username: string;
+  avatar_id: string | null;
   // Presence of the other user.
   online: boolean;
   last_seen_at: string | null;
@@ -39,6 +48,14 @@ export type ChatHistory = {
   peer_last_read_at: string | null;
 };
 
+// The message a reply refers to (its start, for the quote).
+export type ReplyPreview = {
+  id: string;
+  sender_id: string;
+  sender_username: string;
+  content: string;
+};
+
 export type Message = {
   id: string;
   chat_id: string;
@@ -46,6 +63,7 @@ export type Message = {
   sender_username: string;
   content: string;
   created_at: string;
+  reply_to: ReplyPreview | null;
 };
 
 export type AuthResponse = {
@@ -75,13 +93,21 @@ export class SessionExpiredError extends ApiError {
 const REQUEST_TIMEOUT_MS = 15_000;
 
 async function request<T>(
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
-  options: { token?: string; body?: unknown } = {},
+  options: {
+    token?: string;
+    body?: unknown;
+    // Sent as is instead of JSON, e.g. an image.
+    file?: { data: Blob; type: string };
+    timeoutMs?: number;
+  } = {},
 ): Promise<T> {
   const headers: Record<string, string> = {};
 
-  if (options.body !== undefined) {
+  if (options.file) {
+    headers["Content-Type"] = options.file.type;
+  } else if (options.body !== undefined) {
     headers["Content-Type"] = "application/json";
   }
 
@@ -90,7 +116,10 @@ async function request<T>(
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(
+    () => controller.abort(),
+    options.timeoutMs ?? REQUEST_TIMEOUT_MS,
+  );
 
   let response: Response;
 
@@ -98,8 +127,11 @@ async function request<T>(
     response = await fetch(API_URL + path, {
       method,
       headers,
-      body:
-        options.body === undefined ? undefined : JSON.stringify(options.body),
+      body: options.file
+        ? options.file.data
+        : options.body === undefined
+          ? undefined
+          : JSON.stringify(options.body),
       signal: controller.signal,
     });
   } catch {
@@ -212,7 +244,13 @@ export async function getChats(token: string) {
 export async function createChat(token: string, username: string) {
   const { chat, user } = await request<{
     chat: { id: string; type: string; created_at: string };
-    user: { id: string; username: string; online?: boolean; last_seen_at?: string | null };
+    user: {
+      id: string;
+      username: string;
+      avatar_id?: string | null;
+      online?: boolean;
+      last_seen_at?: string | null;
+    };
   }>("POST", "/api/chats", { token, body: { username } });
 
   return {
@@ -220,6 +258,7 @@ export async function createChat(token: string, username: string) {
     updated_at: chat.created_at,
     user_id: user.id,
     username: user.username,
+    avatar_id: user.avatar_id ?? null,
     online: user.online ?? false,
     last_seen_at: user.last_seen_at ?? null,
     last_message: null,
@@ -249,12 +288,42 @@ export async function sendMessage(
   token: string,
   chatId: string,
   content: string,
+  // Id of the message this one replies to.
+  replyTo: string | null = null,
 ) {
   const { message } = await request<{ message: Message }>(
     "POST",
     `/api/chats/${encodeURIComponent(chatId)}/messages`,
-    { token, body: { content } },
+    {
+      token,
+      body: replyTo ? { content, reply_to: replyTo } : { content },
+    },
   );
 
   return message;
+}
+
+// Sets the profile picture (the server re-encodes it to a square WebP).
+export async function uploadAvatar(token: string, image: Blob) {
+  const { user } = await request<{ user: User }>(
+    "PUT",
+    "/api/users/me/avatar",
+    {
+      token,
+      file: { data: image, type: image.type || "image/jpeg" },
+      timeoutMs: 60_000,
+    },
+  );
+
+  return user;
+}
+
+export async function removeAvatar(token: string) {
+  const { user } = await request<{ user: User }>(
+    "DELETE",
+    "/api/users/me/avatar",
+    { token },
+  );
+
+  return user;
 }

@@ -170,6 +170,31 @@ export async function sendToChatMembers(chatId: string, payload: unknown) {
   }
 }
 
+// Sends to everyone who shares a chat with the user and to the user's own
+// sockets (other devices), e.g. after a profile change.
+export async function sendToContacts(userId: string, payload: unknown) {
+  const result = await db.query(
+    `
+    SELECT DISTINCT other.user_id
+    FROM chat_members me
+    JOIN chat_members other ON other.chat_id = me.chat_id
+    WHERE me.user_id = $1
+    `,
+    [userId],
+  );
+
+  const data = JSON.stringify(payload);
+  const recipients = new Set<string>([userId]);
+
+  for (const row of result.rows) {
+    recipients.add(row.user_id);
+  }
+
+  for (const recipient of recipients) {
+    sendToUser(recipient, data);
+  }
+}
+
 // --- presence ---
 
 export function isOnline(userId: string) {

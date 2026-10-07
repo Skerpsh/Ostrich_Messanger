@@ -14,8 +14,13 @@ mobile apps; styled after the Ostrich website.
   chat by typing someone's exact @username into the search
 - Chat: grouped bubbles, day separators, "unread messages" line, read
   receipts (✓ sent, ✓✓ read), multi-line composer (Enter sends on web)
-- Settings: theme (system / light / dark), change username (once per 28
-  days), change password, log out of all devices
+- Replies: hover a message (web) or long-press it (any platform) → Reply;
+  tapping a quote jumps to the original message
+- Profile pictures: picked from the photo library, cropped square and
+  resized on the device, re-encoded by the server
+- Settings: profile picture, theme (system / light / dark), accent color
+  (stored per device), change username (once per 28 days), change
+  password, log out of all devices
 - Chat with live updates over WebSocket, automatic reconnect
 - Light / dark theme (same switch as on the website)
 

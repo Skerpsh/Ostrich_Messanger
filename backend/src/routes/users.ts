@@ -1,5 +1,5 @@
 import { FastifyInstance } from "fastify";
-import { usernameSchema } from "../accounts.js";
+import { AVATAR_ID_COLUMN, usernameSchema } from "../accounts.js";
 import { db } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
 
@@ -32,7 +32,7 @@ export default async function usersRoutes(server: FastifyInstance) {
     async (request, reply) => {
       const result = await db.query(
         `
-        SELECT id, username
+        SELECT id, username, ${AVATAR_ID_COLUMN}
         FROM users
         WHERE LOWER(username) = LOWER($1)
         `,
