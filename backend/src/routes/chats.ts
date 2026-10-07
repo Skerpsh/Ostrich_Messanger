@@ -3,8 +3,10 @@ import { PROFILE_COLUMNS, usernameSchema } from "../accounts.js";
 import { db, isChatMember, withTransaction } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
 import { isOnline, sendToChatMembers, sendToUserSockets } from "../realtime.js";
+import { blockedEitherWay, presenceVisible } from "../visibility.js";
 
-const createChatRateLimit = {
+// Starting chats and changing them (settings, deletion).
+const chatsRateLimit = {
   rateLimit: {
     max: 30,
     timeWindow: "1 minute",
@@ -19,27 +21,15 @@ const chatParamsSchema = {
   },
 } as const;
 
-// SQL: whether user `a` and user `other` have blocked each other, in
-// either direction.
-const BLOCKED_EITHER_WAY = (a: string, other: string) => `EXISTS (
-  SELECT 1 FROM blocks
-  WHERE (blocker_id = ${a} AND blocked_id = ${other})
-     OR (blocker_id = ${other} AND blocked_id = ${a})
-)`;
-
-// What one user may see of another's presence: nothing if they hid it or
-// one of them blocked the other.
+// What the signed-in user may see of the other member's presence.
 function presenceView(row: {
-  id: string;
+  user_id: string;
   last_seen_at: Date | null;
-  show_presence: boolean;
-  blocked: boolean;
+  presence_visible: boolean;
 }) {
-  const visible = row.show_presence && !row.blocked;
-
   return {
-    online: visible && isOnline(row.id),
-    last_seen_at: visible ? row.last_seen_at : null,
+    online: row.presence_visible && isOnline(row.user_id),
+    last_seen_at: row.presence_visible ? row.last_seen_at : null,
   };
 }
 
@@ -50,7 +40,7 @@ export default async function chatsRoutes(server: FastifyInstance) {
     "/api/chats",
     {
       preHandler: authenticate,
-      config: createChatRateLimit,
+      config: chatsRateLimit,
       schema: {
         body: {
           type: "object",
@@ -68,7 +58,7 @@ export default async function chatsRoutes(server: FastifyInstance) {
         `
         SELECT id, username, last_seen_at, show_presence, public_key,
                ${PROFILE_COLUMNS},
-               ${BLOCKED_EITHER_WAY("$2::uuid", "users.id")} AS blocked,
+               ${blockedEitherWay("$2::uuid", "users.id")} AS blocked,
                EXISTS (
                  SELECT 1 FROM blocks
                  WHERE blocker_id = users.id AND blocked_id = $2::uuid
@@ -107,7 +97,8 @@ export default async function chatsRoutes(server: FastifyInstance) {
           SELECT
             chats.id,
             chats.type,
-            chats.created_at
+            chats.created_at,
+            ${presenceVisible("users", "$1::uuid", "chats.id")} AS presence_visible
           FROM chats
           JOIN chat_members first_member
             ON first_member.chat_id = chats.id
@@ -115,6 +106,7 @@ export default async function chatsRoutes(server: FastifyInstance) {
           JOIN chat_members second_member
             ON second_member.chat_id = chats.id
            AND second_member.user_id = $2
+          JOIN users ON users.id = $2
           WHERE chats.type = 'direct'
           LIMIT 1
           `,
@@ -122,6 +114,18 @@ export default async function chatsRoutes(server: FastifyInstance) {
         );
 
         if (existingChat.rows.length > 0) {
+          // Opening it brings a hidden chat back into the list.
+          await client.query(
+            `
+            UPDATE chat_members
+            SET hidden = FALSE
+            WHERE chat_id = $1
+              AND user_id = $2
+              AND hidden
+            `,
+            [existingChat.rows[0].id, request.user.id],
+          );
+
           return { chat: existingChat.rows[0], created: false };
         }
 
@@ -140,15 +144,17 @@ export default async function chatsRoutes(server: FastifyInstance) {
 
         const newChat = chatResult.rows[0];
 
+        // Hidden for the other user until the first message arrives.
         await client.query(
           `
-          INSERT INTO chat_members (chat_id, user_id)
-          VALUES ($1, $2), ($1, $3)
+          INSERT INTO chat_members (chat_id, user_id, hidden)
+          VALUES ($1, $2, FALSE), ($1, $3, TRUE)
           `,
           [newChat.id, request.user.id, otherUser.id],
         );
 
-        return { chat: newChat, created: true };
+        // Nobody has written yet, so the presence stays hidden.
+        return { chat: { ...newChat, presence_visible: false }, created: true };
       });
 
       if (!chat) {
@@ -169,14 +175,20 @@ export default async function chatsRoutes(server: FastifyInstance) {
           avatar_id: otherUser.avatar_id,
           is_developer: otherUser.is_developer,
           public_key: otherUser.public_key,
-          ...presenceView(otherUser),
+          blocked: otherUser.blocked,
+          ...presenceView({
+            user_id: otherUser.id,
+            last_seen_at: otherUser.last_seen_at,
+            presence_visible: chat.presence_visible,
+          }),
         },
       });
     },
   );
 
   // LIST the user's chats: pinned first, then most recently active, with
-  // the other user's presence, the last message and the unread count
+  // the other user's presence, the last message and the unread count.
+  // Hidden chats (see migrations/002) are left out.
   server.get(
     "/api/chats",
     {
@@ -193,13 +205,14 @@ export default async function chatsRoutes(server: FastifyInstance) {
           users.id AS user_id,
           users.username,
           users.last_seen_at,
-          users.show_presence,
           -- The other member's key, to encrypt for them.
           users.public_key,
           ${PROFILE_COLUMNS},
           chat_members.pinned_at IS NOT NULL AS pinned,
           chat_members.muted,
-          ${BLOCKED_EITHER_WAY("$1::uuid", "users.id")} AS blocked,
+          ${presenceVisible("users", "$1::uuid", "chats.id")} AS presence_visible,
+          -- Either has blocked the other: no messages either way.
+          ${blockedEitherWay("$1::uuid", "users.id")} AS blocked,
           EXISTS (
             SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = users.id
           ) AS blocked_by_me,
@@ -233,10 +246,15 @@ export default async function chatsRoutes(server: FastifyInstance) {
           SELECT id, sender_id, content, created_at
           FROM messages
           WHERE messages.chat_id = chats.id
+            AND (
+              chat_members.cleared_at IS NULL
+              OR messages.created_at > chat_members.cleared_at
+            )
           ORDER BY created_at DESC, id DESC
           LIMIT 1
         ) last_message ON TRUE
         WHERE chat_members.user_id = $1
+          AND NOT chat_members.hidden
         ORDER BY chat_members.pinned_at DESC NULLS LAST,
                  chats.updated_at DESC,
                  chats.id
@@ -251,16 +269,14 @@ export default async function chatsRoutes(server: FastifyInstance) {
             last_message_sender_id,
             last_message_content,
             last_message_created_at,
-            show_presence,
-            blocked,
+            presence_visible,
             ...chat
           }) => ({
             ...chat,
             ...presenceView({
-              id: chat.user_id,
+              user_id: chat.user_id,
               last_seen_at: chat.last_seen_at,
-              show_presence,
-              blocked,
+              presence_visible,
             }),
             last_message: last_message_id
               ? {
@@ -284,7 +300,7 @@ export default async function chatsRoutes(server: FastifyInstance) {
     "/api/chats/:chatId/settings",
     {
       preHandler: authenticate,
-      config: createChatRateLimit,
+      config: chatsRateLimit,
       schema: {
         params: chatParamsSchema,
         body: {
@@ -329,16 +345,55 @@ export default async function chatsRoutes(server: FastifyInstance) {
     },
   );
 
-  // DELETE CHAT: for both members, with all its messages
-  server.delete<{ Params: { chatId: string } }>(
+  // DELETE CHAT. ?for=everyone (the default): for both members, with all
+  // its messages. ?for=me: clears the history for this user only and
+  // hides the chat until the next message.
+  server.delete<{
+    Params: { chatId: string };
+    Querystring: { for: "everyone" | "me" };
+  }>(
     "/api/chats/:chatId",
     {
       preHandler: authenticate,
-      config: createChatRateLimit,
-      schema: { params: chatParamsSchema },
+      config: chatsRateLimit,
+      schema: {
+        params: chatParamsSchema,
+        querystring: {
+          type: "object",
+          properties: {
+            for: { type: "string", enum: ["everyone", "me"], default: "everyone" },
+          },
+        },
+      },
     },
     async (request, reply) => {
       const { chatId } = request.params;
+
+      if (request.query.for === "me") {
+        const result = await db.query(
+          `
+          UPDATE chat_members
+          SET cleared_at = NOW(),
+              last_read_at = GREATEST(last_read_at, NOW()),
+              pinned_at = NULL,
+              hidden = TRUE
+          WHERE chat_id = $1
+            AND user_id = $2
+          `,
+          [chatId, request.user.id],
+        );
+
+        if (result.rowCount === 0) {
+          return reply.status(404).send({
+            error: "Chat not found",
+          });
+        }
+
+        // The user's other devices close and forget it as well.
+        sendToUserSockets(request.user.id, { type: "chat_deleted", chatId });
+
+        return { deleted: true };
+      }
 
       if (!(await isChatMember(chatId, request.user.id))) {
         return reply.status(404).send({

@@ -1,4 +1,5 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
+import type { PoolClient } from "pg";
 import argon2 from "argon2";
 import crypto from "node:crypto";
 import {
@@ -21,7 +22,11 @@ import {
   USERNAME_CHANGE_INTERVAL_DAYS,
   type KeyMaterial,
 } from "../accounts.js";
-import { authenticate, hashToken } from "../middleware/auth.js";
+import {
+  authenticate,
+  hashToken,
+  SESSION_TTL_DAYS,
+} from "../middleware/auth.js";
 import {
   closeSessionSockets,
   closeUserSockets,
@@ -29,8 +34,6 @@ import {
   sendToChatMembers,
   sendToContacts,
 } from "../realtime.js";
-
-const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 // The client generates the OstrichID and sends only what it derives from
 // it: the auth key and the account's (encrypted) keys.
@@ -140,39 +143,49 @@ const authRateLimit = {
   },
 };
 
-// Rate limit for websocket tickets (one per connection attempt).
-const ticketRateLimit = {
+// Cheap requests that are still worth bounding: websocket tickets (one per
+// connection attempt), privacy settings.
+const frequentRateLimit = {
   rateLimit: {
     max: 30,
     timeWindow: "1 minute",
   },
 };
 
-// Per-account brute-force protection (the rate limit above is per IP):
-// after MAX_FAILED_LOGINS wrong passwords the account's login is blocked
-// until the window ends.
+// Brute-force protection per account and address: after MAX_FAILED_LOGINS
+// wrong passwords (or OstrichIDs) from one IP, that IP cannot try the
+// account again until the window ends. Counting per account only would
+// let anyone lock any user out, since usernames are public. Guessing from
+// many addresses gains little: a login needs the password and the
+// OstrichID (~99 random bits), and the response does not say which one
+// was wrong.
 const MAX_FAILED_LOGINS = 10;
 const FAILED_LOGIN_WINDOW_MS = 15 * 60 * 1000;
 
 const failedLogins = new Map<string, { count: number; resetAt: number }>();
 
-function loginBlocked(username: string): boolean {
-  const entry = failedLogins.get(username.toLowerCase());
+function failedLoginKey(request: FastifyRequest, username: string) {
+  return `${username.toLowerCase()} ${request.ip}`;
+}
+
+function loginBlocked(request: FastifyRequest, username: string): boolean {
+  const key = failedLoginKey(request, username);
+  const entry = failedLogins.get(key);
 
   if (!entry) {
     return false;
   }
 
   if (entry.resetAt <= Date.now()) {
-    failedLogins.delete(username.toLowerCase());
+    failedLogins.delete(key);
     return false;
   }
 
   return entry.count >= MAX_FAILED_LOGINS;
 }
 
-function recordFailedLogin(username: string) {
-  const key = username.toLowerCase();
+function recordFailedLogin(request: FastifyRequest, username: string) {
+  const key = failedLoginKey(request, username);
   const now = Date.now();
   const entry = failedLogins.get(key);
 
@@ -192,6 +205,12 @@ function recordFailedLogin(username: string) {
 
   failedLogins.set(key, { count: 1, resetAt: now + FAILED_LOGIN_WINDOW_MS });
 }
+
+function clearFailedLogins(request: FastifyRequest, username: string) {
+  failedLogins.delete(failedLoginKey(request, username));
+}
+
+const TOO_MANY_ATTEMPTS = "Too many failed attempts, try again later";
 
 // Used to spend the same time on unknown usernames as on wrong passwords,
 // so login timing does not reveal which usernames exist.
@@ -214,36 +233,45 @@ export default async function authRoutes(server: FastifyInstance) {
       let user;
 
       try {
-        const result = await db.query(
-          `
-          INSERT INTO users (
-            username,
-            password_hash,
-            auth_key_hash,
-            public_key,
-            encrypted_private_key
-          )
-          VALUES ($1, $2, $3, $4, $5)
-          RETURNING ${USER_COLUMNS}
-          `,
-          [
-            username,
-            passwordHash,
-            hashAuthKey(keys.auth_key),
-            keys.public_key,
-            keys.encrypted_private_key,
-          ],
-        );
+        user = await withTransaction(async (client) => {
+          if (!(await claimUsername(client, username, null))) {
+            return null;
+          }
 
-        user = result.rows[0];
+          const result = await client.query(
+            `
+            INSERT INTO users (
+              username,
+              password_hash,
+              auth_key_hash,
+              public_key,
+              encrypted_private_key
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING ${USER_COLUMNS}
+            `,
+            [
+              username,
+              passwordHash,
+              hashAuthKey(keys.auth_key),
+              keys.public_key,
+              keys.encrypted_private_key,
+            ],
+          );
+
+          return result.rows[0];
+        });
       } catch (error) {
-        if (isPgError(error, PG_UNIQUE_VIOLATION)) {
-          return reply.status(409).send({
-            error: "Username is already taken",
-          });
+        // Taken by someone else meanwhile.
+        if (!isPgError(error, PG_UNIQUE_VIOLATION)) {
+          throw error;
         }
+      }
 
-        throw error;
+      if (!user) {
+        return reply.status(409).send({
+          error: USERNAME_TAKEN,
+        });
       }
 
       const token = await createSession(user.id, clientName(request));
@@ -269,10 +297,8 @@ export default async function authRoutes(server: FastifyInstance) {
       // "@alice" works too.
       const username = request.body.username.replace(/^@/, "");
 
-      if (loginBlocked(username)) {
-        return reply.status(429).send({
-          error: "Too many failed login attempts, try again later",
-        });
+      if (loginBlocked(request, username)) {
+        return reply.status(429).send({ error: TOO_MANY_ATTEMPTS });
       }
 
       const result = await db.query(
@@ -293,7 +319,7 @@ export default async function authRoutes(server: FastifyInstance) {
       );
 
       const fail = () => {
-        recordFailedLogin(username);
+        recordFailedLogin(request, username);
 
         return reply.status(401).send({
           error: "Invalid username, password or OstrichID",
@@ -331,7 +357,7 @@ export default async function authRoutes(server: FastifyInstance) {
         return fail();
       }
 
-      failedLogins.delete(username.toLowerCase());
+      clearFailedLogins(request, username);
 
       const token = await createSession(user.id, clientName(request));
 
@@ -387,10 +413,8 @@ export default async function authRoutes(server: FastifyInstance) {
     async (request, reply) => {
       const { ostrich_id, keys } = request.body;
 
-      if (loginBlocked(request.user.username)) {
-        return reply.status(429).send({
-          error: "Too many failed attempts, try again later",
-        });
+      if (loginBlocked(request, request.user.username)) {
+        return reply.status(429).send({ error: TOO_MANY_ATTEMPTS });
       }
 
       const result = await db.query(
@@ -415,9 +439,10 @@ export default async function authRoutes(server: FastifyInstance) {
         !row.ostrich_id_hash ||
         !ostrichIdMatches(ostrich_id, row.ostrich_id_hash)
       ) {
-        recordFailedLogin(request.user.username);
+        recordFailedLogin(request, request.user.username);
 
-        return reply.status(401).send({
+        // Not 401: the session is fine, clients would log out on a 401.
+        return reply.status(403).send({
           error: "Wrong OstrichID",
         });
       }
@@ -498,6 +523,10 @@ export default async function authRoutes(server: FastifyInstance) {
     async (request, reply) => {
       const { current_password, new_password } = request.body;
 
+      if (loginBlocked(request, request.user.username)) {
+        return reply.status(429).send({ error: TOO_MANY_ATTEMPTS });
+      }
+
       const result = await db.query(
         `
         SELECT password_hash
@@ -513,6 +542,8 @@ export default async function authRoutes(server: FastifyInstance) {
       );
 
       if (!passwordValid) {
+        recordFailedLogin(request, request.user.username);
+
         return reply.status(403).send({
           error: "Current password is incorrect",
         });
@@ -562,6 +593,10 @@ export default async function authRoutes(server: FastifyInstance) {
     async (request, reply) => {
       const { username, password } = request.body;
 
+      if (loginBlocked(request, request.user.username)) {
+        return reply.status(429).send({ error: TOO_MANY_ATTEMPTS });
+      }
+
       const current = await db.query(
         `
         SELECT password_hash
@@ -572,6 +607,8 @@ export default async function authRoutes(server: FastifyInstance) {
       );
 
       if (!(await argon2.verify(current.rows[0].password_hash, password))) {
+        recordFailedLogin(request, request.user.username);
+
         return reply.status(403).send({
           error: "Password is incorrect",
         });
@@ -583,45 +620,85 @@ export default async function authRoutes(server: FastifyInstance) {
         });
       }
 
+      const tooSoon = () =>
+        reply.status(429).send({
+          error: `The username can be changed once every ${USERNAME_CHANGE_INTERVAL_DAYS} days`,
+          next_username_change_at:
+            accountView(request.user).next_username_change_at,
+        });
+
+      if (accountView(request.user).next_username_change_at) {
+        return tooSoon();
+      }
+
       let result;
 
       try {
-        result = await db.query(
-          `
-          UPDATE users
-          SET username = $2,
-              username_changed_at = NOW(),
-              updated_at = NOW()
-          WHERE id = $1
-            AND (
-              username_changed_at IS NULL
-              OR username_changed_at
-                <= NOW() - make_interval(days => $3)
-            )
-          RETURNING ${USER_COLUMNS}
-          `,
-          [request.user.id, username, USERNAME_CHANGE_INTERVAL_DAYS],
-        );
+        result = await withTransaction(async (client) => {
+          if (!(await claimUsername(client, username, request.user.id))) {
+            return "taken" as const;
+          }
+
+          const updated = await client.query(
+            `
+            UPDATE users
+            SET username = $2,
+                username_changed_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $1
+              AND (
+                username_changed_at IS NULL
+                OR username_changed_at
+                  <= NOW() - make_interval(days => $3)
+              )
+            RETURNING ${USER_COLUMNS}
+            `,
+            [request.user.id, username, USERNAME_CHANGE_INTERVAL_DAYS],
+          );
+
+          if (updated.rowCount === 0) {
+            // Changed meanwhile from another device: undo the claim.
+            throw new UsernameChangedMeanwhile();
+          }
+
+          // The old name stays the user's for a while (unless they only
+          // changed its case), so nobody can take it over right away.
+          if (username.toLowerCase() !== request.user.username.toLowerCase()) {
+            await client.query(
+              `
+              INSERT INTO username_reservations (username_lower, user_id, reserved_until)
+              VALUES (LOWER($1), $2, NOW() + make_interval(days => $3))
+              ON CONFLICT (username_lower) DO UPDATE
+              SET user_id = EXCLUDED.user_id,
+                  reserved_until = EXCLUDED.reserved_until
+              `,
+              [request.user.username, request.user.id, USERNAME_RESERVATION_DAYS],
+            );
+          }
+
+          return updated.rows[0];
+        });
       } catch (error) {
-        if (isPgError(error, PG_UNIQUE_VIOLATION)) {
-          return reply.status(409).send({
-            error: "Username is already taken",
-          });
+        if (error instanceof UsernameChangedMeanwhile) {
+          return tooSoon();
         }
 
-        throw error;
+        if (!isPgError(error, PG_UNIQUE_VIOLATION)) {
+          throw error;
+        }
+
+        result = "taken" as const;
       }
 
-      if (result.rowCount === 0) {
-        const { next_username_change_at } = accountView(request.user);
-
-        return reply.status(429).send({
-          error: `The username can be changed once every ${USERNAME_CHANGE_INTERVAL_DAYS} days`,
-          next_username_change_at,
+      if (result === "taken") {
+        return reply.status(409).send({
+          error: USERNAME_TAKEN,
         });
       }
 
-      const user = accountView(result.rows[0]);
+      clearFailedLogins(request, request.user.username);
+
+      const user = accountView(result);
 
       // Chats lists of the user's contacts and other devices show the new
       // name right away.
@@ -646,7 +723,7 @@ export default async function authRoutes(server: FastifyInstance) {
     "/api/auth/privacy",
     {
       preHandler: authenticate,
-      config: ticketRateLimit,
+      config: frequentRateLimit,
       schema: {
         body: {
           type: "object",
@@ -757,6 +834,10 @@ export default async function authRoutes(server: FastifyInstance) {
     async (request, reply) => {
       const { password, auth_key } = request.body;
 
+      if (loginBlocked(request, request.user.username)) {
+        return reply.status(429).send({ error: TOO_MANY_ATTEMPTS });
+      }
+
       const result = await db.query(
         "SELECT password_hash, auth_key_hash FROM users WHERE id = $1",
         [request.user.id],
@@ -766,7 +847,7 @@ export default async function authRoutes(server: FastifyInstance) {
       const passwordValid = await argon2.verify(row.password_hash, password);
 
       if (!passwordValid || !row.auth_key_hash || !authKeyMatches(auth_key, row.auth_key_hash)) {
-        recordFailedLogin(request.user.username);
+        recordFailedLogin(request, request.user.username);
 
         return reply.status(403).send({
           error: "Wrong password or OstrichID",
@@ -806,7 +887,7 @@ export default async function authRoutes(server: FastifyInstance) {
     "/api/auth/ws-ticket",
     {
       preHandler: authenticate,
-      config: ticketRateLimit,
+      config: frequentRateLimit,
     },
     async (request) => {
       return {
@@ -814,6 +895,57 @@ export default async function authRoutes(server: FastifyInstance) {
       };
     },
   );
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const USERNAME_TAKEN = "Username is already taken";
+
+class UsernameChangedMeanwhile extends Error {}
+
+// How long a username given up by a change stays reserved for its former
+// owner.
+const USERNAME_RESERVATION_DAYS = USERNAME_CHANGE_INTERVAL_DAYS;
+
+// Checks, inside a transaction, that `username` is not reserved for
+// another user (see username_reservations) and locks it until the
+// transaction ends, so a concurrent registration cannot slip in. The
+// unique index on users still catches names in use. `userId` is the user
+// taking the name (null when registering); their own reservation is
+// released.
+async function claimUsername(
+  client: PoolClient,
+  username: string,
+  userId: string | null,
+): Promise<boolean> {
+  await client.query("SELECT pg_advisory_xact_lock(hashtext(LOWER($1)))", [
+    username,
+  ]);
+
+  const reserved = await client.query(
+    `
+    SELECT user_id
+    FROM username_reservations
+    WHERE username_lower = LOWER($1)
+      AND reserved_until > NOW()
+    `,
+    [username],
+  );
+
+  const owner = reserved.rows[0]?.user_id as string | undefined;
+
+  if (owner && owner !== userId) {
+    return false;
+  }
+
+  if (owner) {
+    await client.query(
+      "DELETE FROM username_reservations WHERE username_lower = LOWER($1)",
+      [username],
+    );
+  }
+
+  return true;
 }
 
 async function createSession(userId: string, client: string): Promise<string> {
@@ -829,7 +961,7 @@ async function createSession(userId: string, client: string): Promise<string> {
     )
     VALUES ($1, $2, $3, $4)
     `,
-    [userId, hashToken(token), new Date(Date.now() + SESSION_TTL_MS), client],
+    [userId, hashToken(token), new Date(Date.now() + SESSION_TTL_DAYS * DAY_MS), client],
   );
 
   return token;

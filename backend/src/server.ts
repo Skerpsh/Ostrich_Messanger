@@ -34,7 +34,7 @@ function parseTrustProxy(value: string): boolean | string {
 // so other sites cannot act on behalf of a user.
 const CORS_ORIGINS = process.env.CORS_ORIGINS?.split(",").map((o) => o.trim());
 
-const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 const server = Fastify({
   trustProxy: TRUST_PROXY,
@@ -104,11 +104,13 @@ async function healthRoutes(instance: FastifyInstance) {
   );
 }
 
-async function deleteExpiredSessions() {
+// Expired sessions and username reservations.
+async function deleteExpired() {
   try {
     await db.query("DELETE FROM sessions WHERE expires_at <= NOW()");
+    await db.query("DELETE FROM username_reservations WHERE reserved_until <= NOW()");
   } catch (error) {
-    server.log.error(error, "failed to delete expired sessions");
+    server.log.error(error, "failed to delete expired rows");
   }
 }
 
@@ -151,8 +153,8 @@ const start = async () => {
       host: HOST,
     });
 
-    deleteExpiredSessions();
-    setInterval(deleteExpiredSessions, SESSION_CLEANUP_INTERVAL_MS).unref();
+    deleteExpired();
+    setInterval(deleteExpired, CLEANUP_INTERVAL_MS).unref();
   } catch (error) {
     server.log.error(error);
     process.exit(1);

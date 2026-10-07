@@ -1,12 +1,9 @@
 import { FastifyInstance } from "fastify";
-import { PROFILE_COLUMNS, usernameSchema } from "../accounts.js";
 import { db } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
 import { sendToUserSockets } from "../realtime.js";
 
-// Exact lookups only (no search by part of a name), so the list of users
-// cannot be enumerated; also rate limited per IP.
-export const userLookupRateLimit = {
+const blockRateLimit = {
   rateLimit: {
     max: 30,
     timeWindow: "1 minute",
@@ -14,44 +11,6 @@ export const userLookupRateLimit = {
 };
 
 export default async function usersRoutes(server: FastifyInstance) {
-  // FIND a user by their exact @username (case-insensitive)
-  server.get<{ Params: { username: string } }>(
-    "/api/users/:username",
-    {
-      preHandler: authenticate,
-      config: userLookupRateLimit,
-      schema: {
-        params: {
-          type: "object",
-          required: ["username"],
-          properties: {
-            username: usernameSchema,
-          },
-        },
-      },
-    },
-    async (request, reply) => {
-      const result = await db.query(
-        `
-        SELECT id, username, ${PROFILE_COLUMNS}
-        FROM users
-        WHERE LOWER(username) = LOWER($1)
-        `,
-        [request.params.username],
-      );
-
-      if (result.rows.length === 0) {
-        return reply.status(404).send({
-          error: "User not found",
-        });
-      }
-
-      return reply.send({
-        user: result.rows[0],
-      });
-    },
-  );
-
   // BLOCK / UNBLOCK a user. Blocked users cannot message you or start a
   // chat with you, and neither of you sees the other's online status.
   const setBlocked = async (blockerId: string, blockedId: string, blocked: boolean) => {
@@ -86,7 +45,7 @@ export default async function usersRoutes(server: FastifyInstance) {
     "/api/users/:userId/block",
     {
       preHandler: authenticate,
-      config: userLookupRateLimit,
+      config: blockRateLimit,
       schema: { params: userParamsSchema },
     },
     async (request, reply) => {
@@ -112,7 +71,7 @@ export default async function usersRoutes(server: FastifyInstance) {
     "/api/users/:userId/block",
     {
       preHandler: authenticate,
-      config: userLookupRateLimit,
+      config: blockRateLimit,
       schema: { params: userParamsSchema },
     },
     async (request) => {

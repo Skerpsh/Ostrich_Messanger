@@ -5,6 +5,10 @@ import { db } from "../database.js";
 
 export type AuthUser = FastifyRequest["user"];
 
+// A session ends after this many days without being used; every use moves
+// the end forward, so active devices stay logged in.
+export const SESSION_TTL_DAYS = 30;
+
 export function hashToken(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
@@ -29,7 +33,6 @@ export function getBearerToken(request: FastifyRequest): string | null {
 export type Session = {
   user: AuthUser;
   tokenHash: string;
-  expiresAt: Date;
 };
 
 export async function findSessionByHash(
@@ -44,8 +47,7 @@ export async function findSessionByHash(
       users.username_changed_at,
       users.show_presence,
       users.read_receipts,
-      ${PROFILE_COLUMNS},
-      sessions.expires_at
+      ${PROFILE_COLUMNS}
     FROM sessions
     JOIN users ON users.id = sessions.user_id
     WHERE sessions.token_hash = $1
@@ -60,20 +62,20 @@ export async function findSessionByHash(
     return null;
   }
 
-  // For the list of devices; at most every few minutes per session.
+  // For the list of devices, and to keep the session alive while it is
+  // used; at most every few minutes per session.
   db.query(
     `
     UPDATE sessions
-    SET last_used_at = NOW()
+    SET last_used_at = NOW(),
+        expires_at = GREATEST(expires_at, NOW() + make_interval(days => $2))
     WHERE token_hash = $1
       AND last_used_at < NOW() - INTERVAL '5 minutes'
     `,
-    [tokenHash],
+    [tokenHash, SESSION_TTL_DAYS],
   ).catch(() => {});
 
-  const { expires_at, ...user } = row;
-
-  return { user, tokenHash, expiresAt: expires_at };
+  return { user: row, tokenHash };
 }
 
 export async function findUserByToken(

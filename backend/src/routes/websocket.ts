@@ -12,9 +12,11 @@ import {
   createMessage,
   isBlockedInChat,
   isEncryptedMessage,
+  needsClientId,
 } from "../messages.js";
 import { notifyNewMessage } from "../push.js";
 import {
+  announcePresence,
   chatPresence,
   closeEndedSessions,
   connectionCount,
@@ -51,16 +53,17 @@ const UUID_RE =
 type ClientMessage = {
   type?: unknown;
   chatId?: unknown;
+  id?: unknown;
   content?: unknown;
   replyTo?: unknown;
 };
 
 // Protocol (JSON messages):
 //   client -> server: join {chatId}, leave {chatId},
-//                     message {chatId, content, replyTo?}, typing {chatId}
+//                     message {chatId, id?, content, replyTo?}, typing {chatId}
 //   server -> client: connected, joined {chatId}, left {chatId},
 //                     message {message}, read {chatId, userId, lastReadAt},
-//                     profile {userId, username, avatarId},
+//                     profile {userId, username, avatarId, isDeveloper},
 //                     typing {chatId, userId}, message_updated {message},
 //                     message_deleted {chatId, messageId},
 //                     reactions {chatId, messageId, reactions},
@@ -154,14 +157,14 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
       const sendError = (error: string) => send({ type: "error", error });
 
-      const validChatId = (chatId: unknown): chatId is string =>
-        typeof chatId === "string" && UUID_RE.test(chatId);
+      const validId = (id: unknown): id is string =>
+        typeof id === "string" && UUID_RE.test(id);
 
       const handle = async (data: ClientMessage) => {
         if (data.type === "join") {
           const { chatId } = data;
 
-          if (!validChatId(chatId)) {
+          if (!validId(chatId)) {
             sendError("Valid chatId is required");
             return;
           }
@@ -183,7 +186,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
         if (data.type === "leave") {
           const { chatId } = data;
 
-          if (!validChatId(chatId)) {
+          if (!validId(chatId)) {
             sendError("Valid chatId is required");
             return;
           }
@@ -197,7 +200,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
           const content =
             typeof data.content === "string" ? data.content.trim() : "";
 
-          if (!validChatId(chatId) || content.length === 0) {
+          if (!validId(chatId) || content.length === 0) {
             sendError("chatId and content are required");
             return;
           }
@@ -207,10 +210,21 @@ export default async function websocketRoutes(server: FastifyInstance) {
             return;
           }
 
-          const { replyTo } = data;
+          const { replyTo, id } = data;
 
-          if (replyTo != null && !validChatId(replyTo)) {
+          if (replyTo != null && !validId(replyTo)) {
             sendError("replyTo must be a message id");
+            return;
+          }
+
+          // Chosen by the client; required for "e2" messages.
+          const messageId = validId(id) ? id : null;
+
+          if (
+            (id != null && messageId === null) ||
+            (messageId === null && needsClientId(content))
+          ) {
+            sendError("id must be a new message id");
             return;
           }
 
@@ -219,6 +233,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
             user.id,
             content,
             replyTo ?? null,
+            messageId,
           );
 
           if ("error" in result) {
@@ -231,6 +246,10 @@ export default async function websocketRoutes(server: FastifyInstance) {
             message: result.message,
           });
           notifyNewMessage(chatId, user.id);
+
+          if (result.firstFromSender) {
+            await announcePresence(user.id, chatId);
+          }
           return;
         }
 
@@ -239,7 +258,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
           const { chatId } = data;
 
           if (
-            !validChatId(chatId) ||
+            !validId(chatId) ||
             !(await isChatMember(chatId, user.id)) ||
             (await isBlockedInChat(chatId, user.id))
           ) {
@@ -336,7 +355,6 @@ export default async function websocketRoutes(server: FastifyInstance) {
       trackSession(socket, {
         userId: user.id,
         tokenHash: session.tokenHash,
-        expiresAt: session.expiresAt,
       });
       userConnected(user.id, socket);
 

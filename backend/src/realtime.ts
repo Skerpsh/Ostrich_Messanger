@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from "fastify";
 import type { WebSocket } from "ws";
 import crypto from "node:crypto";
 import { db } from "./database.js";
+import { presenceVisible } from "./visibility.js";
 
 // All realtime state is kept in memory, so the backend must run as a
 // single process.
@@ -41,7 +42,6 @@ function send(socket: WebSocket, data: string) {
 type SocketSession = {
   userId: string;
   tokenHash: string;
-  expiresAt: Date;
 };
 
 const socketSessions = new Map<WebSocket, SocketSession>();
@@ -91,11 +91,9 @@ export function closeUserSockets(userId: string, keepTokenHash?: string) {
 }
 
 // Closes sockets whose session has expired or no longer exists (e.g. it
-// was deleted directly in the database).
+// was deleted directly in the database). Sessions are extended while used,
+// so only the database knows when one really ends.
 export async function closeEndedSessions() {
-  const now = new Date();
-  closeSessions((session) => session.expiresAt <= now);
-
   const tokenHashes = [
     ...new Set([...socketSessions.values()].map((s) => s.tokenHash)),
   ];
@@ -230,24 +228,19 @@ function sendToUser(userId: string, data: string) {
   }
 }
 
-// Presence is visible only to users who share a chat with the user, and
-// not at all if the user hid it or to users blocked either way.
+// Presence is visible only to users who share a chat with the user, see
+// presenceVisible().
 async function notifyPeers(event: PresenceEvent) {
   const result = await db.query(
     `
     SELECT DISTINCT other.user_id
     FROM chat_members me
-    JOIN users self ON self.id = me.user_id
+    JOIN users ON users.id = me.user_id
     JOIN chat_members other
       ON other.chat_id = me.chat_id
      AND other.user_id <> me.user_id
     WHERE me.user_id = $1
-      AND self.show_presence
-      AND NOT EXISTS (
-        SELECT 1 FROM blocks
-        WHERE (blocker_id = $1 AND blocked_id = other.user_id)
-           OR (blocker_id = other.user_id AND blocked_id = $1)
-      )
+      AND ${presenceVisible("users", "other.user_id", "me.chat_id")}
     `,
     [event.userId],
   );
@@ -256,6 +249,36 @@ async function notifyPeers(event: PresenceEvent) {
 
   for (const row of result.rows) {
     sendToUser(row.user_id, data);
+  }
+}
+
+// The user's presence for the other members of a chat, e.g. once the user
+// has written there for the first time and it becomes visible to them.
+export async function announcePresence(userId: string, chatId: string) {
+  const result = await db.query(
+    `
+    SELECT other.user_id, users.last_seen_at
+    FROM chat_members other
+    JOIN users ON users.id = $1
+    WHERE other.chat_id = $2
+      AND other.user_id <> $1
+      AND ${presenceVisible("users", "other.user_id", "$2::uuid")}
+    `,
+    [userId, chatId],
+  );
+
+  for (const row of result.rows) {
+    const online = isOnline(userId);
+
+    sendToUser(
+      row.user_id,
+      JSON.stringify({
+        type: "presence",
+        userId,
+        online,
+        lastSeenAt: online ? null : row.last_seen_at,
+      } satisfies PresenceEvent),
+    );
   }
 }
 
@@ -342,11 +365,7 @@ export async function chatPresence(
     SELECT
       users.id,
       users.last_seen_at,
-      users.show_presence AND NOT EXISTS (
-        SELECT 1 FROM blocks
-        WHERE (blocker_id = $2 AND blocked_id = users.id)
-           OR (blocker_id = users.id AND blocked_id = $2)
-      ) AS visible
+      ${presenceVisible("users", "$2::uuid", "$1::uuid")} AS visible
     FROM chat_members
     JOIN users ON users.id = chat_members.user_id
     WHERE chat_members.chat_id = $1

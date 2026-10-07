@@ -1,18 +1,25 @@
 import { FastifyInstance } from "fastify";
-import { db, isChatMember } from "../database.js";
+import { db } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
 import {
   CREATE_MESSAGE_ERRORS,
+  CREATE_MESSAGE_STATUS,
   createMessage,
   getMessage,
+  isBlockedInChat,
   MAX_MESSAGE_LENGTH,
   MESSAGE_PATTERN,
   MESSAGE_SELECT,
+  needsClientId,
   REACTIONS,
   withReply,
 } from "../messages.js";
 import { notifyNewMessage } from "../push.js";
-import { sendToChatMembers, sendToUserSockets } from "../realtime.js";
+import {
+  announcePresence,
+  sendToChatMembers,
+  sendToUserSockets,
+} from "../realtime.js";
 
 const chatParamsSchema = {
   type: "object",
@@ -57,7 +64,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
   // SEND MESSAGE
   server.post<{
     Params: ChatParams;
-    Body: { content: string; reply_to?: string };
+    Body: { id?: string; content: string; reply_to?: string };
   }>(
     "/api/chats/:chatId/messages",
     {
@@ -69,6 +76,8 @@ export default async function messagesRoutes(server: FastifyInstance) {
           type: "object",
           required: ["content"],
           properties: {
+            // Chosen by the client: "e2" messages are bound to their id.
+            id: { type: "string", format: "uuid" },
             content: {
               type: "string",
               maxLength: MAX_MESSAGE_LENGTH,
@@ -82,11 +91,11 @@ export default async function messagesRoutes(server: FastifyInstance) {
     },
     async (request, reply) => {
       const { chatId } = request.params;
-      const content = request.body.content.trim();
+      const { content, id } = request.body;
 
-      if (content.length === 0) {
+      if (!id && needsClientId(content)) {
         return reply.status(400).send({
-          error: "Message content is required",
+          error: "id is required for this message format",
         });
       }
 
@@ -95,11 +104,12 @@ export default async function messagesRoutes(server: FastifyInstance) {
         request.user.id,
         content,
         request.body.reply_to ?? null,
+        id ?? null,
       );
 
       if ("error" in result) {
         return reply
-          .status(result.error === "not_member" ? 403 : 400)
+          .status(CREATE_MESSAGE_STATUS[result.error])
           .send({ error: CREATE_MESSAGE_ERRORS[result.error] });
       }
 
@@ -111,6 +121,10 @@ export default async function messagesRoutes(server: FastifyInstance) {
         type: "message",
         message,
       });
+
+      if (result.firstFromSender) {
+        await announcePresence(request.user.id, chatId);
+      }
 
       return reply.status(201).send({
         message,
@@ -147,19 +161,26 @@ export default async function messagesRoutes(server: FastifyInstance) {
       const { chatId } = request.params;
       const { limit, before } = request.query;
 
-      if (!(await isChatMember(chatId, request.user.id))) {
+      const member = await db.query(
+        "SELECT cleared_at FROM chat_members WHERE chat_id = $1 AND user_id = $2",
+        [chatId, request.user.id],
+      );
+
+      if (member.rows.length === 0) {
         return reply.status(403).send({
           error: "You are not a member of this chat",
         });
       }
 
       // One more than asked, to tell whether there is older history.
+      // Messages up to cleared_at were cleared by the user ("clear history").
       const result = await db.query(
         `
         SELECT *
         FROM (
           ${MESSAGE_SELECT}
           WHERE m.chat_id = $1
+            AND ($4::timestamptz IS NULL OR m.created_at > $4)
             AND (
               $3::uuid IS NULL
               OR (m.created_at, m.id) < (
@@ -171,7 +192,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
         ) latest
         ORDER BY created_at ASC, id ASC
         `,
-        [chatId, limit, before ?? null],
+        [chatId, limit, before ?? null, member.rows[0].cleared_at],
       );
 
       const hasMore = result.rows.length > limit;
@@ -227,6 +248,10 @@ export default async function messagesRoutes(server: FastifyInstance) {
     },
     async (request, reply) => {
       const { chatId, messageId } = request.params;
+
+      if (await isBlockedInChat(chatId, request.user.id)) {
+        return reply.status(403).send({ error: CREATE_MESSAGE_ERRORS.blocked });
+      }
 
       const result = await db.query(
         `
@@ -328,6 +353,10 @@ export default async function messagesRoutes(server: FastifyInstance) {
         return reply.status(404).send({
           error: "Message not found in this chat",
         });
+      }
+
+      if (emoji !== null && (await isBlockedInChat(chatId, request.user.id))) {
+        return reply.status(403).send({ error: CREATE_MESSAGE_ERRORS.blocked });
       }
 
       if (emoji === null) {

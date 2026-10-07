@@ -1,17 +1,25 @@
-import { db } from "./database.js";
+import { db, isPgError, PG_UNIQUE_VIOLATION } from "./database.js";
+import { blockedEitherWay } from "./visibility.js";
 
-// Messages are end-to-end encrypted: "e1:" + base64(nonce + ciphertext),
-// see frontend/src/lib/crypto.ts. The server cannot read or shorten them;
-// clients limit the text to 4096 characters before encrypting, which is at
-// most ~22 000 characters of base64.
-export const MESSAGE_PATTERN = "^e1:[A-Za-z0-9+/]+={0,2}$";
+// Messages are end-to-end encrypted, see frontend/src/lib/crypto.ts:
+//   "e2:" + base64(nonce + ciphertext), bound to the chat, the sender and
+//         the message id, which the client chooses for that reason;
+//   "e1:" the same bound to the chat only (older clients).
+// The server cannot read or shorten them; clients limit the text to 4096
+// characters before encrypting, which is at most ~22 000 characters of
+// base64.
+export const MESSAGE_PATTERN = "^e[12]:[A-Za-z0-9+/]+={0,2}$";
 export const MAX_MESSAGE_LENGTH = 22_000;
 
+const MESSAGE_RE = new RegExp(MESSAGE_PATTERN);
+
 export function isEncryptedMessage(content: string) {
-  return (
-    content.length <= MAX_MESSAGE_LENGTH &&
-    new RegExp(MESSAGE_PATTERN).test(content)
-  );
+  return content.length <= MAX_MESSAGE_LENGTH && MESSAGE_RE.test(content);
+}
+
+// "e2" messages are bound to their id, so the client must choose it.
+export function needsClientId(content: string) {
+  return content.startsWith("e2:");
 }
 
 export type ReplyPreview = {
@@ -39,6 +47,21 @@ export type ChatMessage = {
 // The emoji a message can be reacted with.
 export const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🔥", "🙏", "👎"] as const;
 
+// Columns of the replied-to message, joined as "reply" and "reply_sender".
+const REPLY_COLUMNS = `
+  reply.id AS reply_id,
+  reply.sender_id AS reply_sender_id,
+  reply_sender.username AS reply_sender_username,
+  reply_sender.is_developer AS reply_sender_is_developer,
+  -- Whole: encrypted text cannot be shortened; clients shorten the quote.
+  reply.content AS reply_content
+`;
+
+const REPLY_JOINS = (message: string) => `
+  LEFT JOIN messages reply ON reply.id = ${message}.reply_to_id
+  LEFT JOIN users reply_sender ON reply_sender.id = reply.sender_id
+`;
+
 // A whole message as clients get it: text, quote, edit time, reactions.
 // Use as "${MESSAGE_SELECT} WHERE m.…".
 export const MESSAGE_SELECT = `
@@ -50,11 +73,7 @@ export const MESSAGE_SELECT = `
     m.content,
     m.created_at,
     m.edited_at,
-    reply.id AS reply_id,
-    reply.sender_id AS reply_sender_id,
-    reply_sender.username AS reply_sender_username,
-    reply_sender.is_developer AS reply_sender_is_developer,
-    reply.content AS reply_content,
+    ${REPLY_COLUMNS},
     COALESCE(
       (
         SELECT json_agg(
@@ -68,8 +87,7 @@ export const MESSAGE_SELECT = `
     ) AS reactions
   FROM messages m
   JOIN users sender ON sender.id = m.sender_id
-  LEFT JOIN messages reply ON reply.id = m.reply_to_id
-  LEFT JOIN users reply_sender ON reply_sender.id = reply.sender_id
+  ${REPLY_JOINS("m")}
 `;
 
 export async function getMessage(messageId: string): Promise<ChatMessage | null> {
@@ -77,16 +95,6 @@ export async function getMessage(messageId: string): Promise<ChatMessage | null>
 
   return result.rows[0] ? (withReply(result.rows[0]) as ChatMessage) : null;
 }
-
-// Columns of the replied-to message, joined as "reply" and "reply_sender".
-export const REPLY_COLUMNS = `
-  reply.id AS reply_id,
-  reply.sender_id AS reply_sender_id,
-  reply_sender.username AS reply_sender_username,
-  reply_sender.is_developer AS reply_sender_is_developer,
-  -- Whole: encrypted text cannot be shortened; clients shorten the quote.
-  reply.content AS reply_content
-`;
 
 // Turns the flat reply_* columns of a row into the reply_to object.
 export function withReply<
@@ -119,94 +127,128 @@ export function withReply<
   };
 }
 
-export type CreateMessageResult =
-  | { message: ChatMessage }
-  | { error: "not_member" | "reply_not_found" | "blocked" };
+export type CreateMessageError =
+  | "not_member"
+  | "reply_not_found"
+  | "blocked"
+  | "duplicate_id";
 
-// SQL: whether $2 (the sender) and the other member of chat $1 have
+export type CreateMessageResult =
+  | {
+      message: ChatMessage;
+      // The sender's first message in the chat: from now on the other
+      // member may see their presence (see presenceVisible()).
+      firstFromSender: boolean;
+    }
+  | { error: CreateMessageError };
+
+// SQL: whether $2 (a member of chat $1) and the chat's other member have
 // blocked each other, in either direction.
-const SENDER_BLOCKED = `EXISTS (
+const BLOCKED_IN_CHAT = `EXISTS (
   SELECT 1
   FROM chat_members other
-  JOIN blocks b
-    ON (b.blocker_id = other.user_id AND b.blocked_id = $2)
-    OR (b.blocker_id = $2 AND b.blocked_id = other.user_id)
   WHERE other.chat_id = $1
     AND other.user_id <> $2
+    AND ${blockedEitherWay("$2::uuid", "other.user_id")}
 )`;
 
 // Saves a message, bumps the chat's updated_at and the sender's read
-// position in one statement. A reply must refer to a message of the same
-// chat.
+// position, and unhides the chat for its members, in one statement. A reply must refer to a message of the same
+// chat. `messageId` is the id chosen by the client (required for "e2").
 export async function createMessage(
   chatId: string,
   senderId: string,
   content: string,
   replyToId: string | null = null,
+  messageId: string | null = null,
 ): Promise<CreateMessageResult> {
-  const result = await db.query(
-    `
-    WITH inserted AS (
-      INSERT INTO messages (
-        chat_id,
-        sender_id,
-        content,
-        reply_to_id
-      )
-      SELECT $1, $2, $3, $4
-      WHERE EXISTS (
-        SELECT 1
-        FROM chat_members
-        WHERE chat_id = $1
-          AND user_id = $2
-      )
-      AND (
-        $4::uuid IS NULL
-        OR EXISTS (
-          SELECT 1
-          FROM messages
-          WHERE id = $4
-            AND chat_id = $1
+  let result;
+
+  try {
+    result = await db.query(
+      `
+      WITH inserted AS (
+        INSERT INTO messages (
+          id,
+          chat_id,
+          sender_id,
+          content,
+          reply_to_id
         )
+        SELECT COALESCE($5::uuid, gen_random_uuid()), $1, $2, $3, $4
+        WHERE EXISTS (
+          SELECT 1
+          FROM chat_members
+          WHERE chat_id = $1
+            AND user_id = $2
+        )
+        AND (
+          $4::uuid IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = $4
+              AND chat_id = $1
+          )
+        )
+        AND NOT ${BLOCKED_IN_CHAT}
+        RETURNING id, chat_id, sender_id, content, created_at, reply_to_id
+      ),
+      touched AS (
+        UPDATE chats
+        SET updated_at = NOW()
+        WHERE id = (SELECT chat_id FROM inserted)
+      ),
+      -- Whoever writes has read the chat up to their own message. A new
+      -- message shows the chat to members who had it hidden.
+      members AS (
+        UPDATE chat_members
+        SET last_read_at = CASE
+              WHEN user_id = $2
+                THEN GREATEST(last_read_at, (SELECT created_at FROM inserted))
+              ELSE last_read_at
+            END,
+            hidden = FALSE
+        WHERE chat_id = (SELECT chat_id FROM inserted)
       )
-      AND NOT ${SENDER_BLOCKED}
-      RETURNING id, chat_id, sender_id, content, created_at, reply_to_id
-    ),
-    touched AS (
-      UPDATE chats
-      SET updated_at = NOW()
-      WHERE id = (SELECT chat_id FROM inserted)
-    ),
-    -- Whoever writes has read the chat up to their own message.
-    sender_read AS (
-      UPDATE chat_members
-      SET last_read_at = GREATEST(last_read_at, (SELECT created_at FROM inserted))
-      WHERE chat_id = (SELECT chat_id FROM inserted)
-        AND user_id = $2
-    )
-    SELECT
-      inserted.id,
-      inserted.chat_id,
-      inserted.sender_id,
-      users.username AS sender_username,
-      inserted.content,
-      inserted.created_at,
-      ${REPLY_COLUMNS}
-    FROM inserted
-    JOIN users ON users.id = inserted.sender_id
-    LEFT JOIN messages reply ON reply.id = inserted.reply_to_id
-    LEFT JOIN users reply_sender ON reply_sender.id = reply.sender_id
-    `,
-    [chatId, senderId, content, replyToId],
-  );
+      SELECT
+        inserted.id,
+        inserted.chat_id,
+        inserted.sender_id,
+        users.username AS sender_username,
+        inserted.content,
+        inserted.created_at,
+        ${REPLY_COLUMNS},
+        -- The statement's snapshot does not contain the new row yet.
+        NOT EXISTS (
+          SELECT 1 FROM messages
+          WHERE chat_id = $1
+            AND sender_id = $2
+        ) AS first_from_sender
+      FROM inserted
+      JOIN users ON users.id = inserted.sender_id
+      ${REPLY_JOINS("inserted")}
+      `,
+      [chatId, senderId, content, replyToId, messageId],
+    );
+  } catch (error) {
+    if (isPgError(error, PG_UNIQUE_VIOLATION)) {
+      return { error: "duplicate_id" };
+    }
+
+    throw error;
+  }
 
   if (result.rows[0]) {
+    const { first_from_sender, ...row } = result.rows[0];
+
     return {
       message: {
-        ...(withReply(result.rows[0]) as Omit<ChatMessage, "edited_at" | "reactions">),
+        ...(withReply(row) as Omit<ChatMessage, "edited_at" | "reactions">),
         edited_at: null,
         reactions: [],
       },
+      firstFromSender: first_from_sender,
     };
   }
 
@@ -217,7 +259,7 @@ export async function createMessage(
       EXISTS (
         SELECT 1 FROM chat_members WHERE chat_id = $1 AND user_id = $2
       ) AS member,
-      ${SENDER_BLOCKED} AS blocked
+      ${BLOCKED_IN_CHAT} AS blocked
     `,
     [chatId, senderId],
   );
@@ -231,7 +273,7 @@ export async function createMessage(
 
 // Whether the user and the other member of the chat blocked each other.
 export async function isBlockedInChat(chatId: string, userId: string) {
-  const result = await db.query(`SELECT ${SENDER_BLOCKED} AS blocked`, [
+  const result = await db.query(`SELECT ${BLOCKED_IN_CHAT} AS blocked`, [
     chatId,
     userId,
   ]);
@@ -239,8 +281,16 @@ export async function isBlockedInChat(chatId: string, userId: string) {
   return result.rows[0].blocked as boolean;
 }
 
-export const CREATE_MESSAGE_ERRORS = {
+export const CREATE_MESSAGE_ERRORS: Record<CreateMessageError, string> = {
   not_member: "You are not a member of this chat",
   reply_not_found: "The message you reply to is not in this chat",
   blocked: "You can't message this user",
-} as const;
+  duplicate_id: "A message with this id already exists",
+};
+
+export const CREATE_MESSAGE_STATUS: Record<CreateMessageError, number> = {
+  not_member: 403,
+  reply_not_found: 400,
+  blocked: 403,
+  duplicate_id: 409,
+};
