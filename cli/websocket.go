@@ -12,6 +12,10 @@ const (
 	wsHandshakeTimeout = 10 * time.Second
 	wsWriteTimeout     = 10 * time.Second
 	wsReadLimit        = 1 << 20
+
+	// The server pings every 30 seconds; without a ping (or any other
+	// message) for this long the connection is dead and is reconnected.
+	wsIdleTimeout = 75 * time.Second
 )
 
 type WSMessage struct {
@@ -67,6 +71,26 @@ func connectWebSocket(token string) (*websocket.Conn, error) {
 		return nil, err
 	}
 
+	// Every ping moves the deadline on; a connection that went away
+	// silently (e.g. the network changed) then fails the next read.
+	conn.SetPingHandler(func(data string) error {
+		if err := conn.SetReadDeadline(time.Now().Add(wsIdleTimeout)); err != nil {
+			return err
+		}
+
+		err := conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(wsWriteTimeout))
+		if err == websocket.ErrCloseSent {
+			return nil
+		}
+
+		return err
+	})
+
+	if err := conn.SetReadDeadline(time.Now().Add(wsIdleTimeout)); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
 	return conn, nil
 }
 
@@ -90,7 +114,7 @@ func waitConnected(conn *websocket.Conn) error {
 		)
 	}
 
-	return conn.SetReadDeadline(time.Time{})
+	return nil
 }
 
 // joinChat subscribes to a chat's messages; the server answers "joined"

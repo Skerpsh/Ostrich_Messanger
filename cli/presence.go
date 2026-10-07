@@ -34,8 +34,10 @@ func formatPresence(p *presence, now time.Time) string {
 		return "online"
 	}
 
+	// Hidden (privacy settings, or they have not written to you yet):
+	// say nothing precise.
 	if p.lastSeen == nil {
-		return "offline"
+		return "last seen recently"
 	}
 
 	seen := p.lastSeen.Local()

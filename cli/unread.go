@@ -83,7 +83,8 @@ func (m *tuiModel) chatMessageArrived(message Message, viewing bool) bool {
 		chat.UnreadCount++
 	}
 
-	// Most recently active first; the cursor stays on the same chat.
+	// Most recently active first, after the pinned chats (pinned ones at
+	// the top of those); the cursor stays on the same chat.
 	selectedID := ""
 
 	if m.selected < len(m.chats) {
@@ -92,7 +93,15 @@ func (m *tuiModel) chatMessageArrived(message Message, viewing bool) bool {
 
 	rest := append([]Chat{}, m.chats[:i]...)
 	rest = append(rest, m.chats[i+1:]...)
-	m.chats = append([]Chat{chat}, rest...)
+	at := 0
+
+	if !chat.Pinned {
+		for at < len(rest) && rest[at].Pinned {
+			at++
+		}
+	}
+
+	m.chats = append(append(append([]Chat{}, rest[:at]...), chat), rest[at:]...)
 
 	for j, c := range m.chats {
 		if c.ID == selectedID {
@@ -138,7 +147,7 @@ func (m tuiModel) chatPreview(chat Chat) string {
 		return hintStyle.Render("@" + sanitize(chat.Username) + " · no messages yet")
 	}
 
-	text := strings.Join(strings.Fields(sanitize(m.textOf(chat, last.Content))), " ")
+	text := strings.Join(strings.Fields(sanitize(m.textOf(chat, last.ID, last.SenderID, last.Content))), " ")
 
 	if runes := []rune(text); len(runes) > previewLength {
 		text = string(runes[:previewLength-1]) + "…"

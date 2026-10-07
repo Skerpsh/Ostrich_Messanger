@@ -32,7 +32,8 @@ func envOr(key, fallback string) string {
 
 const requestTimeout = 15 * time.Second
 
-// Message history (up to 200 messages of 4096 characters) fits easily.
+// Message history (up to 500 messages of 4096 characters, encrypted) fits
+// easily.
 const maxResponseSize = 16 << 20
 
 var httpClient = &http.Client{Timeout: requestTimeout}
@@ -97,6 +98,8 @@ type Chat struct {
 	Pinned      bool `json:"pinned"`
 	Muted       bool `json:"muted"`
 	BlockedByMe bool `json:"blocked_by_me"`
+	// Either has blocked the other: no messages in either direction.
+	Blocked bool `json:"blocked"`
 
 	// Presence of the other user.
 	Online     bool    `json:"online"`
