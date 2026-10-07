@@ -25,7 +25,7 @@ export default function WelcomeScreen() {
         <Text style={[styles.title, { color: colors.text }]}>OSTRICH</Text>
 
         <Text style={[styles.subtitle, { color: colors.textSoft }]}>
-          Anonymous. Fast. Secure.{"\n"}Chat without limits.
+          Private. Fast. End-to-end encrypted.{"\n"}No phone number, no email.
         </Text>
 
         <View style={styles.buttons}>

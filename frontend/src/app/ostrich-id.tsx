@@ -1,6 +1,7 @@
 import { useState } from "react";
 import * as Clipboard from "expo-clipboard";
 import {
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -14,9 +15,12 @@ import { useAuth } from "@/context/auth";
 import { useAppTheme } from "@/context/theme";
 import { radius } from "@/theme/colors";
 
-// Shown once after registration (or the first login of an account created
-// before OstrichIDs): the server keeps only a hash of the ID, so this is
-// the only chance to save it.
+// Shown once after registration: the OstrichID is generated on this device
+// and never sent to the server, so this is the only chance to save it.
+
+// How long a copied OstrichID stays in the clipboard (apps only: browsers
+// ask for permission to read the clipboard).
+const CLIPBOARD_CLEAR_MS = 60_000;
 export default function OstrichIdScreen() {
   const { colors } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -36,6 +40,16 @@ export default function OstrichIdScreen() {
     await Clipboard.setStringAsync(ostrichId);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
+
+    // Other apps can read the clipboard: take the ID out again once it has
+    // had time to be pasted, unless something else was copied since.
+    if (Platform.OS !== "web") {
+      setTimeout(async () => {
+        if ((await Clipboard.getStringAsync()) === ostrichId) {
+          await Clipboard.setStringAsync("");
+        }
+      }, CLIPBOARD_CLEAR_MS);
+    }
   };
 
   return (
