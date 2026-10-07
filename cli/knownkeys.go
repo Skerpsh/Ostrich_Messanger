@@ -67,7 +67,7 @@ func saveKnownKeys(ownID string, keys map[string]string) {
 
 // checkPeerKeys remembers the keys of chats seen for the first time and
 // marks the users whose key differs from the remembered one.
-func (m *tuiModel) checkPeerKeys() {
+func (m *model) checkPeerKeys() {
 	if m.user == nil {
 		return
 	}
@@ -99,7 +99,7 @@ func (m *tuiModel) checkPeerKeys() {
 }
 
 // acceptPeerKey: the user has compared the safety code of the new key.
-func (m *tuiModel) acceptPeerKey(chat Chat) {
+func (m *model) acceptPeerKey(chat Chat) {
 	m.knownKeys[chat.UserID] = chat.PublicKey
 	delete(m.keyChanged, chat.UserID)
 	saveKnownKeys(m.user.User.ID, m.knownKeys)

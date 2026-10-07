@@ -69,3 +69,86 @@ func formatPresence(p *presence, now time.Time) string {
 
 	return "last seen " + seen.Format("02.01.2006") + " at " + clock
 }
+
+// localTime parses a server timestamp into local time.
+func localTime(iso string) (time.Time, bool) {
+	t := parseTime(&iso)
+
+	if t == nil {
+		return time.Time{}, false
+	}
+
+	return t.Local(), true
+}
+
+// formatTime: "14:05", for message bubbles.
+func formatTime(iso string) string {
+	t, ok := localTime(iso)
+
+	if !ok {
+		return ""
+	}
+
+	return t.Format("15:04")
+}
+
+// formatChatDate: "14:05" today, "12.09" this year, "12.09.2025" before.
+func formatChatDate(iso string) string {
+	t, ok := localTime(iso)
+
+	if !ok {
+		return ""
+	}
+
+	now := time.Now()
+
+	switch {
+	case sameDay(t, now):
+		return t.Format("15:04")
+	case t.Year() == now.Year():
+		return t.Format("02.01")
+	}
+
+	return t.Format("02.01.2006")
+}
+
+// formatDate: "12.09.2025".
+func formatDate(iso string) string {
+	t, ok := localTime(iso)
+
+	if !ok {
+		return ""
+	}
+
+	return t.Format("02.01.2006")
+}
+
+// formatDayLabel: day separators in a chat: "Today", "Yesterday",
+// "12 September", "12 September 2025".
+func formatDayLabel(iso string) string {
+	t, ok := localTime(iso)
+
+	if !ok {
+		return ""
+	}
+
+	now := time.Now()
+
+	switch {
+	case sameDay(t, now):
+		return "Today"
+	case sameDay(t, now.AddDate(0, 0, -1)):
+		return "Yesterday"
+	case t.Year() == now.Year():
+		return t.Format("2 January")
+	}
+
+	return t.Format("2 January 2006")
+}
+
+func sameDay(a, b time.Time) bool {
+	ay, am, ad := a.Date()
+	by, bm, bd := b.Date()
+
+	return ay == by && am == bm && ad == bd
+}

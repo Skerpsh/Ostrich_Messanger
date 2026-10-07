@@ -36,6 +36,9 @@ type WSMessage struct {
 	UserID     string  `json:"userId,omitempty"`
 	Online     bool    `json:"online,omitempty"`
 	LastSeenAt *string `json:"lastSeenAt,omitempty"`
+
+	// "profile" events.
+	IsDeveloper bool `json:"isDeveloper,omitempty"`
 }
 
 // connectWebSocket opens the session's websocket connection. While it is

@@ -316,16 +316,21 @@ const (
 
 const unreadableMessage = "[can't decrypt this message]"
 
-// textOf decrypts a message of the chat with the signed-in user's key.
-// Messages that are not encrypted are marked as such.
-func (m tuiModel) textOf(chat Chat, messageID, senderID, content string) string {
+// decrypt decrypts a message of the chat with the signed-in user's key.
+func (m model) decrypt(chat Chat, messageID, senderID, content string) (string, decryptStatus) {
 	var privateKey []byte
 
 	if m.user != nil {
 		privateKey = m.user.PrivateKey
 	}
 
-	text, status := decryptMessage(content, messageID, senderID, privateKey, chat.PublicKey, chat.ID)
+	return decryptMessage(content, messageID, senderID, privateKey, chat.PublicKey, chat.ID)
+}
+
+// textOf is the decrypted text for previews and quotes; text that is not
+// encrypted is marked.
+func (m model) textOf(chat Chat, messageID, senderID, content string) string {
+	text, status := m.decrypt(chat, messageID, senderID, content)
 
 	if status == decryptPlain {
 		return "[not encrypted] " + text

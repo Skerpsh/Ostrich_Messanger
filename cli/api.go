@@ -51,6 +51,14 @@ type Account struct {
 
 	// Shows the DEV badge.
 	IsDeveloper bool `json:"is_developer"`
+
+	// nil without a profile picture.
+	AvatarID *string `json:"avatar_id"`
+
+	// Privacy: others see when the user is online; read receipts are
+	// exchanged.
+	ShowPresence bool `json:"show_presence"`
+	ReadReceipts bool `json:"read_receipts"`
 }
 
 type LoginResponse struct {
@@ -108,9 +116,13 @@ type Chat struct {
 	LastMessage *LastMessage `json:"last_message"`
 	// Messages from the other user not read yet.
 	UnreadCount int `json:"unread_count"`
+
+	// Up to when the other user has read the chat (read receipts); nil if
+	// either has them off.
+	PeerLastReadAt *string `json:"peer_last_read_at"`
 }
 
-// LastMessage is the start of a chat's newest message, for previews.
+// LastMessage is a chat's newest message (encrypted), for previews.
 type LastMessage struct {
 	ID        string `json:"id"`
 	SenderID  string `json:"sender_id"`
@@ -266,18 +278,33 @@ func authRequest(endpoint string, credentials map[string]any) (*LoginResponse, e
 // authorizedPost sends v as JSON in an authenticated POST request and
 // decodes the response into out.
 func authorizedPost(token, path string, v any, out any) error {
-	body, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Errorf("failed to encode request: %w", err)
+	return authorizedJSON(token, http.MethodPost, path, v, out)
+}
+
+// authorizedJSON sends v (if not nil) as JSON in an authenticated request
+// and decodes the response into out.
+func authorizedJSON(token, method, path string, v any, out any) error {
+	var body io.Reader
+
+	if v != nil {
+		data, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Errorf("failed to encode request: %w", err)
+		}
+
+		body = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, serverURL+path, bytes.NewReader(body))
+	req, err := http.NewRequest(method, serverURL+path, body)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
+
+	if v != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	return doJSON(req, out)
 }
@@ -384,6 +411,7 @@ type createChatResponse struct {
 		PublicKey   string  `json:"public_key"`
 		Online      bool    `json:"online"`
 		LastSeenAt  *string `json:"last_seen_at"`
+		Blocked     bool    `json:"blocked"`
 	} `json:"user"`
 }
 
@@ -407,6 +435,8 @@ func createChat(token, username string) (Chat, error) {
 		Username:    result.User.Username,
 		IsDeveloper: result.User.IsDeveloper,
 		PublicKey:   result.User.PublicKey,
+		Blocked:     result.User.Blocked,
+		Updated:     result.Chat.Created,
 
 		Online:     result.User.Online,
 		LastSeenAt: result.User.LastSeenAt,
