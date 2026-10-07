@@ -4,6 +4,10 @@
 import { getItem, setItem } from "./storage";
 
 const PREF_KEY = "ostrich-notifications";
+// Whether notifications show the message text. Off by default: the text
+// would otherwise be readable in the system's notification list and on a
+// locked screen.
+const PREVIEW_KEY = "ostrich-notification-previews";
 
 type WithToken = <T>(fn: (token: string) => Promise<T>) => Promise<T>;
 
@@ -35,6 +39,18 @@ export async function disableNotifications(_withToken: WithToken) {
   await setItem(PREF_KEY, "off");
 }
 
+export function notificationPreviewsSupported() {
+  return notificationsSupported();
+}
+
+export async function notificationPreviewsEnabled() {
+  return (await getItem(PREVIEW_KEY)) === "on";
+}
+
+export async function setNotificationPreviews(enabled: boolean) {
+  await setItem(PREVIEW_KEY, enabled ? "on" : "off");
+}
+
 // Shown by the chats list for an incoming message; clicking it brings the
 // tab forward and opens the chat.
 export async function showMessageNotification(
@@ -48,7 +64,7 @@ export async function showMessageNotification(
   }
 
   const notification = new Notification(title, {
-    body,
+    body: (await notificationPreviewsEnabled()) ? body : "New message",
     // One per chat: a newer message replaces the older notification.
     tag: chatId,
     icon: "/favicon.ico",

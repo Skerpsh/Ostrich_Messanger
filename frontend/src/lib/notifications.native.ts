@@ -93,6 +93,17 @@ export async function syncPushToken(withToken: WithToken) {
   }
 }
 
+// Push notifications never contain the text (the server cannot read it).
+export function notificationPreviewsSupported() {
+  return false;
+}
+
+export async function notificationPreviewsEnabled() {
+  return false;
+}
+
+export async function setNotificationPreviews(_enabled: boolean) {}
+
 // The app shows new messages itself, so nothing to show here.
 export async function showMessageNotification(
   _title: string,
