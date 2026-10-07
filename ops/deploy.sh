@@ -11,6 +11,11 @@
 # Paths and names can be changed with the variables below.
 set -euo pipefail
 
+# Everything runs inside main(), which bash reads completely before running
+# it: `git pull` below may replace this file, and bash would otherwise go on
+# reading the new version from the old position.
+main() {
+
 REPO="${REPO:-/opt/ostrich}"
 SERVICE="${SERVICE:-ostrich}"
 WEB_ROOT="${WEB_ROOT:-/var/www/ostrich-web}"
@@ -89,3 +94,7 @@ if [ "$web" = 1 ]; then
 fi
 
 step "Done"
+
+}
+
+main "$@"

@@ -26,6 +26,35 @@ The script stops at the first error. Before the migration it backs up the
 database; after restarting the backend it checks `/api/health` and prints the
 service log if the backend does not come up.
 
+## Database migrations
+
+`ops/deploy.sh` runs `npm run db:migrate:prod`, which applies the files in
+`backend/migrations/` (`001_*.sql`, `002_*.sql`, ...) that the database has
+not had yet, each in a transaction, and records them in `schema_migrations`.
+The first run on an existing database applies `001_baseline.sql`, which
+matches the old `schema.sql` and changes nothing that is already there.
+
+A schema change is a new file with the next number; files already applied
+are never edited.
+
+## Web server headers
+
+The web app sets its Content-Security-Policy itself, but a page cannot
+forbid other sites to show it in a frame; the web server has to. In the
+Caddyfile, inside the block of the web app's site:
+
+```
+header {
+	Content-Security-Policy "frame-ancestors 'none'"
+	X-Frame-Options "DENY"
+	X-Content-Type-Options "nosniff"
+	Referrer-Policy "no-referrer"
+	Strict-Transport-Security "max-age=31536000"
+}
+```
+
+Then `systemctl reload caddy`.
+
 ## Backups
 
 `ops/backup.sh` writes a compressed `pg_dump` to `/var/backups/ostrich` and

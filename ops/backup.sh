@@ -22,10 +22,27 @@ if [ ! -r "$ENV_FILE" ]; then
   exit 1
 fi
 
-set -a
-# shellcheck disable=SC1090
-. "$ENV_FILE"
-set +a
+# Reads KEY=VALUE lines without running the file as a script (a password
+# with $, quotes or spaces must not break it or run anything). Matching
+# quotes around a value are removed, like dotenv does.
+env_value() {
+  local line value
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$ENV_FILE" | tail -n 1 || true)"
+  value="${line#*=}"
+  value="${value%$'\r'}"
+
+  if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then
+    value="${BASH_REMATCH[1]}"
+  fi
+
+  printf '%s' "$value"
+}
+
+DB_HOST="$(env_value DB_HOST)"
+DB_PORT="$(env_value DB_PORT)"
+DB_NAME="$(env_value DB_NAME)"
+DB_USER="$(env_value DB_USER)"
+DB_PASSWORD="$(env_value DB_PASSWORD)"
 
 export PGHOST="${DB_HOST:-localhost}"
 export PGPORT="${DB_PORT:-5432}"
