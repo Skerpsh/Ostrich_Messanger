@@ -91,6 +91,7 @@ function RootNavigator() {
           <Stack.Screen name="chats/index" />
           <Stack.Screen name="chats/[chatId]" />
           <Stack.Screen name="chats/new" options={{ presentation: "modal" }} />
+          <Stack.Screen name="settings" options={{ presentation: "modal" }} />
         </Stack.Protected>
       </Stack>
     </ThemeProvider>

@@ -3,12 +3,20 @@ import { db, withTransaction } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
 import { isOnline } from "../realtime.js";
 
+const createChatRateLimit = {
+  rateLimit: {
+    max: 30,
+    timeWindow: "1 minute",
+  },
+};
+
 export default async function chatsRoutes(server: FastifyInstance) {
   // CREATE (or return the existing) direct chat with a user
   server.post<{ Body: { login_id: string } }>(
     "/api/chats",
     {
       preHandler: authenticate,
+      config: createChatRateLimit,
       schema: {
         body: {
           type: "object",

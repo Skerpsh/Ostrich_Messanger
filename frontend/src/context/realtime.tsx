@@ -9,7 +9,13 @@ import {
 } from "react";
 import { AppState, Platform } from "react-native";
 import { useAuth } from "@/context/auth";
-import { getChats, getMe, SessionExpiredError, type Message } from "@/lib/api";
+import {
+  getChats,
+  getMe,
+  getWsTicket,
+  SessionExpiredError,
+  type Message,
+} from "@/lib/api";
 import {
   RealtimeConnection,
   type ConnectionStatus,
@@ -99,6 +105,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       // Errors only concern single requests (e.g. joining a chat that
       // does not exist); screens show their own REST errors.
       onError: () => {},
+      getTicket: () => withToken(getWsTicket),
       shouldReconnect: async () => {
         try {
           await withToken(getMe);

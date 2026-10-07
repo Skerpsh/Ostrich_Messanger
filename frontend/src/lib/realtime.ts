@@ -19,6 +19,9 @@ type Handlers = {
   onMessage: (message: Message) => void;
   onPresence: (event: PresenceEvent) => void;
   onError: (error: string) => void;
+  // Web only: a single-use ticket for the websocket URL, so the session
+  // token never appears in URLs.
+  getTicket: () => Promise<string>;
   // Called after a disconnect; return false to stop reconnecting
   // (e.g. the session has expired).
   shouldReconnect: () => Promise<boolean>;
@@ -29,6 +32,8 @@ type Handlers = {
 // joined chats are re-joined automatically after a reconnect.
 export class RealtimeConnection {
   private socket: WebSocket | null = null;
+  // Web: the connection attempt waiting for its ticket.
+  private opening: object | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   // The server has accepted the connection ("connected" received).
@@ -59,6 +64,7 @@ export class RealtimeConnection {
 
     const socket = this.socket;
     this.socket = null;
+    this.opening = null;
     this.ready = false;
     socket?.close();
     this.handlers.onStatus("offline");
@@ -80,16 +86,37 @@ export class RealtimeConnection {
     }
   }
 
-  private open() {
+  private async open() {
     this.handlers.onStatus("connecting");
 
     let socket: WebSocket;
 
     if (Platform.OS === "web") {
       // Browsers cannot set headers on websockets.
-      socket = new WebSocket(
-        `${WS_URL}?token=${encodeURIComponent(this.token)}`,
-      );
+      const attempt = {};
+      this.opening = attempt;
+
+      let ticket: string;
+
+      try {
+        ticket = await this.handlers.getTicket();
+      } catch {
+        if (this.opening === attempt) {
+          this.opening = null;
+          this.handlers.onStatus("offline");
+          this.scheduleReconnect();
+        }
+        return;
+      }
+
+      // Stopped (or restarted) while waiting for the ticket.
+      if (this.opening !== attempt) {
+        return;
+      }
+
+      this.opening = null;
+
+      socket = new WebSocket(`${WS_URL}?ticket=${encodeURIComponent(ticket)}`);
     } else {
       // React Native accepts headers as a third argument.
       const NativeWebSocket = WebSocket as unknown as new (
@@ -182,14 +209,14 @@ export class RealtimeConnection {
       return;
     }
 
-    if (!this.running || this.socket || this.reconnectTimer) {
+    if (!this.running || this.socket || this.opening || this.reconnectTimer) {
       return;
     }
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
 
-      if (this.running && !this.socket) {
+      if (this.running && !this.socket && !this.opening) {
         this.open();
       }
     }, RECONNECT_DELAY_MS);

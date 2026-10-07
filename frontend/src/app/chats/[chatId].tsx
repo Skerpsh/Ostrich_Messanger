@@ -20,6 +20,7 @@ import { usePresence, useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
 import { getChats, getMessages, sendMessage, type Message } from "@/lib/api";
 import { formatLoginId, formatPresence, formatTime } from "@/lib/format";
+import { knownPeer, rememberPeer } from "@/lib/peers";
 import { useMinuteTick } from "@/lib/use-minute-tick";
 import { radius } from "@/theme/colors";
 
@@ -49,23 +50,11 @@ export default function ChatScreen() {
   const { status, subscribeChat, seedPresence } = useRealtime();
   useMinuteTick();
 
-  const params = useLocalSearchParams<{
-    chatId: string;
-    userId?: string;
-    username?: string;
-    loginId?: string;
-  }>();
-  const chatId = params.chatId;
+  const { chatId } = useLocalSearchParams<{ chatId: string }>();
 
-  const [peer, setPeer] = useState(
-    params.username && params.userId
-      ? {
-          userId: params.userId,
-          username: params.username,
-          loginId: params.loginId ?? "",
-        }
-      : null,
-  );
+  // Known from the chats list when opened in the app; the server's answer
+  // below is authoritative either way.
+  const [peer, setPeer] = useState(() => knownPeer(chatId));
   const peerPresence = usePresence(peer?.userId);
   const [messages, setMessages] = useState<Message[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -77,22 +66,22 @@ export default function ChatScreen() {
   const goBack = () =>
     router.canGoBack() ? router.back() : router.replace("/chats");
 
-  // Opened by URL (e.g. a page reload on web): look the chat up.
+  // Look up who the chat is with. Never taken from the URL: anyone can
+  // craft a link with a misleading name.
   useEffect(() => {
-    if (peer) {
-      return;
-    }
-
     withToken(getChats)
       .then((chats) => {
         const chat = chats.find((c) => c.id === chatId);
 
         if (chat) {
-          setPeer({
+          const verified = {
             userId: chat.user_id,
             username: chat.username,
             loginId: chat.login_id,
-          });
+          };
+
+          rememberPeer(chat.id, verified);
+          setPeer(verified);
           seedPresence([
             {
               userId: chat.user_id,
@@ -100,11 +89,12 @@ export default function ChatScreen() {
             },
           ]);
         } else {
+          setPeer(null);
           setError("Chat not found");
         }
       })
       .catch((e) => setError(e.message));
-  }, [chatId, peer, withToken, seedPresence]);
+  }, [chatId, withToken, seedPresence]);
 
   const loadHistory = useCallback(async () => {
     try {

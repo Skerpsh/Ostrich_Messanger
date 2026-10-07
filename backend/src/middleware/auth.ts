@@ -25,25 +25,46 @@ export function getBearerToken(request: FastifyRequest): string | null {
   return token;
 }
 
-export async function findUserByToken(
-  token: string,
-): Promise<AuthUser | null> {
+export type Session = {
+  user: AuthUser;
+  tokenHash: string;
+  expiresAt: Date;
+};
+
+export async function findSessionByHash(
+  tokenHash: string,
+): Promise<Session | null> {
   const result = await db.query(
     `
     SELECT
       users.id,
       users.login_id,
       users.username,
-      users.created_at
+      users.created_at,
+      sessions.expires_at
     FROM sessions
     JOIN users ON users.id = sessions.user_id
     WHERE sessions.token_hash = $1
       AND sessions.expires_at > NOW()
     `,
-    [hashToken(token)],
+    [tokenHash],
   );
 
-  return result.rows[0] ?? null;
+  const row = result.rows[0];
+
+  if (!row) {
+    return null;
+  }
+
+  const { expires_at, ...user } = row;
+
+  return { user, tokenHash, expiresAt: expires_at };
+}
+
+export async function findUserByToken(
+  token: string,
+): Promise<AuthUser | null> {
+  return (await findSessionByHash(hashToken(token)))?.user ?? null;
 }
 
 export async function authenticate(

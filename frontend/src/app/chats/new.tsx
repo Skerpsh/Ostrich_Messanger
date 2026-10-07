@@ -15,6 +15,7 @@ import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
 import { createChat } from "@/lib/api";
 import { formatLoginId } from "@/lib/format";
+import { rememberPeer } from "@/lib/peers";
 import { radius } from "@/theme/colors";
 
 export default function NewChatScreen() {
@@ -58,14 +59,14 @@ export default function NewChatScreen() {
         },
       ]);
 
+      rememberPeer(chat.id, {
+        userId: chat.user_id,
+        username: chat.username,
+        loginId: chat.login_id,
+      });
       router.replace({
         pathname: "/chats/[chatId]",
-        params: {
-          chatId: chat.id,
-          userId: chat.user_id,
-          username: chat.username,
-          loginId: chat.login_id,
-        },
+        params: { chatId: chat.id },
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create chat");

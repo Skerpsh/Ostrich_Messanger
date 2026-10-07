@@ -90,6 +90,7 @@ const (
 	stageLogin tuiStage = iota
 	stageChats
 	stageChat
+	stageSettings
 )
 
 type authMode int
@@ -122,6 +123,9 @@ type tuiModel struct {
 	loading bool
 	err     error
 
+	// Success message, e.g. "Password changed".
+	notice string
+
 	user *LoginResponse
 
 	chats    []Chat
@@ -149,6 +153,11 @@ type tuiModel struct {
 
 	// Presence of other users by user ID.
 	presence map[string]presence
+
+	// Settings screen.
+	settingsInputs   [settingsFields]textinput.Model
+	settingsFocus    int
+	confirmLogoutAll bool
 }
 
 var (
@@ -237,12 +246,14 @@ func newLoginModel() tuiModel {
 		messageInput:    messageInput,
 		loginIDInput:    loginIDInput,
 		presence:        map[string]presence{},
+		settingsInputs:  newSettingsInputs(),
 	}
 }
 
 // sanitize removes terminal control characters (escape sequences, bidi
-// overrides) from server-provided text so that other users cannot mess
-// with the terminal. Newlines are kept, tabs become spaces.
+// controls) from server-provided text, including error messages, so that
+// other users or a malicious server cannot mess with the terminal.
+// Newlines are kept, tabs become spaces.
 func sanitize(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch {
@@ -251,8 +262,9 @@ func sanitize(s string) string {
 		case r == '\t':
 			return ' '
 		case unicode.IsControl(r),
-			r >= '‪' && r <= '‮',
-			r >= '⁦' && r <= '⁩':
+			r >= '\u202a' && r <= '\u202e',
+			r >= '\u2066' && r <= '\u2069',
+			r == '\u200e', r == '\u200f', r == '\u061c':
 			return -1
 		}
 
@@ -363,10 +375,18 @@ func (m tuiModel) quit() (tea.Model, tea.Cmd) {
 
 // sessionExpired returns to the login screen.
 func (m tuiModel) sessionExpired() (tea.Model, tea.Cmd) {
+	return m.signedOut(errSessionExpired, "")
+}
+
+// signedOut drops the session and returns to the login screen, showing
+// err or notice there.
+func (m tuiModel) signedOut(err error, notice string) (tea.Model, tea.Cmd) {
 	m.closeConnection()
 
 	m.messageInput.Blur()
 	m.loginIDInput.Blur()
+	m.settingsInputs = newSettingsInputs()
+	m.confirmLogoutAll = false
 	m.creatingChat = false
 	m.pendingChatID = ""
 	m.loading = false
@@ -380,7 +400,8 @@ func (m tuiModel) sessionExpired() (tea.Model, tea.Cmd) {
 	m.confirmPassword.SetValue("")
 	m.focus = 0
 	m.moveFocus(0)
-	m.err = errSessionExpired
+	m.err = err
+	m.notice = notice
 
 	return m, nil
 }
@@ -585,6 +606,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 
+	case passwordChangedMsg, passwordChangeErrorMsg,
+		loggedOutAllMsg, logoutAllErrorMsg:
+		return m.updateSettingsResult(msg)
+
 	case wsConnectedMsg:
 		if msg.gen != m.connGen || m.user == nil || m.conn != nil {
 			msg.conn.Close()
@@ -690,6 +715,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case stageChat:
 			return m.updateChat(msg)
+
+		case stageSettings:
+			return m.updateSettings(msg)
 		}
 	}
 
@@ -815,6 +843,7 @@ func (m tuiModel) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		m.user = nil
 		m.err = nil
+		m.notice = ""
 
 		return m, func() tea.Msg {
 			result, err := auth(username, password)
@@ -869,6 +898,9 @@ func (m tuiModel) updateChats(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.err = nil
 
 		return m, loadChatsCmd(m.user.Token)
+
+	case "s":
+		return m.openSettings()
 
 	case "up", "k":
 		if m.selected > 0 {
@@ -1014,6 +1046,9 @@ func (m tuiModel) View() string {
 
 	case stageChat:
 		return m.chatView()
+
+	case stageSettings:
+		return m.settingsView()
 	}
 
 	return ""
@@ -1141,12 +1176,18 @@ func (m tuiModel) loginView() string {
 		b.WriteString("\n")
 	}
 
+	if m.notice != "" {
+		b.WriteString("\n")
+		b.WriteString(successStyle.Render("✓ " + m.notice))
+		b.WriteString("\n")
+	}
+
 	if m.err != nil {
 		b.WriteString("\n")
 
 		b.WriteString(
 			errorStyle.Render(
-				"Error: " + m.err.Error(),
+				"Error: " + sanitize(m.err.Error()),
 			),
 		)
 
@@ -1252,6 +1293,7 @@ func (m tuiModel) chatsView() string {
 		"Enter   Open chat\n" +
 		"n       New chat\n" +
 		"r       Refresh\n" +
+		"s       Settings\n" +
 		"q       Quit"
 
 	if m.creatingChat {
@@ -1279,7 +1321,7 @@ func (m tuiModel) chatsView() string {
 	b.WriteString(content)
 	b.WriteString("\n\n")
 
-	hint := "↑↓ / j k Navigate   Enter Open   n New chat   r Refresh   q / Ctrl+C Quit"
+	hint := "↑↓ / j k Navigate   Enter Open   n New chat   r Refresh   s Settings   q / Ctrl+C Quit"
 
 	if m.creatingChat {
 		hint = "Enter Create   Esc Cancel   Ctrl+C Quit"
@@ -1292,7 +1334,7 @@ func (m tuiModel) chatsView() string {
 	if m.err != nil {
 		b.WriteString(
 			errorStyle.Render(
-				"Error: " + m.err.Error(),
+				"Error: " + sanitize(m.err.Error()),
 			),
 		)
 
@@ -1349,7 +1391,7 @@ func (m tuiModel) chatFooter(boxWidth int) string {
 	if m.err != nil {
 		footer += "\n" + errorStyle.
 			Width(boxWidth+2).
-			Render("Error: "+m.err.Error())
+			Render("Error: "+sanitize(m.err.Error()))
 	}
 
 	return footer

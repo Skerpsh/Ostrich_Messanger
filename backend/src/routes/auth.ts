@@ -1,8 +1,18 @@
 import { FastifyInstance } from "fastify";
 import argon2 from "argon2";
 import crypto from "node:crypto";
-import { db, isPgError, PG_UNIQUE_VIOLATION } from "../database.js";
+import {
+  db,
+  isPgError,
+  PG_UNIQUE_VIOLATION,
+  withTransaction,
+} from "../database.js";
 import { authenticate, hashToken } from "../middleware/auth.js";
+import {
+  closeSessionSockets,
+  closeUserSockets,
+  createTicket,
+} from "../realtime.js";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -28,6 +38,17 @@ const credentialsSchema = {
   },
 } as const;
 
+const changePasswordSchema = {
+  body: {
+    type: "object",
+    required: ["current_password", "new_password"],
+    properties: {
+      current_password: { type: "string", maxLength: 128 },
+      new_password: credentialsSchema.body.properties.password,
+    },
+  },
+} as const;
+
 type Credentials = {
   username: string;
   password: string;
@@ -40,6 +61,59 @@ const authRateLimit = {
     timeWindow: "1 minute",
   },
 };
+
+// Rate limit for websocket tickets (one per connection attempt).
+const ticketRateLimit = {
+  rateLimit: {
+    max: 30,
+    timeWindow: "1 minute",
+  },
+};
+
+// Per-account brute-force protection (the rate limit above is per IP):
+// after MAX_FAILED_LOGINS wrong passwords the account's login is blocked
+// until the window ends.
+const MAX_FAILED_LOGINS = 10;
+const FAILED_LOGIN_WINDOW_MS = 15 * 60 * 1000;
+
+const failedLogins = new Map<string, { count: number; resetAt: number }>();
+
+function loginBlocked(username: string): boolean {
+  const entry = failedLogins.get(username.toLowerCase());
+
+  if (!entry) {
+    return false;
+  }
+
+  if (entry.resetAt <= Date.now()) {
+    failedLogins.delete(username.toLowerCase());
+    return false;
+  }
+
+  return entry.count >= MAX_FAILED_LOGINS;
+}
+
+function recordFailedLogin(username: string) {
+  const key = username.toLowerCase();
+  const now = Date.now();
+  const entry = failedLogins.get(key);
+
+  if (entry && entry.resetAt > now) {
+    entry.count++;
+    return;
+  }
+
+  // Drop stale entries so the map cannot grow without bound.
+  if (failedLogins.size >= 10_000) {
+    for (const [name, other] of failedLogins) {
+      if (other.resetAt <= now) {
+        failedLogins.delete(name);
+      }
+    }
+  }
+
+  failedLogins.set(key, { count: 1, resetAt: now + FAILED_LOGIN_WINDOW_MS });
+}
 
 // Used to spend the same time on unknown usernames as on wrong passwords,
 // so login timing does not reveal which usernames exist.
@@ -111,6 +185,12 @@ export default async function authRoutes(server: FastifyInstance) {
     async (request, reply) => {
       const { username, password } = request.body;
 
+      if (loginBlocked(username)) {
+        return reply.status(429).send({
+          error: "Too many failed login attempts, try again later",
+        });
+      }
+
       const result = await db.query(
         `
         SELECT id, login_id, username, password_hash
@@ -128,10 +208,14 @@ export default async function authRoutes(server: FastifyInstance) {
       );
 
       if (!user || !passwordValid) {
+        recordFailedLogin(username);
+
         return reply.status(401).send({
           error: "Invalid username or password",
         });
       }
+
+      failedLogins.delete(username.toLowerCase());
 
       const token = await createSession(user.id);
 
@@ -167,16 +251,120 @@ export default async function authRoutes(server: FastifyInstance) {
       preHandler: authenticate,
     },
     async (request) => {
+      const tokenHash = hashToken(request.token);
+
       await db.query(
         `
         DELETE FROM sessions
         WHERE token_hash = $1
         `,
-        [hashToken(request.token)],
+        [tokenHash],
       );
+
+      closeSessionSockets(tokenHash);
 
       return {
         message: "Logout successful",
+      };
+    },
+  );
+
+  // LOGOUT ALL (every session of the user, including this one)
+  server.post(
+    "/api/auth/logout-all",
+    {
+      preHandler: authenticate,
+    },
+    async (request) => {
+      await db.query(
+        `
+        DELETE FROM sessions
+        WHERE user_id = $1
+        `,
+        [request.user.id],
+      );
+
+      closeUserSockets(request.user.id);
+
+      return {
+        message: "Logged out of all sessions",
+      };
+    },
+  );
+
+  // CHANGE PASSWORD (ends all other sessions)
+  server.post<{ Body: { current_password: string; new_password: string } }>(
+    "/api/auth/password",
+    {
+      preHandler: authenticate,
+      schema: changePasswordSchema,
+      config: authRateLimit,
+    },
+    async (request, reply) => {
+      const { current_password, new_password } = request.body;
+
+      const result = await db.query(
+        `
+        SELECT password_hash
+        FROM users
+        WHERE id = $1
+        `,
+        [request.user.id],
+      );
+
+      const passwordValid = await argon2.verify(
+        result.rows[0].password_hash,
+        current_password,
+      );
+
+      if (!passwordValid) {
+        return reply.status(403).send({
+          error: "Current password is incorrect",
+        });
+      }
+
+      const tokenHash = hashToken(request.token);
+      const passwordHash = await argon2.hash(new_password);
+
+      await withTransaction(async (client) => {
+        await client.query(
+          `
+          UPDATE users
+          SET password_hash = $2, updated_at = NOW()
+          WHERE id = $1
+          `,
+          [request.user.id, passwordHash],
+        );
+
+        await client.query(
+          `
+          DELETE FROM sessions
+          WHERE user_id = $1
+            AND token_hash <> $2
+          `,
+          [request.user.id, tokenHash],
+        );
+      });
+
+      closeUserSockets(request.user.id, tokenHash);
+
+      return {
+        message: "Password changed",
+      };
+    },
+  );
+
+  // WEBSOCKET TICKET: single-use, short-lived credential for /ws?ticket=,
+  // so browsers do not have to put the session token in the URL.
+  server.post(
+    "/api/auth/ws-ticket",
+    {
+      preHandler: authenticate,
+      config: ticketRateLimit,
+    },
+    async (request) => {
+      return {
+        ticket: createTicket(hashToken(request.token)),
       };
     },
   );

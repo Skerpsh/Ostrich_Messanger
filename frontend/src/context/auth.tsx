@@ -24,6 +24,8 @@ type AuthContextValue = {
   signIn: (username: string, password: string) => Promise<void>;
   signUp: (username: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  // Ends all sessions of the user (every device), then signs out here.
+  signOutEverywhere: () => Promise<void>;
   // Runs an authorized request; logs out if the session has expired.
   withToken: <T>(fn: (token: string) => Promise<T>) => Promise<T>;
 };
@@ -95,6 +97,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await clearSession();
   };
 
+  const signOutEverywhere = async () => {
+    if (state.status === "signedIn") {
+      // Unlike signOut, this must reach the server: other devices stay
+      // signed in otherwise.
+      await api.logoutAll(state.token);
+    }
+
+    await clearSession();
+  };
+
   const token = state.status === "signedIn" ? state.token : null;
 
   const withToken = useCallback(
@@ -118,7 +130,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   return (
-    <AuthContext value={{ state, notice, signIn, signUp, signOut, withToken }}>
+    <AuthContext
+      value={{
+        state,
+        notice,
+        signIn,
+        signUp,
+        signOut,
+        signOutEverywhere,
+        withToken,
+      }}
+    >
       {children}
     </AuthContext>
   );

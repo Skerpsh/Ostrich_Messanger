@@ -12,6 +12,14 @@ const chatParamsSchema = {
   },
 } as const;
 
+// Per IP; websocket messages are limited separately.
+const sendRateLimit = {
+  rateLimit: {
+    max: 60,
+    timeWindow: "1 minute",
+  },
+};
+
 type ChatParams = {
   chatId: string;
 };
@@ -22,6 +30,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
     "/api/chats/:chatId/messages",
     {
       preHandler: authenticate,
+      config: sendRateLimit,
       schema: {
         params: chatParamsSchema,
         body: {

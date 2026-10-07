@@ -119,6 +119,34 @@ export function logout(token: string) {
   return request<unknown>("POST", "/api/auth/logout", { token });
 }
 
+// Ends every session of the user, including this one.
+export function logoutAll(token: string) {
+  return request<unknown>("POST", "/api/auth/logout-all", { token });
+}
+
+// Changes the password and ends all other sessions.
+export function changePassword(
+  token: string,
+  currentPassword: string,
+  newPassword: string,
+) {
+  return request<unknown>("POST", "/api/auth/password", {
+    token,
+    body: { current_password: currentPassword, new_password: newPassword },
+  });
+}
+
+// Single-use credential for opening the websocket from a browser.
+export async function getWsTicket(token: string) {
+  const { ticket } = await request<{ ticket: string }>(
+    "POST",
+    "/api/auth/ws-ticket",
+    { token },
+  );
+
+  return ticket;
+}
+
 export async function getMe(token: string) {
   const { user } = await request<{ user: User }>("GET", "/api/auth/me", {
     token,

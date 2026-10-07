@@ -32,6 +32,9 @@ func envOr(key, fallback string) string {
 
 const requestTimeout = 15 * time.Second
 
+// Message history (up to 200 messages of 4096 characters) fits easily.
+const maxResponseSize = 16 << 20
+
 var httpClient = &http.Client{Timeout: requestTimeout}
 
 // errSessionExpired is returned when the server rejects the auth token.
@@ -108,6 +111,19 @@ func logout(token string) error {
 	return doJSON(req, nil)
 }
 
+// logoutAll ends every session of the user, including this one.
+func logoutAll(token string) error {
+	return authorizedPost(token, "/api/auth/logout-all", struct{}{}, nil)
+}
+
+// changePassword changes the password and ends all other sessions.
+func changePassword(token, currentPassword, newPassword string) error {
+	return authorizedPost(token, "/api/auth/password", map[string]string{
+		"current_password": currentPassword,
+		"new_password":     newPassword,
+	}, nil)
+}
+
 // authRequest posts credentials to an auth endpoint and decodes the
 // response into out (if out is not nil).
 func authRequest(
@@ -180,9 +196,14 @@ func doJSON(req *http.Request, out any) error {
 
 	defer resp.Body.Close()
 
-	responseBody, err := io.ReadAll(resp.Body)
+	// Bound the response size so a misbehaving server cannot exhaust memory.
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 	if err != nil {
 		return fmt.Errorf("failed to read server response: %w", err)
+	}
+
+	if len(responseBody) > maxResponseSize {
+		return fmt.Errorf("server response is too large")
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized &&

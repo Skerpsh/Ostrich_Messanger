@@ -1,4 +1,4 @@
-import Fastify, { FastifyError } from "fastify";
+import Fastify, { FastifyError, FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
 import rateLimit from "@fastify/rate-limit";
 import cors from "@fastify/cors";
@@ -16,7 +16,16 @@ const HOST = process.env.HOST || "0.0.0.0";
 
 // Which proxies may set X-Forwarded-For (used for rate limiting). By default
 // only a reverse proxy on the same machine, e.g. nginx on the VPS.
-const TRUST_PROXY = process.env.TRUST_PROXY || "loopback";
+// Also accepts "true"/"false".
+const TRUST_PROXY = parseTrustProxy(process.env.TRUST_PROXY || "loopback");
+
+function parseTrustProxy(value: string): boolean | string {
+  if (value === "true" || value === "false") {
+    return value === "true";
+  }
+
+  return value;
+}
 
 // Origins allowed to call the API from a browser (Ostrich Web), comma
 // separated. Any origin by default: auth uses bearer tokens, not cookies,
@@ -29,11 +38,14 @@ const server = Fastify({
   trustProxy: TRUST_PROXY,
   logger: {
     serializers: {
-      // Never write websocket tokens (?token=...) to the logs.
+      // Never write credentials from URLs (?token=, ?ticket=) to the logs.
       req(request) {
         return {
           method: request.method,
-          url: request.url.replace(/([?&]token=)[^&]*/g, "$1[redacted]"),
+          url: request.url.replace(
+            /([?&](?:token|ticket)=)[^&]*/g,
+            "$1[redacted]",
+          ),
           remoteAddress: request.ip,
         };
       },
@@ -67,15 +79,28 @@ server.setErrorHandler((error: FastifyError, request, reply) => {
   });
 });
 
-server.get("/api/health", async () => {
-  const result = await db.query("SELECT NOW()");
+// Registered after the rate limit plugin, so its limit applies.
+async function healthRoutes(instance: FastifyInstance) {
+  instance.get(
+    "/api/health",
+    {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: "1 minute",
+        },
+      },
+    },
+    async () => {
+      await db.query("SELECT 1");
 
-  return {
-    status: "ok",
-    database: "connected",
-    time: result.rows[0].now,
-  };
-});
+      return {
+        status: "ok",
+        database: "connected",
+      };
+    },
+  );
+}
 
 async function deleteExpiredSessions() {
   try {
@@ -87,6 +112,12 @@ async function deleteExpiredSessions() {
 
 const start = async () => {
   try {
+    if (!CORS_ORIGINS && process.env.NODE_ENV === "production") {
+      server.log.warn(
+        "CORS_ORIGINS is not set: the API accepts browser requests from any origin",
+      );
+    }
+
     await server.register(cors, {
       origin: CORS_ORIGINS ?? true,
     });
@@ -102,6 +133,7 @@ const start = async () => {
       },
     });
 
+    await server.register(healthRoutes);
     await server.register(websocketRoutes);
     await server.register(authRoutes);
     await server.register(usersRoutes);

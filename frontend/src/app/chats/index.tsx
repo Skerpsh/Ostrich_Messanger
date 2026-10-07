@@ -20,6 +20,7 @@ import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
 import { getChats, type Chat } from "@/lib/api";
 import { formatChatDate, formatLoginId, formatPresence } from "@/lib/format";
+import { rememberPeer } from "@/lib/peers";
 import { useMinuteTick } from "@/lib/use-minute-tick";
 import { radius } from "@/theme/colors";
 
@@ -78,15 +79,12 @@ export default function ChatsScreen() {
   };
 
   const openChat = (chat: Chat) => {
-    router.push({
-      pathname: "/chats/[chatId]",
-      params: {
-        chatId: chat.id,
-        userId: chat.user_id,
-        username: chat.username,
-        loginId: chat.login_id,
-      },
+    rememberPeer(chat.id, {
+      userId: chat.user_id,
+      username: chat.username,
+      loginId: chat.login_id,
     });
+    router.push({ pathname: "/chats/[chatId]", params: { chatId: chat.id } });
   };
 
   if (!user) {
@@ -98,11 +96,22 @@ export default function ChatsScreen() {
       <AppHeader
         subtitle={`@${user.username}`}
         right={
-          <Pressable accessibilityRole="button" onPress={signOut} hitSlop={8}>
-            <Text style={[styles.headerLink, { color: colors.text }]}>
-              Log out
-            </Text>
-          </Pressable>
+          <>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => router.push("/settings")}
+              hitSlop={8}
+            >
+              <Text style={[styles.headerLink, { color: colors.text }]}>
+                Settings
+              </Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" onPress={signOut} hitSlop={8}>
+              <Text style={[styles.headerLink, { color: colors.text }]}>
+                Log out
+              </Text>
+            </Pressable>
+          </>
         }
       />
 

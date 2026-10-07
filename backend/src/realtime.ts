@@ -1,5 +1,6 @@
 import type { FastifyBaseLogger } from "fastify";
 import type { WebSocket } from "ws";
+import crypto from "node:crypto";
 import { db } from "./database.js";
 
 // All realtime state is kept in memory, so the backend must run as a
@@ -34,6 +35,119 @@ function send(socket: WebSocket, data: string) {
   if (socket.readyState === socket.OPEN) {
     socket.send(data);
   }
+}
+
+// --- sessions ---
+
+// The session each socket was opened with, so sockets can be closed when
+// their session ends (logout, password change, expiry).
+type SocketSession = {
+  userId: string;
+  tokenHash: string;
+  expiresAt: Date;
+};
+
+const socketSessions = new Map<WebSocket, SocketSession>();
+
+// Close code for "session ended": clients must not reconnect with the
+// same token.
+export const WS_CLOSE_SESSION_ENDED = 4001;
+
+export function trackSession(socket: WebSocket, session: SocketSession) {
+  socketSessions.set(socket, session);
+}
+
+export function untrackSession(socket: WebSocket) {
+  socketSessions.delete(socket);
+}
+
+// Closes the sockets of the sessions matching `predicate`.
+function closeSessions(predicate: (session: SocketSession) => boolean) {
+  for (const [socket, session] of socketSessions) {
+    if (predicate(session)) {
+      socket.close(WS_CLOSE_SESSION_ENDED, "Session ended");
+    }
+  }
+}
+
+export function closeSessionSockets(tokenHash: string) {
+  closeSessions((session) => session.tokenHash === tokenHash);
+}
+
+// Closes all sockets of the user, except those of the session `keepTokenHash`.
+export function closeUserSockets(userId: string, keepTokenHash?: string) {
+  closeSessions(
+    (session) =>
+      session.userId === userId && session.tokenHash !== keepTokenHash,
+  );
+}
+
+// Closes sockets whose session has expired or no longer exists (e.g. it
+// was deleted directly in the database).
+export async function closeEndedSessions() {
+  const now = new Date();
+  closeSessions((session) => session.expiresAt <= now);
+
+  const tokenHashes = [
+    ...new Set([...socketSessions.values()].map((s) => s.tokenHash)),
+  ];
+
+  if (tokenHashes.length === 0) {
+    return;
+  }
+
+  const result = await db.query(
+    `
+    SELECT token_hash
+    FROM sessions
+    WHERE token_hash = ANY($1::text[])
+      AND expires_at > NOW()
+    `,
+    [tokenHashes],
+  );
+
+  const active = new Set(result.rows.map((row) => row.token_hash));
+  closeSessions((session) => !active.has(session.tokenHash));
+}
+
+export function connectionCount(userId: string) {
+  return userSockets.get(userId)?.size ?? 0;
+}
+
+// --- websocket tickets ---
+
+// Browsers cannot set headers on websockets, so web clients pass a ticket
+// in the URL instead of the session token: it is single-use and expires
+// quickly, so a URL that ends up in a proxy log is useless.
+const TICKET_TTL_MS = 30_000;
+
+const tickets = new Map<string, { tokenHash: string; expiresAt: number }>();
+
+export function createTicket(tokenHash: string): string {
+  const now = Date.now();
+
+  for (const [ticket, entry] of tickets) {
+    if (entry.expiresAt <= now) {
+      tickets.delete(ticket);
+    }
+  }
+
+  const ticket = crypto.randomBytes(32).toString("hex");
+  tickets.set(ticket, { tokenHash, expiresAt: now + TICKET_TTL_MS });
+
+  return ticket;
+}
+
+// Returns the ticket's session token hash and invalidates the ticket.
+export function consumeTicket(ticket: string): string | null {
+  const entry = tickets.get(ticket);
+  tickets.delete(ticket);
+
+  if (!entry || entry.expiresAt <= Date.now()) {
+    return null;
+  }
+
+  return entry.tokenHash;
 }
 
 // --- chat subscriptions ---

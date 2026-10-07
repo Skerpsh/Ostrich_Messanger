@@ -1,16 +1,26 @@
 import { FastifyInstance } from "fastify";
 import type { WebSocket } from "ws";
 import { isChatMember } from "../database.js";
-import { findUserByToken, getBearerToken } from "../middleware/auth.js";
+import {
+  findSessionByHash,
+  getBearerToken,
+  hashToken,
+  type Session,
+} from "../middleware/auth.js";
 import { createMessage, MAX_MESSAGE_LENGTH } from "../messages.js";
 import {
   broadcast,
   chatPresence,
+  closeEndedSessions,
+  connectionCount,
+  consumeTicket,
   saveLastSeenForAll,
   setRealtimeLogger,
   subscribe,
+  trackSession,
   unsubscribe,
   unsubscribeAll,
+  untrackSession,
   userConnected,
   userDisconnected,
 } from "../realtime.js";
@@ -19,6 +29,18 @@ import {
 // connections silent for 60s by default) and detect dead clients, which
 // then go offline.
 const HEARTBEAT_INTERVAL_MS = 30_000;
+
+// Open connections per user (devices, tabs).
+const MAX_CONNECTIONS_PER_USER = 10;
+
+// Client messages per socket: at most RATE_LIMIT_MESSAGES per
+// RATE_LIMIT_WINDOW_MS; more are rejected.
+const RATE_LIMIT_MESSAGES = 30;
+const RATE_LIMIT_WINDOW_MS = 10_000;
+
+// Messages waiting to be handled per socket. A client that sends faster
+// than the server can handle is disconnected instead of being buffered.
+const MAX_PENDING_MESSAGES = 50;
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -39,7 +61,14 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
   const alive = new WeakMap<WebSocket, boolean>();
 
+  // Session found by preValidation, handed over to the websocket handler.
+  const sessions = new WeakMap<object, Session>();
+
   const heartbeat = setInterval(() => {
+    closeEndedSessions().catch((error) =>
+      server.log.error(error, "failed to check websocket sessions"),
+    );
+
     for (const socket of server.websocketServer.clients) {
       if (alive.get(socket) === false) {
         socket.terminate();
@@ -63,24 +92,45 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
       // Authenticate before the upgrade so unauthorized clients get a
       // plain 401. The token is taken from the Authorization header, or
-      // from ?token= for clients that cannot set headers.
+      // from a ?ticket= (POST /api/auth/ws-ticket) for browsers, which
+      // cannot set headers.
       preValidation: async (request, reply) => {
-        const { token: queryToken } = request.query as { token?: string };
-        const token = getBearerToken(request) ?? queryToken;
+        const { ticket } = request.query as { ticket?: unknown };
+        const token = getBearerToken(request);
 
-        const user = token ? await findUserByToken(token) : null;
+        const tokenHash = token
+          ? hashToken(token)
+          : typeof ticket === "string"
+            ? consumeTicket(ticket)
+            : null;
 
-        if (!user) {
+        const session = tokenHash ? await findSessionByHash(tokenHash) : null;
+
+        if (!session) {
           return reply.status(401).send({
             error: "Invalid or expired token",
           });
         }
 
-        request.user = user;
+        if (connectionCount(session.user.id) >= MAX_CONNECTIONS_PER_USER) {
+          return reply.status(429).send({
+            error: "Too many connections",
+          });
+        }
+
+        request.user = session.user;
+        sessions.set(request.raw, session);
       },
     },
     (socket, request) => {
       const user = request.user;
+      const session = sessions.get(request.raw);
+      sessions.delete(request.raw);
+
+      if (!session) {
+        socket.close(1011, "Internal server error");
+        return;
+      }
 
       const send = (payload: unknown) => {
         if (socket.readyState === socket.OPEN) {
@@ -163,6 +213,23 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
       // Client messages are handled one at a time, in the order received.
       let queue = Promise.resolve();
+      let pending = 0;
+
+      let windowStart = Date.now();
+      let windowCount = 0;
+
+      const rateLimited = () => {
+        const now = Date.now();
+
+        if (now - windowStart >= RATE_LIMIT_WINDOW_MS) {
+          windowStart = now;
+          windowCount = 0;
+        }
+
+        windowCount++;
+
+        return windowCount > RATE_LIMIT_MESSAGES;
+      };
 
       alive.set(socket, true);
 
@@ -171,6 +238,23 @@ export default async function websocketRoutes(server: FastifyInstance) {
       });
 
       socket.on("message", (raw) => {
+        if (pending >= MAX_PENDING_MESSAGES) {
+          socket.close(1008, "Too many messages");
+          return;
+        }
+
+        if (rateLimited()) {
+          // Clients that keep flooding are disconnected rather than sent
+          // an error for every message.
+          if (windowCount > RATE_LIMIT_MESSAGES * 3) {
+            socket.close(1008, "Too many messages");
+          } else {
+            sendError("Too many messages, slow down");
+          }
+
+          return;
+        }
+
         let data: ClientMessage;
 
         try {
@@ -185,19 +269,30 @@ export default async function websocketRoutes(server: FastifyInstance) {
           return;
         }
 
+        pending++;
+
         queue = queue
           .then(() => handle(data))
           .catch((error) => {
             request.log.error(error, "websocket message failed");
             sendError("Internal server error");
+          })
+          .finally(() => {
+            pending--;
           });
       });
 
       socket.on("close", () => {
+        untrackSession(socket);
         unsubscribeAll(socket);
         userDisconnected(user.id, socket);
       });
 
+      trackSession(socket, {
+        userId: user.id,
+        tokenHash: session.tokenHash,
+        expiresAt: session.expiresAt,
+      });
       userConnected(user.id, socket);
 
       send({
