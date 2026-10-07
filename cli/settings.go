@@ -255,12 +255,11 @@ func (m model) settingsRows() []settingsRow {
 			action: (*model).logoutEverywhere},
 		settingsRow{kind: rowAction, id: "logout", icon: "⇥", label: "Log out", action: func(m *model) tea.Cmd {
 			token := m.user.Token
-			m.signOut("")
 
-			return func() tea.Msg {
+			return tea.Batch(m.signOut(""), func() tea.Msg {
 				_ = logout(token)
 				return nil
-			}
+			})
 		}},
 
 		section("Danger zone"),
@@ -385,7 +384,7 @@ func (m *model) submitForm() tea.Cmd {
 	s.formOK = ""
 
 	// run does the request; done applies its result.
-	run := func(work func() error, done func(m *model)) tea.Cmd {
+	run := func(work func() error, done func(m *model) tea.Cmd) tea.Cmd {
 		s.busy = true
 
 		return task(func() func(*model) tea.Cmd {
@@ -405,9 +404,7 @@ func (m *model) submitForm() tea.Cmd {
 					return m.failSilently(err)
 				}
 
-				done(m)
-
-				return nil
+				return done(m)
 			}
 		})
 	}
@@ -431,12 +428,14 @@ func (m *model) submitForm() tea.Cmd {
 		return run(func() (err error) {
 			account, err = changeUsername(token, name, password)
 			return err
-		}, func(m *model) {
+		}, func(m *model) tea.Cmd {
 			m.user.User = *account
 			m.settings.form = ""
-			m.toast = ""
-			m.settings.formOK = ""
-			m.showToast("Username changed. Use the new one to log in.", false)
+
+			return tea.Batch(m.showToast("Username changed. Use the new one to log in.", false), func() tea.Msg {
+				updateSavedUser(*account)
+				return nil
+			})
 		})
 
 	case "password":
@@ -456,9 +455,10 @@ func (m *model) submitForm() tea.Cmd {
 
 		return run(func() error {
 			return changePassword(token, current, next)
-		}, func(m *model) {
+		}, func(m *model) tea.Cmd {
 			m.settings.form = ""
-			m.showToast("Password changed. Other devices have been logged out.", false)
+
+			return m.showToast("Password changed. Other devices have been logged out.", false)
 		})
 
 	case "photo":
@@ -490,10 +490,11 @@ func (m *model) submitForm() tea.Cmd {
 			account, err = uploadAvatar(token, image)
 
 			return err
-		}, func(m *model) {
+		}, func(m *model) tea.Cmd {
 			m.user.User = *account
 			m.settings.form = ""
-			m.showToast("Photo set", false)
+
+			return m.showToast("Photo set", false)
 		})
 
 	case "delete":
@@ -510,8 +511,8 @@ func (m *model) submitForm() tea.Cmd {
 
 		return run(func() error {
 			return deleteAccount(token, password, id)
-		}, func(m *model) {
-			m.signOut("Your account has been deleted")
+		}, func(m *model) tea.Cmd {
+			return m.signOut("Your account has been deleted")
 		})
 	}
 

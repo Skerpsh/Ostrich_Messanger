@@ -42,6 +42,8 @@ const (
 
 type authState struct {
 	register bool
+	// Keep the session for the next start.
+	remember bool
 	inputs   [authFields]textinput.Model
 	// Index into fields().
 	focus   int
@@ -78,7 +80,7 @@ func styleInput(input *textinput.Model, p palette) {
 }
 
 func newAuthState(p palette) authState {
-	a := authState{}
+	a := authState{remember: true}
 	a.inputs[fieldUsername] = newInput("@username", 33, false, p)
 	a.inputs[fieldPassword] = newInput("Password", 128, true, p)
 	a.inputs[fieldConfirm] = newInput("Repeat the password", 128, true, p)
@@ -150,6 +152,9 @@ func (m *model) updateAuthKey(msg tea.KeyMsg) tea.Cmd {
 	case "tab":
 		a.setMode(!a.register)
 		return nil
+	case "ctrl+r":
+		a.remember = !a.remember
+		return nil
 	case "esc":
 		if a.register {
 			a.setMode(false)
@@ -195,6 +200,8 @@ func (m *model) updateAuthMouse(msg tea.MouseMsg) tea.Cmd {
 		a.setMode(true)
 	case clicked(msg, "auth:submit"):
 		return m.submitAuth()
+	case clicked(msg, "auth:remember"):
+		a.remember = !a.remember
 	default:
 		for i := range a.fields() {
 			if clicked(msg, fmt.Sprintf("auth:field:%d", i)) {
@@ -239,6 +246,7 @@ func (m *model) submitAuth() tea.Cmd {
 	a.err = ""
 	a.notice = ""
 	register := a.register
+	remember := a.remember
 
 	return task(func() func(*model) tea.Cmd {
 		var result *LoginResponse
@@ -258,7 +266,18 @@ func (m *model) submitAuth() tea.Cmd {
 				return nil
 			}
 
-			return m.startSession(result)
+			cmd := m.startSession(result)
+
+			switch {
+			case !remember:
+			case result.OstrichID != "":
+				// A new account: remembered once its OstrichID is saved.
+				m.rememberLater = true
+			default:
+				cmd = tea.Batch(cmd, m.rememberSession())
+			}
+
+			return cmd
 		}
 	})
 }
@@ -278,9 +297,21 @@ func (m *model) updateOstrichIDKey(msg tea.KeyMsg) tea.Cmd {
 		return m.copyOstrichID()
 	case "enter":
 		if m.idSaved {
-			m.user.OstrichID = ""
-			m.stage = stageMain
+			return m.leaveOstrichID()
 		}
+	}
+
+	return nil
+}
+
+// leaveOstrichID goes on to the chats once the OstrichID is saved.
+func (m *model) leaveOstrichID() tea.Cmd {
+	m.user.OstrichID = ""
+	m.stage = stageMain
+
+	if m.rememberLater {
+		m.rememberLater = false
+		return m.rememberSession()
 	}
 
 	return nil
@@ -293,8 +324,7 @@ func (m *model) updateOstrichIDMouse(msg tea.MouseMsg) tea.Cmd {
 	case clicked(msg, "id:copy"):
 		return m.copyOstrichID()
 	case clicked(msg, "id:continue") && m.idSaved:
-		m.user.OstrichID = ""
-		m.stage = stageMain
+		return m.leaveOstrichID()
 	}
 
 	return nil
@@ -465,6 +495,17 @@ func (m model) authView() string {
 		lines = append(lines, seg(clip(a.notice, inner), p.muted, p.panel), "")
 	}
 
+	box := "☐"
+
+	if a.remember {
+		box = "☑"
+	}
+
+	lines = append(lines,
+		zone.Mark("auth:remember", seg(box+" ", p.accent, p.panel)+seg("Remember me on this computer", p.text, p.panel)),
+		"",
+	)
+
 	label := "Log in"
 
 	switch {
@@ -488,7 +529,7 @@ func (m model) authView() string {
 
 	block := strings.Join(header, "\n") + "\n" + m.card(lines, w)
 
-	return m.screen(block, "Tab Log in / Create account   ↑↓ Field   Enter Next / Submit   Esc Quit")
+	return m.screen(block, "Tab Log in / Create account   ↑↓ Field   Ctrl+R Remember me   Enter Next / Submit   Esc Quit")
 }
 
 func (m model) ostrichIDView() string {

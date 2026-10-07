@@ -22,7 +22,7 @@ func testModel(t *testing.T, w, h int, mode string) model {
 	t.Setenv("HOME", t.TempDir())
 
 	v, privateA, privateB := loadVectors(t)
-	m := newModel(true)
+	m := newModel(true, nil)
 	m.cfg.Theme = mode
 	m.applyTheme()
 	m.width, m.height = w, h

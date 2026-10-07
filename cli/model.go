@@ -70,6 +70,14 @@ type model struct {
 	idSaved   bool
 	quitArmed bool
 
+	// The session is kept for the next start ("Remember me"), or will be
+	// once the new account's OstrichID is confirmed.
+	remembered    bool
+	rememberLater bool
+
+	// Commands for the first update (a remembered session).
+	initCmd tea.Cmd
+
 	// The session's websocket, open while logged in.
 	conn       *websocket.Conn
 	connStatus connStatus
@@ -108,7 +116,8 @@ type model struct {
 	title string
 }
 
-func newModel(systemDark bool) model {
+// newModel starts at the login screen, or in the remembered session.
+func newModel(systemDark bool, saved *LoginResponse) model {
 	m := model{
 		cfg:         loadConfig(),
 		systemDark:  systemDark,
@@ -119,7 +128,66 @@ func newModel(systemDark bool) model {
 	m.applyTheme()
 	m.auth = newAuthState(m.pal)
 
+	if saved != nil {
+		m.remembered = true
+		m.initCmd = tea.Batch(m.startSession(saved), m.verifySession())
+	}
+
 	return m
+}
+
+// verifySession checks a remembered session with the server: an expired
+// one goes back to the login screen; offline, the CLI starts with what it
+// remembered and catches up once connected.
+func (m *model) verifySession() tea.Cmd {
+	token := m.user.Token
+
+	return task(func() func(*model) tea.Cmd {
+		account, err := getMe(token)
+
+		return func(m *model) tea.Cmd {
+			if m.user == nil || m.user.Token != token {
+				return nil
+			}
+
+			switch {
+			case errors.Is(err, errSessionExpired):
+				return m.signOut("Your session has ended, please log in again")
+			case err != nil:
+				return m.showToast("Offline: showing what was saved", true)
+			}
+
+			m.user.User = *account
+
+			return func() tea.Msg {
+				updateSavedUser(*account)
+				return nil
+			}
+		}
+	})
+}
+
+// rememberSession keeps the session for the next start.
+func (m *model) rememberSession() tea.Cmd {
+	result := *m.user
+
+	return task(func() func(*model) tea.Cmd {
+		inKeyring, err := saveSession(&result)
+
+		return func(m *model) tea.Cmd {
+			if err != nil {
+				return m.showToast("Couldn't remember the session: "+err.Error(), true)
+			}
+
+			m.remembered = true
+
+			if !inKeyring {
+				return m.showToast("Remembered in ~/.config/ostrich (no system keyring found)", false)
+			}
+
+			return nil
+		}
+	})
 }
 
 // applyTheme computes the palette from the preferences and restyles the
@@ -150,7 +218,7 @@ func (m *model) applyTheme() {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(tea.SetWindowTitle("Ostrich"), clockTick())
+	return tea.Batch(tea.SetWindowTitle("Ostrich"), clockTick(), m.initCmd)
 }
 
 // --- background work ---
@@ -429,10 +497,15 @@ func (m *model) startSession(result *LoginResponse) tea.Cmd {
 	return tea.Batch(m.loadChats(), connectCmd(result.Token, m.connGen, 0))
 }
 
-// signOut drops the session and returns to the login screen.
+// signOut drops the session (and forgets a remembered one) and returns
+// to the login screen.
 func (m *model) signOut(notice string) tea.Cmd {
 	m.closeConnection()
 	clearChatKeys()
+
+	remembered := m.remembered
+	m.remembered = false
+	m.rememberLater = false
 
 	m.user = nil
 	m.chats = nil
@@ -448,14 +521,21 @@ func (m *model) signOut(notice string) tea.Cmd {
 	m.auth.notice = notice
 	m.toast = ""
 
-	return nil
+	if !remembered {
+		return nil
+	}
+
+	return func() tea.Msg {
+		forgetSession()
+		return nil
+	}
 }
 
-// quit ends the session on the server and exits.
+// quit exits; a session that is not remembered is ended on the server.
 func (m *model) quit() tea.Cmd {
 	m.closeConnection()
 
-	if m.user == nil {
+	if m.user == nil || m.remembered || m.rememberLater {
 		return tea.Quit
 	}
 

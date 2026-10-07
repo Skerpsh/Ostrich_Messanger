@@ -16,11 +16,27 @@ go build -o ostrich .
 Preferences (theme, accent color, bell) and the contacts' keys seen so far
 are kept in `~/.config/ostrich/`.
 
+## Remember me
+
+With "Remember me on this computer" checked on the login screen (on by
+default, `Ctrl+R` toggles it), the CLI starts logged in next time, like the
+web app. The session token and the account's private key go to the system
+keyring (GNOME Keyring / KWallet, the macOS Keychain, the Windows Credential
+Manager); without one, e.g. on a server over SSH, to
+`~/.config/ostrich/session-*.json`, readable only by you.
+
+A remembered session stays when the CLI is closed. It ends, and is
+forgotten here, with Settings → Log out, Log out of all devices, deleting
+the account, logging this device out from another one, or after 30 days
+unused. Uncheck "Remember me" on a computer you share: then closing the CLI
+logs out.
+
 ## Keys
 
 | Where | Keys |
 |---|---|
 | Everywhere | `Ctrl+C` quit |
+| Login | `Tab` log in / create account, `↑↓` field, `Ctrl+R` remember me, `Enter` next / submit |
 | Chats list | `↑↓` move, `Enter` open, `/` search, `n` new chat (type a @username), `m` chat menu (pin, mute, clear, delete), `s` settings, `t` light / dark, `Tab` to the chat, `q` quit |
 | Chat | `Enter` send, `Alt+Enter` new line, `↑` (empty input) choose a message, `Ctrl+O` chat menu, `Ctrl+F` search, `Ctrl+K` safety code, `PgUp/PgDn` scroll, `Tab` to the list, `Esc` back |
 | Chosen message | `Enter` menu, `r` reply, `e` edit, `d` delete, `c` copy, `1`–`8` react, `Esc` back |

@@ -20,8 +20,12 @@ func main() {
 		systemDark = lipgloss.HasDarkBackground()
 	}
 
+	// A remembered session ("Remember me"); read before the program takes
+	// over the terminal, as the keyring may ask to be unlocked.
+	saved := loadSession()
+
 	program := tea.NewProgram(
-		newModel(systemDark),
+		newModel(systemDark, saved),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
