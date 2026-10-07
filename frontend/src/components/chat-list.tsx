@@ -16,6 +16,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AppHeader from "@/components/app-header";
 import Avatar from "@/components/avatar";
+import DevBadge from "@/components/dev-badge";
 import IconButton from "@/components/icon-button";
 import { noWebOutline } from "@/components/text-field";
 import { useAuth, useCurrentUser } from "@/context/auth";
@@ -325,9 +326,12 @@ function ChatRow({
       />
       <View style={styles.rowText}>
         <View style={styles.rowLine}>
-          <Text numberOfLines={1} style={[styles.name, { color: colors.text }]}>
-            {chat.username}
-          </Text>
+          <View style={styles.nameWrap}>
+            <Text numberOfLines={1} style={[styles.name, { color: colors.text }]}>
+              {chat.username}
+            </Text>
+            {chat.is_developer ? <DevBadge /> : null}
+          </View>
           <View style={styles.meta}>
             {own ? (
               <Ionicons
@@ -431,8 +435,15 @@ const styles = StyleSheet.create({
     gap: 8,
   },
 
-  name: {
+  nameWrap: {
     flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+
+  name: {
+    flexShrink: 1,
     fontSize: 16,
     fontWeight: "600",
   },

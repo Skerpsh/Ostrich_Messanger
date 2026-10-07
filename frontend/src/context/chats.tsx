@@ -232,7 +232,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
             reload();
           }
         },
-        onProfile: ({ userId: changedId, username, avatarId }) => {
+        onProfile: ({ userId: changedId, username, avatarId, isDeveloper }) => {
           if (changedId === userId) {
             // Changed on another device; also refreshes the date of the
             // next allowed username change.
@@ -245,7 +245,12 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
           setChats((current) =>
             current?.map((chat) =>
               chat.user_id === changedId
-                ? { ...chat, username, avatar_id: avatarId }
+                ? {
+                    ...chat,
+                    username,
+                    avatar_id: avatarId,
+                    is_developer: isDeveloper,
+                  }
                 : chat,
             ) ?? current,
           );

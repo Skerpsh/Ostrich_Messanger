@@ -47,6 +47,9 @@ type Account struct {
 
 	// When the username can be changed again; nil if it can be now.
 	NextUsernameChangeAt *string `json:"next_username_change_at"`
+
+	// Shows the DEV badge.
+	IsDeveloper bool `json:"is_developer"`
 }
 
 type LoginResponse struct {
@@ -60,12 +63,13 @@ type LoginResponse struct {
 }
 
 type Chat struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Created  string `json:"created_at"`
-	Updated  string `json:"updated_at"`
-	UserID   string `json:"user_id"`
-	Username string `json:"username"`
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	Created     string `json:"created_at"`
+	Updated     string `json:"updated_at"`
+	UserID      string `json:"user_id"`
+	Username    string `json:"username"`
+	IsDeveloper bool   `json:"is_developer"`
 
 	// Presence of the other user.
 	Online     bool    `json:"online"`
@@ -295,10 +299,11 @@ type createChatResponse struct {
 	} `json:"chat"`
 
 	User struct {
-		ID         string  `json:"id"`
-		Username   string  `json:"username"`
-		Online     bool    `json:"online"`
-		LastSeenAt *string `json:"last_seen_at"`
+		ID          string  `json:"id"`
+		Username    string  `json:"username"`
+		IsDeveloper bool    `json:"is_developer"`
+		Online      bool    `json:"online"`
+		LastSeenAt  *string `json:"last_seen_at"`
 	} `json:"user"`
 }
 
@@ -315,11 +320,12 @@ func createChat(token, username string) (Chat, error) {
 	}
 
 	return Chat{
-		ID:       result.Chat.ID,
-		Type:     result.Chat.Type,
-		Created:  result.Chat.Created,
-		UserID:   result.User.ID,
-		Username: result.User.Username,
+		ID:          result.Chat.ID,
+		Type:        result.Chat.Type,
+		Created:     result.Chat.Created,
+		UserID:      result.User.ID,
+		Username:    result.User.Username,
+		IsDeveloper: result.User.IsDeveloper,
 
 		Online:     result.User.Online,
 		LastSeenAt: result.User.LastSeenAt,

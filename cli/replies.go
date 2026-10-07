@@ -13,10 +13,11 @@ const quoteLength = 60
 
 // ReplyPreview is the start of the message a reply refers to.
 type ReplyPreview struct {
-	ID             string `json:"id"`
-	SenderID       string `json:"sender_id"`
-	SenderUsername string `json:"sender_username"`
-	Content        string `json:"content"`
+	ID                string `json:"id"`
+	SenderID          string `json:"sender_id"`
+	SenderUsername    string `json:"sender_username"`
+	SenderIsDeveloper bool   `json:"sender_is_developer"`
+	Content           string `json:"content"`
 }
 
 // shorten makes one line of at most n runes.
@@ -41,10 +42,20 @@ func (m tuiModel) senderName(senderID, username string) string {
 
 // quoteLine renders the quoted message above a reply.
 func (m tuiModel) quoteLine(reply *ReplyPreview) string {
-	return hintStyle.Render(
-		"↪ " + m.senderName(reply.SenderID, reply.SenderUsername) + ": " +
-			shorten(reply.Content, quoteLength),
-	)
+	name := hintStyle.Render("↪ " + m.senderName(reply.SenderID, reply.SenderUsername))
+
+	return withDevBadge(name, reply.SenderIsDeveloper) +
+		hintStyle.Render(": "+shorten(reply.Content, quoteLength))
+}
+
+// isDeveloper tells whether a message's sender has the DEV badge (in a
+// direct chat: the signed-in user or the other member).
+func (m tuiModel) isDeveloper(senderID string) bool {
+	if m.user != nil && senderID == m.user.User.ID {
+		return m.user.User.IsDeveloper
+	}
+
+	return m.currentChat.IsDeveloper
 }
 
 // resetReply leaves the selection mode and drops a pending reply.
@@ -100,7 +111,9 @@ func (m tuiModel) replyBar() string {
 		return ""
 	}
 
-	return selectedChatStyle.Render("↪ Replying to "+
-		m.senderName(m.replyTo.SenderID, m.replyTo.SenderUsername)) +
+	name := selectedChatStyle.Render("↪ Replying to " +
+		m.senderName(m.replyTo.SenderID, m.replyTo.SenderUsername))
+
+	return withDevBadge(name, m.isDeveloper(m.replyTo.SenderID)) +
 		hintStyle.Render(": "+shorten(m.replyTo.Content, quoteLength)+"   (Esc cancels)")
 }

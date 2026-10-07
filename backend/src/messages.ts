@@ -9,6 +9,7 @@ export type ReplyPreview = {
   id: string;
   sender_id: string;
   sender_username: string;
+  sender_is_developer: boolean;
   content: string;
 };
 
@@ -27,6 +28,7 @@ export const REPLY_COLUMNS = `
   reply.id AS reply_id,
   reply.sender_id AS reply_sender_id,
   reply_sender.username AS reply_sender_username,
+  reply_sender.is_developer AS reply_sender_is_developer,
   LEFT(reply.content, ${REPLY_PREVIEW_LENGTH}) AS reply_content
 `;
 
@@ -36,9 +38,17 @@ export function withReply<
     reply_id: string | null;
     reply_sender_id: string | null;
     reply_sender_username: string | null;
+    reply_sender_is_developer: boolean | null;
     reply_content: string | null;
   },
->({ reply_id, reply_sender_id, reply_sender_username, reply_content, ...row }: T) {
+>({
+  reply_id,
+  reply_sender_id,
+  reply_sender_username,
+  reply_sender_is_developer,
+  reply_content,
+  ...row
+}: T) {
   return {
     ...row,
     reply_to: reply_id
@@ -46,6 +56,7 @@ export function withReply<
           id: reply_id,
           sender_id: reply_sender_id!,
           sender_username: reply_sender_username!,
+          sender_is_developer: reply_sender_is_developer ?? false,
           content: reply_content!,
         }
       : null,

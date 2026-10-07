@@ -7,6 +7,8 @@ export type User = {
   next_username_change_at: string | null;
   // null without a profile picture; see avatarUrl().
   avatar_id: string | null;
+  // Shows the DEV badge.
+  is_developer: boolean;
 };
 
 // Profile pictures are plain image URLs: the id is random and new for
@@ -31,6 +33,7 @@ export type Chat = {
   user_id: string;
   username: string;
   avatar_id: string | null;
+  is_developer: boolean;
   // Presence of the other user.
   online: boolean;
   last_seen_at: string | null;
@@ -53,6 +56,7 @@ export type ReplyPreview = {
   id: string;
   sender_id: string;
   sender_username: string;
+  sender_is_developer: boolean;
   content: string;
 };
 
@@ -248,6 +252,7 @@ export async function createChat(token: string, username: string) {
       id: string;
       username: string;
       avatar_id?: string | null;
+      is_developer?: boolean;
       online?: boolean;
       last_seen_at?: string | null;
     };
@@ -259,6 +264,7 @@ export async function createChat(token: string, username: string) {
     user_id: user.id,
     username: user.username,
     avatar_id: user.avatar_id ?? null,
+    is_developer: user.is_developer ?? false,
     online: user.online ?? false,
     last_seen_at: user.last_seen_at ?? null,
     last_message: null,

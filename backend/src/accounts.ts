@@ -107,6 +107,10 @@ export const AVATAR_ID_COLUMN = `(
   SELECT avatars.id FROM avatars WHERE avatars.user_id = users.id
 ) AS avatar_id`;
 
+// Profile fields shown next to a user's name everywhere: avatar and the
+// developer badge. For queries that select from "users".
+export const PROFILE_COLUMNS = `${AVATAR_ID_COLUMN}, users.is_developer`;
+
 // The user as the API returns it to its owner.
 export function accountView(row: {
   id: string;
@@ -114,6 +118,7 @@ export function accountView(row: {
   created_at: Date;
   username_changed_at: Date | null;
   avatar_id?: string | null;
+  is_developer?: boolean;
 }) {
   return {
     id: row.id,
@@ -122,5 +127,6 @@ export function accountView(row: {
     // null when the username can be changed now.
     next_username_change_at: nextUsernameChangeAt(row.username_changed_at),
     avatar_id: row.avatar_id ?? null,
+    is_developer: row.is_developer ?? false,
   };
 }

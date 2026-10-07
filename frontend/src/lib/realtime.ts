@@ -23,6 +23,7 @@ export type ProfileEvent = {
   userId: string;
   username: string;
   avatarId: string | null;
+  isDeveloper: boolean;
 };
 
 type Handlers = {
@@ -164,6 +165,7 @@ export class RealtimeConnection {
         lastReadAt?: string;
         username?: string;
         avatarId?: string | null;
+        isDeveloper?: boolean;
         error?: string;
       };
 
@@ -211,6 +213,7 @@ export class RealtimeConnection {
               userId: data.userId,
               username: data.username,
               avatarId: data.avatarId ?? null,
+              isDeveloper: Boolean(data.isDeveloper),
             });
           }
           break;

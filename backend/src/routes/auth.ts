@@ -9,7 +9,7 @@ import {
 } from "../database.js";
 import {
   accountView,
-  AVATAR_ID_COLUMN,
+  PROFILE_COLUMNS,
   formatOstrichId,
   generateOstrichId,
   hashOstrichId,
@@ -88,7 +88,7 @@ type LoginBody = {
   ostrich_id?: string;
 };
 
-const USER_COLUMNS = `id, username, created_at, username_changed_at, ${AVATAR_ID_COLUMN}`;
+const USER_COLUMNS = `id, username, created_at, username_changed_at, ${PROFILE_COLUMNS}`;
 
 // Brute-force protection for endpoints that check passwords.
 const authRateLimit = {
@@ -500,6 +500,7 @@ export default async function authRoutes(server: FastifyInstance) {
         userId: user.id,
         username: user.username,
         avatarId: user.avatar_id,
+        isDeveloper: user.is_developer,
       });
 
       return {

@@ -53,6 +53,7 @@ export default async function avatarsRoutes(server: FastifyInstance) {
       userId: user.id,
       username: user.username,
       avatarId: user.avatar_id,
+      isDeveloper: user.is_developer,
     });
 
   // SET AVATAR: the request body is the image (Content-Type image/jpeg,

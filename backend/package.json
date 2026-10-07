@@ -8,7 +8,9 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "db:migrate": "tsx src/migrate.ts",
-    "db:migrate:prod": "node dist/migrate.js"
+    "db:migrate:prod": "node dist/migrate.js",
+    "dev-badge": "tsx src/dev-badge.ts",
+    "dev-badge:prod": "node dist/dev-badge.js"
   },
   "keywords": [],
   "author": "",

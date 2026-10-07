@@ -18,6 +18,8 @@ mobile apps; styled after the Ostrich website.
   tapping a quote jumps to the original message
 - Profile pictures: picked from the photo library, cropped square and
   resized on the device, re-encoded by the server
+- DEV badge (gradient) next to developer accounts' names everywhere; given
+  on the server with `npm run dev-badge:prod -- add @username`
 - Settings: profile picture, theme (system / light / dark), accent color
   (stored per device), change username (once per 28 days), change
   password, log out of all devices

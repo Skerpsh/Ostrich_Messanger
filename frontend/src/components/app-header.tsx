@@ -14,6 +14,8 @@ type AppHeaderProps = {
   // Custom content left of the title, e.g. an avatar.
   left?: ReactNode;
   title?: string;
+  // Shown right after the title, e.g. the DEV badge.
+  titleBadge?: ReactNode;
   subtitle?: ReactNode;
   right?: ReactNode;
   // The Ostrich logo and light/dark switch, for signed-out screens.
@@ -27,6 +29,7 @@ export default function AppHeader({
   onClose,
   left,
   title,
+  titleBadge,
   subtitle,
   right,
   brand = false,
@@ -65,9 +68,15 @@ export default function AppHeader({
 
       <View style={styles.titles}>
         {title ? (
-          <Text numberOfLines={1} style={[styles.title, { color: colors.text }]}>
-            {title}
-          </Text>
+          <View style={styles.titleRow}>
+            <Text
+              numberOfLines={1}
+              style={[styles.title, { color: colors.text }]}
+            >
+              {title}
+            </Text>
+            {titleBadge}
+          </View>
         ) : null}
         {subtitle ? (
           <Text
@@ -108,7 +117,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 2,
   },
 
+  titleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+
   title: {
+    flexShrink: 1,
     fontSize: 17,
     fontWeight: "700",
   },

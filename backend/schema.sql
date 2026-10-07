@@ -77,6 +77,11 @@ CREATE INDEX IF NOT EXISTS messages_chat_id_created_at_idx
 ALTER TABLE messages
   ADD COLUMN IF NOT EXISTS reply_to_id UUID REFERENCES messages(id) ON DELETE SET NULL;
 
+-- Developer accounts get a "DEV" badge next to their name. Set only from
+-- the server's command line (npm run dev-badge), never through the API.
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS is_developer BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- Profile pictures: 512x512 WebP, re-encoded by the server (no metadata).
 -- The id is random and new for every upload, so it works as an
 -- unguessable, cacheable URL (/api/avatars/:id) that only reaches other

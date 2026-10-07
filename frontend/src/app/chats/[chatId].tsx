@@ -19,6 +19,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AppHeader from "@/components/app-header";
 import Avatar from "@/components/avatar";
 import Button from "@/components/button";
+import DevBadge from "@/components/dev-badge";
 import IconButton from "@/components/icon-button";
 import { noWebOutline } from "@/components/text-field";
 import { useAuth, useCurrentUser } from "@/context/auth";
@@ -374,6 +375,7 @@ export default function ChatScreen() {
           ) : null
         }
         title={chat?.username ?? "…"}
+        titleBadge={chat?.is_developer ? <DevBadge size="md" /> : null}
         subtitle={
           peerOnline ? (
             <Text style={{ color: colors.online }}>online</Text>
@@ -516,10 +518,15 @@ export default function ChatScreen() {
             <View style={styles.replyBar}>
               <Ionicons name="arrow-undo" size={18} color={colors.accent} />
               <View style={[styles.replyBarText, { borderLeftColor: colors.accent }]}>
-                <Text numberOfLines={1} style={[styles.replyBarName, { color: colors.accent }]}>
-                  Reply to{" "}
-                  {replyTo.sender_id === user?.id ? "yourself" : replyTo.sender_username}
-                </Text>
+                <View style={styles.replyBarNameRow}>
+                  <Text numberOfLines={1} style={[styles.replyBarName, { color: colors.accent }]}>
+                    Reply to{" "}
+                    {replyTo.sender_id === user?.id ? "yourself" : replyTo.sender_username}
+                  </Text>
+                  {(replyTo.sender_id === user?.id
+                    ? user?.is_developer
+                    : chat?.is_developer) ? <DevBadge /> : null}
+                </View>
                 <Text numberOfLines={1} style={[styles.replyBarContent, { color: colors.muted }]}>
                   {previewText(replyTo.content)}
                 </Text>
@@ -711,12 +718,15 @@ function Bubble({
               },
             ]}
           >
-            <Text
-              numberOfLines={1}
-              style={[styles.quoteName, { color: own ? colors.onAccent : colors.accent }]}
-            >
-              {quote.sender_id === ownId ? "You" : quote.sender_username}
-            </Text>
+            <View style={styles.quoteNameRow}>
+              <Text
+                numberOfLines={1}
+                style={[styles.quoteName, { color: own ? colors.onAccent : colors.accent }]}
+              >
+                {quote.sender_id === ownId ? "You" : quote.sender_username}
+              </Text>
+              {quote.sender_is_developer ? <DevBadge /> : null}
+            </View>
             <Text
               numberOfLines={2}
               style={[styles.quoteText, { color: own ? colors.onAccent : colors.textSoft }]}
@@ -861,7 +871,14 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
+  quoteNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+
   quoteName: {
+    flexShrink: 1,
     fontSize: 13,
     fontWeight: "700",
   },
@@ -889,7 +906,14 @@ const styles = StyleSheet.create({
     paddingLeft: 8,
   },
 
+  replyBarNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+
   replyBarName: {
+    flexShrink: 1,
     fontSize: 13,
     fontWeight: "700",
   },

@@ -16,6 +16,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AppHeader from "@/components/app-header";
 import Avatar from "@/components/avatar";
 import Button from "@/components/button";
+import DevBadge from "@/components/dev-badge";
 import type { IconName } from "@/components/icon-button";
 import TextField from "@/components/text-field";
 import { useAuth, useCurrentUser } from "@/context/auth";
@@ -115,9 +116,12 @@ export default function SettingsScreen() {
         >
           <View style={[styles.profile, { backgroundColor: colors.panel }]}>
             <ProfilePhoto />
-            <Text style={[styles.username, { color: colors.text }]}>
-              @{user.username}
-            </Text>
+            <View style={styles.usernameRow}>
+              <Text style={[styles.username, { color: colors.text }]}>
+                @{user.username}
+              </Text>
+              {user.is_developer ? <DevBadge size="lg" /> : null}
+            </View>
             <Pressable
               onPress={copyUsername}
               accessibilityRole="button"
@@ -665,7 +669,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
 
+  usernameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+
   username: {
+    flexShrink: 1,
     fontSize: 22,
     fontWeight: "700",
   },

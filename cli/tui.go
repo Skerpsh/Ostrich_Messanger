@@ -1355,6 +1355,10 @@ func (m tuiModel) chatsView() string {
 
 	b.WriteString(logoStyle.Render(title))
 
+	if m.user != nil && m.user.User.IsDeveloper {
+		b.WriteString(" " + devBadge())
+	}
+
 	if m.connStatus != connOnline {
 		b.WriteString("   " + hintStyle.Render("connecting..."))
 	}
@@ -1393,6 +1397,8 @@ func (m tuiModel) chatsView() string {
 			if i == m.selected {
 				name = selectedChatStyle.Render(name)
 			}
+
+			name = withDevBadge(name, chat.IsDeveloper)
 
 			if chat.UnreadCount > 0 {
 				name += " " + unreadStyle.Render(fmt.Sprintf(" %d ", chat.UnreadCount))
@@ -1683,6 +1689,8 @@ func (m tuiModel) chatView() string {
 	header := logoStyle.
 		UnsetMarginBottom().
 		Render("OSTRICH   /   " + sanitize(m.currentChat.Username))
+
+	header = withDevBadge(header, m.currentChat.IsDeveloper)
 
 	var status []string
 
