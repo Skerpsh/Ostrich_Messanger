@@ -10,7 +10,10 @@
     "backgroundColor": "#111111",
     "ios": {
       "bundleIdentifier": "com.ostrich.messenger",
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.ostrich.messenger",
@@ -45,6 +48,12 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "baaf2efa-24d7-42fd-8309-d1a22459f144"
+      }
     }
   }
 }
