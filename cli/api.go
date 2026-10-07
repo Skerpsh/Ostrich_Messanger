@@ -70,6 +70,18 @@ type Chat struct {
 	// Presence of the other user.
 	Online     bool    `json:"online"`
 	LastSeenAt *string `json:"last_seen_at"`
+
+	LastMessage *LastMessage `json:"last_message"`
+	// Messages from the other user not read yet.
+	UnreadCount int `json:"unread_count"`
+}
+
+// LastMessage is the start of a chat's newest message, for previews.
+type LastMessage struct {
+	ID        string `json:"id"`
+	SenderID  string `json:"sender_id"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
 }
 
 type ChatsResponse struct {

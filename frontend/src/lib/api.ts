@@ -7,6 +7,14 @@ export type User = {
   next_username_change_at: string | null;
 };
 
+export type LastMessage = {
+  id: string;
+  sender_id: string;
+  // The start of the message (up to 200 characters), for previews.
+  content: string;
+  created_at: string;
+};
+
 export type Chat = {
   id: string;
   type: string;
@@ -17,6 +25,18 @@ export type Chat = {
   // Presence of the other user.
   online: boolean;
   last_seen_at: string | null;
+  last_message: LastMessage | null;
+  // Messages from the other user the signed-in user has not read.
+  unread_count: number;
+  // Up to when the other user has read the chat (for read receipts).
+  peer_last_read_at: string | null;
+};
+
+export type ChatHistory = {
+  messages: Message[];
+  // Up to when the signed-in user had read the chat.
+  last_read_at: string | null;
+  peer_last_read_at: string | null;
 };
 
 export type Message = {
@@ -202,17 +222,27 @@ export async function createChat(token: string, username: string) {
     username: user.username,
     online: user.online ?? false,
     last_seen_at: user.last_seen_at ?? null,
+    last_message: null,
+    unread_count: 0,
+    peer_last_read_at: null,
   } satisfies Chat;
 }
 
-export async function getMessages(token: string, chatId: string) {
-  const { messages } = await request<{ messages: Message[] }>(
+export function getMessages(token: string, chatId: string) {
+  return request<ChatHistory>(
     "GET",
     `/api/chats/${encodeURIComponent(chatId)}/messages`,
     { token },
   );
+}
 
-  return messages;
+// Marks the chat read up to and including the message.
+export function markRead(token: string, chatId: string, messageId: string) {
+  return request<{ last_read_at: string }>(
+    "POST",
+    `/api/chats/${encodeURIComponent(chatId)}/read`,
+    { token, body: { message_id: messageId } },
+  );
 }
 
 export async function sendMessage(

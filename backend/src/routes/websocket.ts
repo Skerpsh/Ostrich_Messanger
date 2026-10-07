@@ -9,17 +9,14 @@ import {
 } from "../middleware/auth.js";
 import { createMessage, MAX_MESSAGE_LENGTH } from "../messages.js";
 import {
-  broadcast,
   chatPresence,
   closeEndedSessions,
   connectionCount,
   consumeTicket,
   saveLastSeenForAll,
+  sendToChatMembers,
   setRealtimeLogger,
-  subscribe,
   trackSession,
-  unsubscribe,
-  unsubscribeAll,
   untrackSession,
   userConnected,
   userDisconnected,
@@ -54,8 +51,12 @@ type ClientMessage = {
 // Protocol (JSON messages):
 //   client -> server: join {chatId}, leave {chatId}, message {chatId, content}
 //   server -> client: connected, joined {chatId}, left {chatId},
-//                     message {message}, presence {userId, online, lastSeenAt},
-//                     error {error}
+//                     message {message}, read {chatId, userId, lastReadAt},
+//                     presence {userId, online, lastSeenAt}, error {error}
+//
+// "message" and "read" events of all the user's chats are sent to all their
+// sockets. "join" answers with "joined" (clients reload the chat's history
+// on it) and the presence of the chat's other members.
 export default async function websocketRoutes(server: FastifyInstance) {
   setRealtimeLogger(server.log);
 
@@ -157,7 +158,6 @@ export default async function websocketRoutes(server: FastifyInstance) {
             return;
           }
 
-          subscribe(chatId, socket);
           send({ type: "joined", chatId });
 
           for (const event of await chatPresence(chatId, user.id)) {
@@ -175,7 +175,6 @@ export default async function websocketRoutes(server: FastifyInstance) {
             return;
           }
 
-          unsubscribe(chatId, socket);
           send({ type: "left", chatId });
           return;
         }
@@ -204,7 +203,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
             return;
           }
 
-          broadcast(chatId, { type: "message", message });
+          await sendToChatMembers(chatId, { type: "message", message });
           return;
         }
 
@@ -284,7 +283,6 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
       socket.on("close", () => {
         untrackSession(socket);
-        unsubscribeAll(socket);
         userDisconnected(user.id, socket);
       });
 

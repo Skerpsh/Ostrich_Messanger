@@ -12,7 +12,7 @@ export default function WelcomeScreen() {
 
   return (
     <View style={styles.screen}>
-      <AppHeader />
+      <AppHeader brand title="Ostrich" />
 
       <View style={styles.hero}>
         <Image

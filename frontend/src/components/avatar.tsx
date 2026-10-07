@@ -3,15 +3,19 @@ import { useAppTheme } from "@/context/theme";
 
 export default function Avatar({
   name,
-  size = 46,
+  size = 48,
   online = false,
+  // Background behind the online dot's ring (the surface the avatar is on).
+  ringColor,
 }: {
   name: string;
   size?: number;
   // Shows the green "online" dot.
   online?: boolean;
+  ringColor?: string;
 }) {
   const { colors } = useAppTheme();
+  const dot = Math.max(10, Math.round(size * 0.28));
 
   return (
     <View
@@ -22,12 +26,11 @@ export default function Avatar({
           height: size,
           borderRadius: size / 2,
           backgroundColor: colors.panelAlt,
-          borderColor: colors.line,
         },
       ]}
     >
       <Text
-        style={[styles.letter, { color: colors.text, fontSize: size * 0.42 }]}
+        style={[styles.letter, { color: colors.textSoft, fontSize: size * 0.4 }]}
       >
         {name.charAt(0).toUpperCase() || "?"}
       </Text>
@@ -38,11 +41,11 @@ export default function Avatar({
           style={[
             styles.dot,
             {
-              width: size * 0.3,
-              height: size * 0.3,
-              borderRadius: size * 0.15,
+              width: dot,
+              height: dot,
+              borderRadius: dot / 2,
               backgroundColor: colors.online,
-              borderColor: colors.bg,
+              borderColor: ringColor ?? colors.surface,
             },
           ]}
         />
@@ -55,7 +58,6 @@ const styles = StyleSheet.create({
   avatar: {
     alignItems: "center",
     justifyContent: "center",
-    borderWidth: 1,
   },
 
   letter: {
@@ -64,8 +66,8 @@ const styles = StyleSheet.create({
 
   dot: {
     position: "absolute",
-    right: -1,
-    bottom: -1,
+    right: 0,
+    bottom: 0,
     borderWidth: 2,
   },
 });

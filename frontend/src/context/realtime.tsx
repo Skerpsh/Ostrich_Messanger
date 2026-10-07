@@ -10,7 +10,6 @@ import {
 import { AppState, Platform } from "react-native";
 import { useAuth } from "@/context/auth";
 import {
-  getChats,
   getMe,
   getWsTicket,
   SessionExpiredError,
@@ -20,6 +19,7 @@ import {
   RealtimeConnection,
   type ConnectionStatus,
   type PresenceEvent,
+  type ReadEvent,
 } from "@/lib/realtime";
 
 export type Presence = {
@@ -32,6 +32,12 @@ type ChatListener = {
   onJoined: () => void;
 };
 
+// Receives the events of all chats (for the chats list).
+export type EventListener = {
+  onMessage: (message: Message) => void;
+  onRead: (event: ReadEvent) => void;
+};
+
 type RealtimeContextValue = {
   status: ConnectionStatus;
   presence: Record<string, Presence>;
@@ -39,6 +45,8 @@ type RealtimeContextValue = {
   seedPresence: (entries: { userId: string; presence: Presence }[]) => void;
   // Receive a chat's messages while the returned function is not called.
   subscribeChat: (chatId: string, listener: ChatListener) => () => void;
+  // Receive all chats' events while the returned function is not called.
+  subscribeEvents: (listener: EventListener) => () => void;
 };
 
 const RealtimeContext = createContext<RealtimeContextValue | null>(null);
@@ -54,39 +62,18 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
 
   const connectionRef = useRef<RealtimeConnection | null>(null);
   const listenersRef = useRef(new Map<string, Set<ChatListener>>());
+  const eventListenersRef = useRef(new Set<EventListener>());
 
   useEffect(() => {
     if (!token) {
-      setPresence({});
       return;
     }
 
     const listeners = listenersRef.current;
+    const eventListeners = eventListenersRef.current;
 
     const connection = new RealtimeConnection(token, {
-      onStatus: (next) => {
-        setStatus(next);
-
-        // Presence changes are not replayed after a reconnect: refresh.
-        if (next === "online") {
-          withToken(getChats)
-            .then((chats) =>
-              setPresence((current) => {
-                const updated = { ...current };
-
-                for (const chat of chats) {
-                  updated[chat.user_id] = {
-                    online: chat.online,
-                    lastSeenAt: chat.last_seen_at,
-                  };
-                }
-
-                return updated;
-              }),
-            )
-            .catch(() => {});
-        }
-      },
+      onStatus: setStatus,
       onJoined: (chatId) => {
         for (const listener of listeners.get(chatId) ?? []) {
           listener.onJoined();
@@ -95,6 +82,15 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       onMessage: (message) => {
         for (const listener of listeners.get(message.chat_id) ?? []) {
           listener.onMessage(message);
+        }
+
+        for (const listener of eventListeners) {
+          listener.onMessage(message);
+        }
+      },
+      onRead: (event) => {
+        for (const listener of eventListeners) {
+          listener.onRead(event);
         }
       },
       onPresence: ({ userId, online, lastSeenAt }: PresenceEvent) =>
@@ -140,6 +136,8 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       subscription?.remove();
       connection.stop();
       connectionRef.current = null;
+      // Presence of the previous session's contacts.
+      setPresence({});
     };
   }, [token, withToken]);
 
@@ -183,8 +181,18 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const subscribeEvents = useCallback((listener: EventListener) => {
+    eventListenersRef.current.add(listener);
+
+    return () => {
+      eventListenersRef.current.delete(listener);
+    };
+  }, []);
+
   return (
-    <RealtimeContext value={{ status, presence, seedPresence, subscribeChat }}>
+    <RealtimeContext
+      value={{ status, presence, seedPresence, subscribeChat, subscribeEvents }}
+    >
       {children}
     </RealtimeContext>
   );

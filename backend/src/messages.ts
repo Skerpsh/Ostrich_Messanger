@@ -39,6 +39,13 @@ export async function createMessage(
       UPDATE chats
       SET updated_at = NOW()
       WHERE id = (SELECT chat_id FROM inserted)
+    ),
+    -- Whoever writes has read the chat up to their own message.
+    sender_read AS (
+      UPDATE chat_members
+      SET last_read_at = GREATEST(last_read_at, (SELECT created_at FROM inserted))
+      WHERE chat_id = (SELECT chat_id FROM inserted)
+        AND user_id = $2
     )
     SELECT
       inserted.id,

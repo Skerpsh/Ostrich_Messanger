@@ -585,6 +585,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Reload after (re)joining: add what was missed.
 			if m.stage == stageChat && m.currentChat.ID == msg.chat.ID {
 				m.mergeMessages(msg.messages)
+
+				return m, m.markChatRead(msg.chat.ID, msg.messages)
 			}
 
 			return m, nil
@@ -611,7 +613,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messageInput.SetValue("")
 		m.messageInput.Focus()
 
-		return m, nil
+		return m, m.markChatRead(msg.chat.ID, msg.messages)
 
 	case historyErrorMsg:
 		if errors.Is(msg.err, errSessionExpired) {
@@ -689,12 +691,29 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "message":
+			// Messages of all chats arrive, not only the open one.
 			message := msg.message.Message
 
-			if message != nil &&
-				m.stage == stageChat &&
-				message.ChatID == m.currentChat.ID {
+			if message == nil {
+				break
+			}
+
+			viewing := m.stage == stageChat && message.ChatID == m.currentChat.ID
+
+			if viewing {
 				m.mergeMessages([]Message{*message})
+				cmd = m.markChatRead(message.ChatID, []Message{*message})
+			}
+
+			if !m.chatMessageArrived(*message, viewing) {
+				// A chat someone has just started.
+				cmd = tea.Batch(cmd, loadChatsCmd(m.user.Token))
+			}
+
+		case "read":
+			// Read on another device of this user.
+			if msg.message.UserID == m.user.User.ID {
+				m.chatReadElsewhere(msg.message.ChatID, msg.message.LastReadAt)
 			}
 
 		case "presence":
@@ -1339,7 +1358,11 @@ func (m tuiModel) chatsView() string {
 				name = selectedChatStyle.Render(name)
 			}
 
-			chatList.WriteString(name + "\n  @" + sanitize(chat.Username))
+			if chat.UnreadCount > 0 {
+				name += " " + unreadStyle.Render(fmt.Sprintf(" %d ", chat.UnreadCount))
+			}
+
+			chatList.WriteString(name + "\n  " + m.chatPreview(chat))
 
 			if status := m.presenceText(chat.UserID); status != "" {
 				chatList.WriteString("  " + status)

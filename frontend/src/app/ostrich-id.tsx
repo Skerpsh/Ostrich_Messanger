@@ -40,7 +40,7 @@ export default function OstrichIdScreen() {
 
   return (
     <View style={styles.screen}>
-      <AppHeader subtitle={`@${signedIn.user.username}`} />
+      <AppHeader brand title="Ostrich" subtitle={`@${signedIn.user.username}`} />
 
       <ScrollView
         contentContainerStyle={[
@@ -51,7 +51,7 @@ export default function OstrichIdScreen() {
         <View
           style={[
             styles.card,
-            { backgroundColor: colors.panel, borderColor: colors.line },
+            { backgroundColor: colors.panel },
           ]}
         >
           <Text style={[styles.eyebrow, { color: colors.muted }]}>
@@ -64,7 +64,7 @@ export default function OstrichIdScreen() {
             accessibilityLabel="Copy your OstrichID"
             style={[
               styles.idBox,
-              { backgroundColor: colors.panelAlt, borderColor: colors.line },
+              { backgroundColor: colors.accentSoft, borderColor: colors.accent },
             ]}
           >
             <Text selectable style={[styles.id, { color: colors.text }]}>
@@ -96,13 +96,13 @@ export default function OstrichIdScreen() {
               style={[
                 styles.checkbox,
                 {
-                  borderColor: colors.text,
-                  backgroundColor: saved ? colors.text : "transparent",
+                  borderColor: saved ? colors.accent : colors.muted,
+                  backgroundColor: saved ? colors.accent : "transparent",
                 },
               ]}
             >
               {saved ? (
-                <Text style={[styles.checkMark, { color: colors.bg }]}>✓</Text>
+                <Text style={[styles.checkMark, { color: colors.onAccent }]}>✓</Text>
               ) : null}
             </View>
             <Text style={[styles.checkLabel, { color: colors.text }]}>
@@ -137,7 +137,6 @@ const styles = StyleSheet.create({
     maxWidth: 480,
     alignSelf: "center",
     borderRadius: radius.card,
-    borderWidth: 1,
     padding: 24,
     gap: 18,
   },

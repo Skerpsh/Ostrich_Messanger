@@ -6,6 +6,12 @@ const RECONNECT_DELAY_MS = 3_000;
 
 export type ConnectionStatus = "connecting" | "online" | "offline";
 
+export type ReadEvent = {
+  chatId: string;
+  userId: string;
+  lastReadAt: string;
+};
+
 export type PresenceEvent = {
   userId: string;
   online: boolean;
@@ -16,7 +22,9 @@ type Handlers = {
   onStatus: (status: ConnectionStatus) => void;
   // Called after every (re)join, so screens can reload missed history.
   onJoined: (chatId: string) => void;
+  // Messages of all the user's chats, not only joined ones.
   onMessage: (message: Message) => void;
+  onRead: (event: ReadEvent) => void;
   onPresence: (event: PresenceEvent) => void;
   onError: (error: string) => void;
   // Web only: a single-use ticket for the websocket URL, so the session
@@ -145,6 +153,7 @@ export class RealtimeConnection {
         userId?: string;
         online?: boolean;
         lastSeenAt?: string | null;
+        lastReadAt?: string;
         error?: string;
       };
 
@@ -173,6 +182,16 @@ export class RealtimeConnection {
         case "message":
           if (data.message) {
             this.handlers.onMessage(data.message);
+          }
+          break;
+
+        case "read":
+          if (data.chatId && data.userId && data.lastReadAt) {
+            this.handlers.onRead({
+              chatId: data.chatId,
+              userId: data.userId,
+              lastReadAt: data.lastReadAt,
+            });
           }
           break;
 

@@ -21,7 +21,10 @@ type WSMessage struct {
 	Error    string   `json:"error,omitempty"`
 	Username string   `json:"username,omitempty"`
 
-	// "presence" events.
+	// "read" events.
+	LastReadAt *string `json:"lastReadAt,omitempty"`
+
+	// "presence" events (and "read": who has read).
 	UserID     string  `json:"userId,omitempty"`
 	Online     bool    `json:"online,omitempty"`
 	LastSeenAt *string `json:"lastSeenAt,omitempty"`

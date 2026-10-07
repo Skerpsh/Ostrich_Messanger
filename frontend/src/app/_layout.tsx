@@ -10,6 +10,7 @@ import { StatusBar } from "expo-status-bar";
 import * as SystemUI from "expo-system-ui";
 import { Platform } from "react-native";
 import { AuthProvider, useAuth } from "@/context/auth";
+import { ChatsProvider } from "@/context/chats";
 import { RealtimeProvider } from "@/context/realtime";
 import { AppThemeProvider, useAppTheme } from "@/context/theme";
 
@@ -21,7 +22,9 @@ export default function RootLayout() {
     <AppThemeProvider>
       <AuthProvider>
         <RealtimeProvider>
-          <RootNavigator />
+          <ChatsProvider>
+            <RootNavigator />
+          </ChatsProvider>
         </RealtimeProvider>
       </AuthProvider>
     </AppThemeProvider>
@@ -48,9 +51,9 @@ function RootNavigator() {
       document.documentElement.style.colorScheme = mode;
       document
         .querySelector('meta[name="theme-color"]')
-        ?.setAttribute("content", colors.bg);
+        ?.setAttribute("content", colors.surface);
     }
-  }, [mode, colors.bg]);
+  }, [mode, colors.bg, colors.surface]);
 
   if (state.status === "loading") {
     return null;
@@ -68,10 +71,10 @@ function RootNavigator() {
         colors: {
           ...baseTheme.colors,
           background: colors.bg,
-          card: colors.header,
+          card: colors.surface,
           text: colors.text,
           border: colors.line,
-          primary: colors.text,
+          primary: colors.accent,
         },
       }}
     >
@@ -94,10 +97,7 @@ function RootNavigator() {
         </Stack.Protected>
 
         <Stack.Protected guard={signedIn && !mustSaveOstrichId}>
-          <Stack.Screen name="chats/index" />
-          <Stack.Screen name="chats/[chatId]" />
-          <Stack.Screen name="chats/new" options={{ presentation: "modal" }} />
-          <Stack.Screen name="settings" options={{ presentation: "modal" }} />
+          <Stack.Screen name="chats" />
         </Stack.Protected>
       </Stack>
     </ThemeProvider>

@@ -8,10 +8,14 @@ mobile apps; styled after the Ostrich website.
 - Log in with @username + password + OstrichID; create account (session is
   remembered: Keychain/Keystore on mobile, localStorage on web)
 - OstrichID shown once after registration, until the user confirms saving it
-- Chats list with your @username (tap to copy), pull to refresh
-- New chat by the other user's exact @username
-- Settings: change username (once per 28 days), change password, log out of
-  all devices
+- Phones: chats list and chat on separate screens. Wide screens (tablets,
+  desktop browsers, Mac): chats list on the left, open chat on the right
+- Chats list with last message, unread counters (live), search; start a
+  chat by typing someone's exact @username into the search
+- Chat: grouped bubbles, day separators, "unread messages" line, read
+  receipts (✓ sent, ✓✓ read), multi-line composer (Enter sends on web)
+- Settings: theme (system / light / dark), change username (once per 28
+  days), change password, log out of all devices
 - Chat with live updates over WebSocket, automatic reconnect
 - Light / dark theme (same switch as on the website)
 
@@ -24,14 +28,15 @@ src/
     index.tsx       welcome screen
     login.tsx, register.tsx
     ostrich-id.tsx  new OstrichID, shown once until saved
-    settings.tsx    username, password, log out everywhere
-    chats/index.tsx chats list
-    chats/new.tsx   new chat
+    chats/_layout.tsx  one or two columns depending on screen width
+    chats/index.tsx    chats list (phones) / "select a chat" (wide)
     chats/[chatId].tsx chat
+    chats/new.tsx      new chat
+    chats/settings.tsx theme, username, password, log out everywhere
   components/       UI building blocks (button, text field, header, …)
-  context/          auth session and theme
+  context/          auth session, chats list + unread counts, realtime, theme
   lib/              API client, websocket, storage, formatting
-  theme/colors.ts   website palette
+  theme/colors.ts   palette (monochrome + accent), wide-layout breakpoint
 assets/images/      app icon, splash, favicon
 ```
 

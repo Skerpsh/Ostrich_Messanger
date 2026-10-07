@@ -6,9 +6,6 @@ import { db } from "./database.js";
 // All realtime state is kept in memory, so the backend must run as a
 // single process.
 
-// Sockets subscribed to each chat (receive its messages).
-const chatSockets = new Map<string, Set<WebSocket>>();
-
 // Open sockets of each connected user. A user is online while they have
 // at least one.
 const userSockets = new Map<string, Set<WebSocket>>();
@@ -150,50 +147,26 @@ export function consumeTicket(ticket: string): string | null {
   return entry.tokenHash;
 }
 
-// --- chat subscriptions ---
+// --- chat events ---
 
-export function subscribe(chatId: string, socket: WebSocket) {
-  let sockets = chatSockets.get(chatId);
-
-  if (!sockets) {
-    sockets = new Set();
-    chatSockets.set(chatId, sockets);
-  }
-
-  sockets.add(socket);
-}
-
-export function unsubscribe(chatId: string, socket: WebSocket) {
-  const sockets = chatSockets.get(chatId);
-
-  if (!sockets) {
-    return;
-  }
-
-  sockets.delete(socket);
-
-  if (sockets.size === 0) {
-    chatSockets.delete(chatId);
-  }
-}
-
-export function unsubscribeAll(socket: WebSocket) {
-  for (const chatId of [...chatSockets.keys()]) {
-    unsubscribe(chatId, socket);
-  }
-}
-
-export function broadcast(chatId: string, payload: unknown) {
-  const sockets = chatSockets.get(chatId);
-
-  if (!sockets) {
-    return;
-  }
+// Sends to every open socket of the chat's members (all their devices),
+// not only to clients that have the chat open: chat lists need new
+// messages and read positions to keep last messages and unread counts
+// up to date.
+export async function sendToChatMembers(chatId: string, payload: unknown) {
+  const result = await db.query(
+    `
+    SELECT user_id
+    FROM chat_members
+    WHERE chat_id = $1
+    `,
+    [chatId],
+  );
 
   const data = JSON.stringify(payload);
 
-  for (const socket of sockets) {
-    send(socket, data);
+  for (const row of result.rows) {
+    sendToUser(row.user_id, data);
   }
 }
 

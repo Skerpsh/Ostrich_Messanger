@@ -141,7 +141,19 @@ export default async function chatsRoutes(server: FastifyInstance) {
           chats.updated_at,
           users.id AS user_id,
           users.username,
-          users.last_seen_at
+          users.last_seen_at,
+          other_member.last_read_at AS peer_last_read_at,
+          last_message.id AS last_message_id,
+          last_message.sender_id AS last_message_sender_id,
+          last_message.content AS last_message_content,
+          last_message.created_at AS last_message_created_at,
+          (
+            SELECT COUNT(*)::int
+            FROM messages
+            WHERE messages.chat_id = chats.id
+              AND messages.sender_id <> $1
+              AND messages.created_at > chat_members.last_read_at
+          ) AS unread_count
         FROM chats
         JOIN chat_members
           ON chat_members.chat_id = chats.id
@@ -150,6 +162,14 @@ export default async function chatsRoutes(server: FastifyInstance) {
          AND other_member.user_id <> $1
         JOIN users
           ON users.id = other_member.user_id
+        LEFT JOIN LATERAL (
+          -- Only the start is needed for the preview.
+          SELECT id, sender_id, LEFT(content, 200) AS content, created_at
+          FROM messages
+          WHERE messages.chat_id = chats.id
+          ORDER BY created_at DESC, id DESC
+          LIMIT 1
+        ) last_message ON TRUE
         WHERE chat_members.user_id = $1
         ORDER BY chats.updated_at DESC, chats.id
         `,
@@ -157,10 +177,26 @@ export default async function chatsRoutes(server: FastifyInstance) {
       );
 
       return {
-        chats: result.rows.map((chat) => ({
-          ...chat,
-          online: isOnline(chat.user_id),
-        })),
+        chats: result.rows.map(
+          ({
+            last_message_id,
+            last_message_sender_id,
+            last_message_content,
+            last_message_created_at,
+            ...chat
+          }) => ({
+            ...chat,
+            online: isOnline(chat.user_id),
+            last_message: last_message_id
+              ? {
+                  id: last_message_id,
+                  sender_id: last_message_sender_id,
+                  content: last_message_content,
+                  created_at: last_message_created_at,
+                }
+              : null,
+          }),
+        ),
       };
     },
   );

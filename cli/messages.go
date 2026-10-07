@@ -18,6 +18,15 @@ type MessagesResponse struct {
 	Messages []Message `json:"messages"`
 }
 
+// markRead marks the chat read up to and including the message.
+func markRead(token, chatID, messageID string) error {
+	path := "/api/chats/" + url.PathEscape(chatID) + "/read"
+
+	return authorizedPost(token, path, map[string]string{
+		"message_id": messageID,
+	}, nil)
+}
+
 func getMessages(token string, chatID string) ([]Message, error) {
 	var result MessagesResponse
 

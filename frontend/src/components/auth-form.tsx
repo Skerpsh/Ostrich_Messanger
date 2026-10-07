@@ -88,7 +88,11 @@ export default function AuthForm({ mode }: AuthFormProps) {
 
   return (
     <View style={styles.screen}>
-      <AppHeader onBack={router.canGoBack() ? router.back : undefined} />
+      <AppHeader
+        brand
+        title="Ostrich"
+        onBack={router.canGoBack() ? router.back : undefined}
+      />
 
       <KeyboardAvoidingView
         style={styles.screen}
@@ -106,8 +110,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
               styles.card,
               {
                 backgroundColor: colors.panel,
-                borderColor: colors.line,
-                shadowColor: colors.shadow,
+                boxShadow: `0 10px 30px ${colors.shadow}`,
               },
             ]}
           >
@@ -239,26 +242,18 @@ const styles = StyleSheet.create({
     maxWidth: 440,
     alignSelf: "center",
     borderRadius: radius.card,
-    borderWidth: 1,
     padding: 24,
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 1,
-    shadowRadius: 30,
   },
 
   eyebrow: {
-    fontSize: 12,
-    letterSpacing: 3,
-    textTransform: "uppercase",
-    marginBottom: 10,
+    fontSize: 14,
+    marginBottom: 4,
   },
 
   title: {
-    fontSize: 30,
+    fontSize: 28,
     fontWeight: "700",
-    letterSpacing: 2,
-    textTransform: "uppercase",
-    marginBottom: 24,
+    marginBottom: 22,
   },
 
   fields: {

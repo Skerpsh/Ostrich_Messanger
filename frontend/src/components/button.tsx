@@ -1,19 +1,23 @@
+import Ionicons from "@expo/vector-icons/Ionicons";
 import {
   ActivityIndicator,
   Pressable,
   StyleSheet,
   Text,
+  View,
   type PressableProps,
   type StyleProp,
   type ViewStyle,
 } from "react-native";
 import { useAppTheme } from "@/context/theme";
 import { radius } from "@/theme/colors";
+import type { IconName } from "./icon-button";
 
 type ButtonProps = Omit<PressableProps, "style"> & {
   title: string;
-  // "primary" is the website's .btn; "secondary" is its outlined variant.
-  variant?: "primary" | "secondary";
+  // "primary": accent fill; "secondary": outlined; "danger": red text.
+  variant?: "primary" | "secondary" | "danger";
+  icon?: IconName;
   loading?: boolean;
   style?: StyleProp<ViewStyle>;
 };
@@ -21,6 +25,7 @@ type ButtonProps = Omit<PressableProps, "style"> & {
 export default function Button({
   title,
   variant = "primary",
+  icon,
   loading = false,
   disabled,
   style,
@@ -28,65 +33,72 @@ export default function Button({
 }: ButtonProps) {
   const { colors } = useAppTheme();
 
-  const filled = variant === "primary";
   const inactive = disabled || loading;
+  const textColor =
+    variant === "primary"
+      ? colors.onAccent
+      : variant === "danger"
+        ? colors.danger
+        : colors.text;
 
   return (
     <Pressable
       accessibilityRole="button"
+      accessibilityState={{ disabled: Boolean(inactive) }}
       disabled={inactive}
-      style={({ pressed, hovered }) => {
-        // Like .btn:hover on the website: colors invert.
-        const inverted = !inactive && (pressed || hovered) ? !filled : filled;
-
-        return [
-          styles.button,
-          {
-            backgroundColor: inverted ? colors.buttonBg : "transparent",
-            borderColor: filled || inverted ? colors.buttonBg : colors.text,
-            shadowColor: colors.shadow,
-          },
-          inactive && styles.inactive,
-          style,
-        ];
-      }}
+      style={({ pressed, hovered }) => [
+        styles.button,
+        variant === "primary"
+          ? { backgroundColor: colors.accent, borderColor: colors.accent }
+          : {
+              backgroundColor:
+                (pressed || hovered) && !inactive ? colors.hover : "transparent",
+              borderColor: variant === "danger" ? colors.danger : colors.line,
+            },
+        variant === "primary" && (pressed || hovered) && !inactive && styles.primaryActive,
+        inactive && styles.inactive,
+        style,
+      ]}
       {...props}
     >
-      {({ pressed, hovered }) => {
-        const inverted = !inactive && (pressed || hovered) ? !filled : filled;
-        const textColor = inverted ? colors.buttonText : colors.text;
-
-        return loading ? (
-          <ActivityIndicator color={textColor} />
-        ) : (
+      {loading ? (
+        <ActivityIndicator color={textColor} />
+      ) : (
+        <View style={styles.content}>
+          {icon ? <Ionicons name={icon} size={18} color={textColor} /> : null}
           <Text style={[styles.text, { color: textColor }]}>{title}</Text>
-        );
-      }}
+        </View>
+      )}
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
   button: {
-    minHeight: 52,
-    paddingHorizontal: 35,
-    borderRadius: radius.pill,
-    borderWidth: 2,
+    minHeight: 48,
+    paddingHorizontal: 24,
+    borderRadius: radius.input,
+    borderWidth: 1,
     justifyContent: "center",
     alignItems: "center",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 1,
-    shadowRadius: 8,
+  },
+
+  primaryActive: {
+    opacity: 0.88,
   },
 
   inactive: {
-    opacity: 0.5,
+    opacity: 0.45,
+  },
+
+  content: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
 
   text: {
     fontSize: 16,
     fontWeight: "600",
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
   },
 });

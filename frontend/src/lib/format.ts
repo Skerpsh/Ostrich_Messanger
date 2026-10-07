@@ -75,3 +75,46 @@ export function formatPresence(
 
   return `last seen ${formatChatDate(presence.lastSeenAt)} at ${time}`;
 }
+
+const MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+// Day separators in a chat: "Today", "Yesterday", "12 September",
+// "12 September 2025".
+export function formatDayLabel(iso: string) {
+  const date = new Date(iso);
+  const now = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(now.getDate() - 1);
+
+  if (date.toDateString() === now.toDateString()) {
+    return "Today";
+  }
+
+  if (date.toDateString() === yesterday.toDateString()) {
+    return "Yesterday";
+  }
+
+  const dayMonth = `${date.getDate()} ${MONTHS[date.getMonth()]}`;
+
+  return date.getFullYear() === now.getFullYear()
+    ? dayMonth
+    : `${dayMonth} ${date.getFullYear()}`;
+}
+
+// One line of a message for previews (chats list).
+export function previewText(content: string) {
+  return content.replace(/\s+/g, " ").trim();
+}

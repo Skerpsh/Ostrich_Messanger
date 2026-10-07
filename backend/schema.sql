@@ -57,6 +57,11 @@ CREATE TABLE IF NOT EXISTS chat_members (
 
 CREATE INDEX IF NOT EXISTS chat_members_user_id_idx ON chat_members (user_id);
 
+-- How far the member has read the chat: messages created after it are
+-- unread. Existing members start with everything read.
+ALTER TABLE chat_members
+  ADD COLUMN IF NOT EXISTS last_read_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
 CREATE TABLE IF NOT EXISTS messages (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   chat_id    UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,

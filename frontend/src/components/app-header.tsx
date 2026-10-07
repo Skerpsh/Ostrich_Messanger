@@ -1,24 +1,35 @@
 import type { ReactNode } from "react";
 import { Image } from "expo-image";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAppTheme } from "@/context/theme";
+import IconButton from "./icon-button";
 import ThemeToggle from "./theme-toggle";
 
 type AppHeaderProps = {
-  // Shows a back arrow instead of the logo.
+  // Shows a back arrow on the left.
   onBack?: () => void;
+  // Shows a close (×) button on the left instead, for panes and dialogs.
+  onClose?: () => void;
+  // Custom content left of the title, e.g. an avatar.
+  left?: ReactNode;
   title?: string;
   subtitle?: ReactNode;
   right?: ReactNode;
+  // The Ostrich logo and light/dark switch, for signed-out screens.
+  brand?: boolean;
 };
 
-// The website's black top bar.
+export const HEADER_HEIGHT = 60;
+
 export default function AppHeader({
   onBack,
+  onClose,
+  left,
   title,
   subtitle,
   right,
+  brand = false,
 }: AppHeaderProps) {
   const { colors } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -28,35 +39,36 @@ export default function AppHeader({
       style={[
         styles.header,
         {
-          paddingTop: insets.top + 12,
-          backgroundColor: colors.header,
+          paddingTop: insets.top,
+          height: HEADER_HEIGHT + insets.top,
+          backgroundColor: colors.surface,
           borderBottomColor: colors.line,
         },
       ]}
     >
       {onBack ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Back"
-          onPress={onBack}
-          hitSlop={12}
-          style={styles.back}
-        >
-          <Text style={[styles.backIcon, { color: colors.text }]}>‹</Text>
-        </Pressable>
-      ) : (
+        <IconButton icon="chevron-back" label="Back" onPress={onBack} size={24} />
+      ) : onClose ? (
+        <IconButton icon="close" label="Close" onPress={onClose} size={24} />
+      ) : null}
+
+      {brand ? (
         <Image
           source={require("@/assets/images/Giuseppe.png")}
           style={styles.logo}
           contentFit="contain"
           accessibilityLabel="Ostrich"
         />
-      )}
+      ) : null}
+
+      {left}
 
       <View style={styles.titles}>
-        <Text numberOfLines={1} style={[styles.title, { color: colors.text }]}>
-          {title ?? "OSTRICH"}
-        </Text>
+        {title ? (
+          <Text numberOfLines={1} style={[styles.title, { color: colors.text }]}>
+            {title}
+          </Text>
+        ) : null}
         {subtitle ? (
           <Text
             numberOfLines={1}
@@ -69,7 +81,7 @@ export default function AppHeader({
 
       <View style={styles.actions}>
         {right}
-        <ThemeToggle />
+        {brand ? <ThemeToggle /> : null}
       </View>
     </View>
   );
@@ -79,48 +91,36 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
+    gap: 10,
+    paddingHorizontal: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
 
   logo: {
-    width: 40,
-    height: 40,
-  },
-
-  back: {
-    width: 40,
-    height: 40,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  backIcon: {
-    fontSize: 36,
-    lineHeight: 40,
-    fontWeight: "300",
+    width: 34,
+    height: 34,
+    marginLeft: 4,
   },
 
   titles: {
     flex: 1,
+    justifyContent: "center",
+    paddingHorizontal: 2,
   },
 
   title: {
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: "700",
-    letterSpacing: 2,
   },
 
   subtitle: {
-    marginTop: 2,
-    fontSize: 12,
+    marginTop: 1,
+    fontSize: 13,
   },
 
   actions: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
+    gap: 4,
   },
 });

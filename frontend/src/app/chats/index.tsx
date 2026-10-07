@@ -1,238 +1,67 @@
-import { useCallback, useState } from "react";
+import { useState } from "react";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import * as Clipboard from "expo-clipboard";
-import { useFocusEffect, useRouter } from "expo-router";
-import {
-  ActivityIndicator,
-  FlatList,
-  Platform,
-  Pressable,
-  RefreshControl,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-import AppHeader from "@/components/app-header";
-import Avatar from "@/components/avatar";
-import Button from "@/components/button";
-import { useAuth, useCurrentUser } from "@/context/auth";
-import { useRealtime } from "@/context/realtime";
+import { Image } from "expo-image";
+import { Pressable, StyleSheet, Text, View } from "react-native";
+import ChatList from "@/components/chat-list";
+import { useCurrentUser } from "@/context/auth";
 import { useAppTheme } from "@/context/theme";
-import { getChats, type Chat } from "@/lib/api";
-import { formatChatDate, formatPresence } from "@/lib/format";
-import { rememberPeer } from "@/lib/peers";
-import { useMinuteTick } from "@/lib/use-minute-tick";
+import { useIsWide } from "@/lib/layout";
 import { radius } from "@/theme/colors";
 
 export default function ChatsScreen() {
-  const router = useRouter();
+  const wide = useIsWide();
+
+  // Wide screens show the list in the sidebar; this is the empty right pane.
+  return wide ? <NoChatSelected /> : <ChatList />;
+}
+
+function NoChatSelected() {
   const { colors } = useAppTheme();
-  const insets = useSafeAreaInsets();
-  const { withToken, signOut } = useAuth();
   const user = useCurrentUser();
-  const { presence, seedPresence } = useRealtime();
-  useMinuteTick();
-
-  const [chats, setChats] = useState<Chat[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
   const [copied, setCopied] = useState(false);
-
-  const load = useCallback(async () => {
-    try {
-      const loaded = await withToken(getChats);
-
-      seedPresence(
-        loaded.map((chat) => ({
-          userId: chat.user_id,
-          presence: { online: chat.online, lastSeenAt: chat.last_seen_at },
-        })),
-      );
-      setChats(loaded);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load chats");
-    }
-  }, [withToken, seedPresence]);
-
-  // Reload whenever the screen is shown, e.g. after leaving a chat.
-  useFocusEffect(
-    useCallback(() => {
-      load();
-    }, [load]),
-  );
-
-  const refresh = async () => {
-    setRefreshing(true);
-    await load();
-    setRefreshing(false);
-  };
-
-  const copyUsername = async () => {
-    if (!user) {
-      return;
-    }
-
-    await Clipboard.setStringAsync(`@${user.username}`);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-
-  const openChat = (chat: Chat) => {
-    rememberPeer(chat.id, {
-      userId: chat.user_id,
-      username: chat.username,
-    });
-    router.push({ pathname: "/chats/[chatId]", params: { chatId: chat.id } });
-  };
 
   if (!user) {
     return null;
   }
 
+  const copy = async () => {
+    await Clipboard.setStringAsync(`@${user.username}`);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
   return (
     <View style={styles.screen}>
-      <AppHeader
-        subtitle={`@${user.username}`}
-        right={
-          <>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => router.push("/settings")}
-              hitSlop={8}
-            >
-              <Text style={[styles.headerLink, { color: colors.text }]}>
-                Settings
-              </Text>
-            </Pressable>
-            <Pressable accessibilityRole="button" onPress={signOut} hitSlop={8}>
-              <Text style={[styles.headerLink, { color: colors.text }]}>
-                Log out
-              </Text>
-            </Pressable>
-          </>
-        }
+      <Image
+        source={require("@/assets/images/Giuseppe.png")}
+        style={styles.logo}
+        contentFit="contain"
+        accessibilityLabel="Ostrich"
       />
-
-      <FlatList
-        data={chats ?? []}
-        keyExtractor={(chat) => chat.id}
-        contentContainerStyle={[
-          styles.list,
-          { paddingBottom: insets.bottom + 100 },
+      <Text style={[styles.title, { color: colors.text }]}>
+        Select a chat to start messaging
+      </Text>
+      <Text style={[styles.text, { color: colors.muted }]}>
+        Friends can find you by your username:
+      </Text>
+      <Pressable
+        onPress={copy}
+        accessibilityRole="button"
+        accessibilityLabel="Copy your username"
+        style={({ hovered }) => [
+          styles.chip,
+          { backgroundColor: colors.accentSoft },
+          hovered && styles.chipHover,
         ]}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={refresh}
-            tintColor={colors.text}
-          />
-        }
-        ListHeaderComponent={
-          <View style={styles.listHeader}>
-            <Pressable
-              onPress={copyUsername}
-              accessibilityRole="button"
-              accessibilityLabel="Copy your username"
-              style={[
-                styles.idCard,
-                { backgroundColor: colors.panel, borderColor: colors.line },
-              ]}
-            >
-              <Text style={[styles.eyebrow, { color: colors.muted }]}>
-                Your username
-              </Text>
-              <Text selectable style={[styles.username, { color: colors.text }]}>
-                @{user.username}
-              </Text>
-              <Text style={[styles.hint, { color: colors.muted }]}>
-                {copied ? "Copied!" : "Tap to copy · share it to start a chat"}
-              </Text>
-            </Pressable>
-
-            <View style={styles.sectionRow}>
-              <Text style={[styles.section, { color: colors.text }]}>
-                Chats
-              </Text>
-              {Platform.OS === "web" ? (
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={refresh}
-                  hitSlop={8}
-                >
-                  <Text style={[styles.headerLink, { color: colors.muted }]}>
-                    {refreshing ? "Refreshing…" : "Refresh"}
-                  </Text>
-                </Pressable>
-              ) : null}
-            </View>
-
-            {error ? (
-              <Text style={[styles.error, { color: colors.danger }]}>
-                {error}
-              </Text>
-            ) : null}
-          </View>
-        }
-        ListEmptyComponent={
-          chats === null ? (
-            <ActivityIndicator color={colors.text} style={styles.empty} />
-          ) : (
-            <Text style={[styles.emptyText, { color: colors.muted }]}>
-              No chats yet.{"\n"}Start one with a friend&apos;s @username.
-            </Text>
-          )
-        }
-        renderItem={({ item }) => {
-          const peer = presence[item.user_id];
-
-          return (
-            <Pressable
-              onPress={() => openChat(item)}
-              style={({ pressed, hovered }) => [
-                styles.chat,
-                {
-                  backgroundColor:
-                    pressed || hovered ? colors.panelAlt : colors.panel,
-                  borderColor: colors.line,
-                },
-              ]}
-            >
-              <Avatar name={item.username} online={peer?.online} />
-              <View style={styles.chatText}>
-                <Text
-                  numberOfLines={1}
-                  style={[styles.chatName, { color: colors.text }]}
-                >
-                  {item.username}
-                </Text>
-                <Text
-                  numberOfLines={1}
-                  style={[styles.chatMeta, { color: colors.muted }]}
-                >
-                  {peer ? (
-                    <Text style={peer.online && { color: colors.online }}>
-                      {formatPresence(peer)}
-                      {"  ·  "}
-                    </Text>
-                  ) : null}
-                  @{item.username}
-                </Text>
-              </View>
-              <Text style={[styles.chatMeta, { color: colors.muted }]}>
-                {formatChatDate(item.updated_at)}
-              </Text>
-            </Pressable>
-          );
-        }}
-      />
-
-      <View
-        style={[styles.fabArea, { paddingBottom: insets.bottom + 20 }]}
-        pointerEvents="box-none"
       >
-        <Button title="New chat" onPress={() => router.push("/chats/new")} />
-      </View>
+        <Text style={[styles.chipText, { color: colors.accent }]}>
+          {copied ? "Copied!" : `@${user.username}`}
+        </Text>
+        {copied ? null : (
+          <Ionicons name="copy-outline" size={15} color={colors.accent} />
+        )}
+      </Pressable>
     </View>
   );
 }
@@ -240,106 +69,43 @@ export default function ChatsScreen() {
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
-  },
-
-  headerLink: {
-    fontSize: 14,
-    fontWeight: "600",
-  },
-
-  list: {
-    width: "100%",
-    maxWidth: 720,
-    alignSelf: "center",
-    padding: 16,
+    alignItems: "center",
+    justifyContent: "center",
     gap: 10,
+    padding: 24,
   },
 
-  listHeader: {
-    gap: 16,
+  logo: {
+    width: 96,
+    height: 96,
+    opacity: 0.9,
     marginBottom: 6,
   },
 
-  idCard: {
-    borderRadius: radius.card,
-    borderWidth: 1,
-    padding: 20,
-    gap: 6,
-  },
-
-  eyebrow: {
-    fontSize: 12,
-    letterSpacing: 3,
-    textTransform: "uppercase",
-  },
-
-  username: {
-    fontSize: 24,
+  title: {
+    fontSize: 18,
     fontWeight: "700",
-    letterSpacing: 1,
-    fontVariant: ["tabular-nums"],
   },
 
-  hint: {
-    fontSize: 13,
-  },
-
-  sectionRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: 8,
-  },
-
-  section: {
-    fontSize: 22,
-    fontWeight: "700",
-    letterSpacing: 1,
-  },
-
-  error: {
+  text: {
     fontSize: 14,
   },
 
-  empty: {
-    marginTop: 40,
-  },
-
-  emptyText: {
-    marginTop: 40,
-    textAlign: "center",
-    fontSize: 15,
-    lineHeight: 24,
-  },
-
-  chat: {
+  chip: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 14,
-    padding: 14,
-    borderRadius: radius.card,
-    borderWidth: 1,
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: radius.pill,
   },
 
-  chatText: {
-    flex: 1,
-    gap: 3,
+  chipHover: {
+    opacity: 0.85,
   },
 
-  chatName: {
-    fontSize: 17,
+  chipText: {
+    fontSize: 15,
     fontWeight: "600",
-  },
-
-  chatMeta: {
-    fontSize: 13,
-  },
-
-  fabArea: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    alignItems: "center",
   },
 });
