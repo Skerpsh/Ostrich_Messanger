@@ -3,8 +3,9 @@ import { db, isChatMember } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
 import {
   createMessage,
+  JOIN_REPLY,
   MAX_MESSAGE_LENGTH,
-  takeMessageSlot,
+  MESSAGE_COLUMNS,
 } from "../messages.js";
 import { broadcast } from "../realtime.js";
 
@@ -22,7 +23,10 @@ type ChatParams = {
 
 export default async function messagesRoutes(server: FastifyInstance) {
   // SEND MESSAGE
-  server.post<{ Params: ChatParams; Body: { content: string } }>(
+  server.post<{
+    Params: ChatParams;
+    Body: { content: string; reply_to_id?: string };
+  }>(
     "/api/chats/:chatId/messages",
     {
       preHandler: authenticate,
@@ -36,6 +40,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
               type: "string",
               maxLength: MAX_MESSAGE_LENGTH,
             },
+            reply_to_id: { type: "string", format: "uuid" },
           },
         },
       },
@@ -50,13 +55,12 @@ export default async function messagesRoutes(server: FastifyInstance) {
         });
       }
 
-      if (!takeMessageSlot(request.user.id)) {
-        return reply.status(429).send({
-          error: "Too many messages, slow down",
-        });
-      }
-
-      const message = await createMessage(chatId, request.user.id, content);
+      const message = await createMessage(
+        chatId,
+        request.user.id,
+        content,
+        request.body.reply_to_id,
+      );
 
       if (!message) {
         return reply.status(403).send({
@@ -109,17 +113,11 @@ export default async function messagesRoutes(server: FastifyInstance) {
         `
         SELECT *
         FROM (
-          SELECT
-            messages.id,
-            messages.chat_id,
-            messages.sender_id,
-            users.username AS sender_username,
-            messages.content,
-            messages.created_at
-          FROM messages
-          JOIN users ON users.id = messages.sender_id
-          WHERE messages.chat_id = $1
-          ORDER BY messages.created_at DESC, messages.id DESC
+          SELECT ${MESSAGE_COLUMNS}
+          FROM messages m
+          ${JOIN_REPLY}
+          WHERE m.chat_id = $1
+          ORDER BY m.created_at DESC, m.id DESC
           LIMIT $2
         ) latest
         ORDER BY created_at ASC, id ASC

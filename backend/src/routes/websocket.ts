@@ -6,11 +6,7 @@ import {
   getBearerToken,
   hashToken,
 } from "../middleware/auth.js";
-import {
-  createMessage,
-  MAX_MESSAGE_LENGTH,
-  takeMessageSlot,
-} from "../messages.js";
+import { createMessage, MAX_MESSAGE_LENGTH } from "../messages.js";
 import {
   broadcast,
   chatPresence,
@@ -37,10 +33,12 @@ type ClientMessage = {
   type?: unknown;
   chatId?: unknown;
   content?: unknown;
+  replyToId?: unknown;
 };
 
 // Protocol (JSON messages):
-//   client -> server: join {chatId}, leave {chatId}, message {chatId, content}
+//   client -> server: join {chatId}, leave {chatId},
+//                     message {chatId, content, replyToId?}
 //   server -> client: connected, joined {chatId}, left {chatId},
 //                     message {message}, presence {userId, online, lastSeenAt},
 //                     error {error}
@@ -102,14 +100,14 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
       const sendError = (error: string) => send({ type: "error", error });
 
-      const validChatId = (chatId: unknown): chatId is string =>
-        typeof chatId === "string" && UUID_RE.test(chatId);
+      const isUuid = (value: unknown): value is string =>
+        typeof value === "string" && UUID_RE.test(value);
 
       const handle = async (data: ClientMessage) => {
         if (data.type === "join") {
           const { chatId } = data;
 
-          if (!validChatId(chatId)) {
+          if (!isUuid(chatId)) {
             sendError("Valid chatId is required");
             return;
           }
@@ -138,7 +136,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
         if (data.type === "leave") {
           const { chatId } = data;
 
-          if (!validChatId(chatId)) {
+          if (!isUuid(chatId)) {
             sendError("Valid chatId is required");
             return;
           }
@@ -153,7 +151,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
           const content =
             typeof data.content === "string" ? data.content.trim() : "";
 
-          if (!validChatId(chatId) || content.length === 0) {
+          if (!isUuid(chatId) || content.length === 0) {
             sendError("chatId and content are required");
             return;
           }
@@ -165,12 +163,13 @@ export default async function websocketRoutes(server: FastifyInstance) {
             return;
           }
 
-          if (!takeMessageSlot(user.id)) {
-            sendError("Too many messages, slow down");
-            return;
-          }
-
-          const message = await createMessage(chatId, user.id, content);
+          const replyToId = isUuid(data.replyToId) ? data.replyToId : null;
+          const message = await createMessage(
+            chatId,
+            user.id,
+            content,
+            replyToId,
+          );
 
           if (!message) {
             sendError("You are not a member of this chat");

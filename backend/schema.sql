@@ -56,3 +56,8 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS messages_chat_id_created_at_idx
   ON messages (chat_id, created_at);
+
+-- The message this one replies to; NULL if it is not a reply or the
+-- original was deleted.
+ALTER TABLE messages
+  ADD COLUMN IF NOT EXISTS reply_to_id UUID REFERENCES messages(id) ON DELETE SET NULL;

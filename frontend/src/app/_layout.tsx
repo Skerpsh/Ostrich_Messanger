@@ -8,7 +8,8 @@ import {
 } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import * as SystemUI from "expo-system-ui";
-import { Platform } from "react-native";
+import { Platform, StyleSheet } from "react-native";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { AuthProvider, useAuth } from "@/context/auth";
 import { RealtimeProvider } from "@/context/realtime";
 import { AppThemeProvider, useAppTheme } from "@/context/theme";
@@ -18,13 +19,16 @@ SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
   return (
-    <AppThemeProvider>
-      <AuthProvider>
-        <RealtimeProvider>
-          <RootNavigator />
-        </RealtimeProvider>
-      </AuthProvider>
-    </AppThemeProvider>
+    // Gestures (e.g. swipe to reply) need the root view.
+    <GestureHandlerRootView style={styles.root}>
+      <AppThemeProvider>
+        <AuthProvider>
+          <RealtimeProvider>
+            <RootNavigator />
+          </RealtimeProvider>
+        </AuthProvider>
+      </AppThemeProvider>
+    </GestureHandlerRootView>
   );
 }
 
@@ -96,3 +100,9 @@ function RootNavigator() {
     </ThemeProvider>
   );
 }
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
+});
