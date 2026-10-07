@@ -42,8 +42,8 @@ type chatState struct {
 	sending  bool
 
 	// Choosing a message with the keyboard (↑ in an empty composer).
-	selecting bool
-	selected  int
+	selecting  bool
+	selectedID string
 
 	// Lines scrolled up from the newest message.
 	scroll int
@@ -147,8 +147,6 @@ func sortMessages(messages []Message) {
 
 // mergeMessages adds messages (or newer versions of them), oldest first.
 func (c *chatState) mergeMessages(messages []Message) {
-	selectedID := c.selectedID()
-
 	for _, message := range messages {
 		if i := c.indexOf(message.ID); i >= 0 {
 			c.messages[i] = message
@@ -158,7 +156,6 @@ func (c *chatState) mergeMessages(messages []Message) {
 	}
 
 	sortMessages(c.messages)
-	c.reselect(selectedID)
 }
 
 // reconcile merges a freshly loaded page of the newest history: messages
@@ -182,7 +179,6 @@ func (c *chatState) reconcile(page []Message, complete bool) {
 
 	from := parseTime(&page[0].CreatedAt)
 	to := parseTime(&page[len(page)-1].CreatedAt)
-	selectedID := c.selectedID()
 	kept := make([]Message, 0, len(c.messages))
 
 	for _, message := range c.messages {
@@ -197,33 +193,11 @@ func (c *chatState) reconcile(page []Message, complete bool) {
 
 	c.messages = kept
 	c.mergeMessages(page)
-	c.reselect(selectedID)
-}
-
-func (c *chatState) selectedID() string {
-	if c.selecting && c.selected < len(c.messages) {
-		return c.messages[c.selected].ID
-	}
-
-	return ""
-}
-
-// reselect keeps the selection on the same message after changes.
-func (c *chatState) reselect(messageID string) {
-	if !c.selecting {
-		return
-	}
-
-	if i := c.indexOf(messageID); i >= 0 {
-		c.selected = i
-	} else if c.selected >= len(c.messages) {
-		c.resetSelection()
-	}
 }
 
 func (c *chatState) resetSelection() {
 	c.selecting = false
-	c.selected = 0
+	c.selectedID = ""
 }
 
 func (c *chatState) removeMessage(messageID string) {
@@ -233,7 +207,6 @@ func (c *chatState) removeMessage(messageID string) {
 		return
 	}
 
-	selectedID := c.selectedID()
 	c.messages = append(c.messages[:i], c.messages[i+1:]...)
 
 	if c.editing != nil && c.editing.ID == messageID {
@@ -245,11 +218,16 @@ func (c *chatState) removeMessage(messageID string) {
 		c.replyTo = nil
 	}
 
-	if selectedID == messageID {
-		c.selected = min(c.selected, len(c.messages)-1)
-		c.selecting = c.selected >= 0
-	} else {
-		c.reselect(selectedID)
+	// The selection moves to the message before.
+	if c.selectedID == messageID {
+		switch {
+		case i > 0:
+			c.selectedID = c.messages[i-1].ID
+		case len(c.messages) > 0:
+			c.selectedID = c.messages[0].ID
+		default:
+			c.resetSelection()
+		}
 	}
 }
 
@@ -276,7 +254,10 @@ func (m *model) openChat(chat Chat) tea.Cmd {
 	m.safetyOpen = false
 
 	if m.chat == nil || m.chat.id != chat.ID {
+		m.saveDraft()
 		m.chat = newChatState(chat.ID, m.pal, m.paneWidth())
+		m.chat.composer.SetValue(m.drafts[chat.ID])
+		m.chat.fitComposer()
 		m.send(map[string]string{"type": "join", "chatId": chat.ID})
 	}
 
@@ -286,7 +267,25 @@ func (m *model) openChat(chat Chat) tea.Cmd {
 	return tea.Batch(m.chat.composer.Focus(), m.loadHistory(chat.ID, ""))
 }
 
+// saveDraft keeps the open chat's unsent text for when it is opened
+// again.
+func (m *model) saveDraft() {
+	c := m.chat
+
+	if c == nil || c.editing != nil || m.drafts == nil {
+		return
+	}
+
+	if text := c.composer.Value(); strings.TrimSpace(text) != "" {
+		m.drafts[c.id] = text
+	} else {
+		delete(m.drafts, c.id)
+	}
+}
+
 func (m *model) closeChat() {
+	m.saveDraft()
+
 	if m.chat != nil {
 		m.send(map[string]string{"type": "leave", "chatId": m.chat.id})
 	}
@@ -415,11 +414,11 @@ func (m *model) updateChatKey(msg tea.KeyMsg) tea.Cmd {
 	case "enter":
 		return m.sendComposer(chat)
 	case "up":
-		if c.composer.Value() == "" && len(c.messages) > 0 {
+		if shown := m.shown(); c.composer.Value() == "" && len(shown) > 0 {
 			c.selecting = true
-			c.selected = len(c.messages) - 1
+			c.selectedID = shown[len(shown)-1].ID
 			c.composer.Blur()
-			m.scrollToMessage(c.selected)
+			m.scrollToMessage(len(shown) - 1)
 
 			return nil
 		}
@@ -458,29 +457,41 @@ func (m *model) updateChatKey(msg tea.KeyMsg) tea.Cmd {
 func (m *model) updateSelectingKey(msg tea.KeyMsg, chat Chat) tea.Cmd {
 	c := m.chat
 
-	if c.selected >= len(c.messages) {
-		m.stopSelecting()
-		return nil
+	shown := m.shown()
+	index := m.shownIndex(c.selectedID)
+
+	if index < 0 {
+		return m.stopSelecting()
 	}
 
-	message := c.messages[c.selected]
+	message := shown[index]
 	own := message.SenderID == m.user.User.ID
+
+	// A message still on its way has only its menu.
+	if m.outgoingState(message.ID) != "" {
+		switch msg.String() {
+		case "r", "e", "d", "1", "2", "3", "4", "5", "6", "7", "8":
+			m.openMenu(m.messageMenu(chat, message))
+			return nil
+		}
+	}
 
 	switch key := msg.String(); key {
 	case "up", "k":
-		if c.selected > 0 {
-			c.selected--
+		if index > 0 {
+			index--
+			c.selectedID = shown[index].ID
 		}
 
-		m.scrollToMessage(c.selected)
+		m.scrollToMessage(index)
 
-		if c.selected == 0 {
+		if index == 0 {
 			return m.maybeLoadOlderAtTop()
 		}
 	case "down", "j":
-		if c.selected < len(c.messages)-1 {
-			c.selected++
-			m.scrollToMessage(c.selected)
+		if index < len(shown)-1 {
+			c.selectedID = shown[index+1].ID
+			m.scrollToMessage(index + 1)
 		} else {
 			return m.stopSelecting()
 		}
@@ -570,9 +581,11 @@ func (m model) matches() []string {
 	chat, _ := m.chatByID(c.id)
 	var ids []string
 
-	for i := len(c.messages) - 1; i >= 0; i-- {
-		message := c.messages[i]
-		text, _ := m.decrypt(chat, message.ID, message.SenderID, message.Content)
+	shown := m.shown()
+
+	for i := len(shown) - 1; i >= 0; i-- {
+		message := shown[i]
+		text := plainText(m.show(chat, message.ID, message.SenderID, message.Content).text)
 
 		if strings.Contains(strings.ToLower(text), query) {
 			ids = append(ids, message.ID)
@@ -628,7 +641,7 @@ func (m *model) goToMatch(n int) tea.Cmd {
 
 	c.matchIndex = max(n, 0)
 	c.highlight = matches[c.matchIndex]
-	m.scrollToMessage(c.indexOf(c.highlight))
+	m.scrollToMessage(m.shownIndex(c.highlight))
 
 	return nil
 }
@@ -652,10 +665,8 @@ func (m *model) sendComposer(chat Chat) tea.Cmd {
 		return nil
 	}
 
-	token := m.user.Token
 	me := m.user.User.ID
 	editing := c.editing
-	replyTo := c.replyTo
 
 	messageID := newMessageID()
 
@@ -663,40 +674,43 @@ func (m *model) sendComposer(chat Chat) tea.Cmd {
 		messageID = editing.ID
 	}
 
-	encrypted, err := encryptMessage(text, messageID, me, m.user.PrivateKey, chat.PublicKey, chat.ID)
+	encrypted, err := encryptMessage(encodePayload(payload{text: text}), messageID, me, m.user.PrivateKey, chat.PublicKey, chat.ID)
 	if err != nil {
 		c.err = err.Error()
 		return nil
 	}
 
-	c.sending = true
 	c.err = ""
 	c.composer.SetValue("")
 	c.fitComposer()
 	c.editing = nil
-	c.replyTo = nil
 
 	if editing == nil {
+		// Shown at once and sent in the background (again later if
+		// offline).
+		var replyTo *ReplyPreview
+
+		if c.replyTo != nil {
+			replyTo = m.replyPreview(chat, *c.replyTo)
+		}
+
+		c.replyTo = nil
 		// Own messages end the "unread" part.
 		c.unreadAfter = nil
 		c.scroll = 0
+		delete(m.drafts, chat.ID)
+
+		return m.queueMessage(chat.ID, messageID, encrypted, replyTo)
 	}
 
+	token := m.user.Token
+	c.sending = true
+	// The draft comes back after editing.
+	c.composer.SetValue(m.drafts[chat.ID])
+	c.fitComposer()
+
 	return task(func() func(*model) tea.Cmd {
-		var message Message
-		var err error
-
-		if editing != nil {
-			message, err = editMessage(token, chat.ID, messageID, encrypted)
-		} else {
-			replyID := ""
-
-			if replyTo != nil {
-				replyID = replyTo.ID
-			}
-
-			message, err = sendMessage(token, chat.ID, messageID, encrypted, replyID)
-		}
+		message, err := editMessage(token, chat.ID, messageID, encrypted)
 
 		return func(m *model) tea.Cmd {
 			c := m.chat
@@ -708,14 +722,6 @@ func (m *model) sendComposer(chat Chat) tea.Cmd {
 			c.sending = false
 
 			if err != nil {
-				// Give the text back unless something new was typed.
-				if c.composer.Value() == "" {
-					c.composer.SetValue(text)
-					c.fitComposer()
-					c.editing = editing
-					c.replyTo = replyTo
-				}
-
 				if err == errSessionExpired {
 					return m.fail(err)
 				}
@@ -732,6 +738,24 @@ func (m *model) sendComposer(chat Chat) tea.Cmd {
 	})
 }
 
+// replyPreview is the quote of a reply, as the server would send it.
+func (m model) replyPreview(chat Chat, message Message) *ReplyPreview {
+	reply := &ReplyPreview{
+		ID:                message.ID,
+		SenderID:          message.SenderID,
+		SenderUsername:    chat.Username,
+		SenderIsDeveloper: chat.IsDeveloper,
+		Content:           message.Content,
+	}
+
+	if message.SenderID == m.user.User.ID {
+		reply.SenderUsername = m.user.User.Username
+		reply.SenderIsDeveloper = m.user.User.IsDeveloper
+	}
+
+	return reply
+}
+
 func (m *model) startReply(message Message) tea.Cmd {
 	c := m.chat
 	c.resetSelection()
@@ -743,12 +767,12 @@ func (m *model) startReply(message Message) tea.Cmd {
 }
 
 func (m *model) startEdit(chat Chat, message Message) tea.Cmd {
+	m.saveDraft()
 	c := m.chat
 	c.resetSelection()
 	c.replyTo = nil
 	c.editing = &message
-	text, _ := m.decrypt(chat, message.ID, message.SenderID, message.Content)
-	c.composer.SetValue(text)
+	c.composer.SetValue(m.show(chat, message.ID, message.SenderID, message.Content).text)
 	c.fitComposer()
 	c.scroll = 0
 
@@ -757,12 +781,12 @@ func (m *model) startEdit(chat Chat, message Message) tea.Cmd {
 
 func (m *model) cancelEdit() {
 	m.chat.editing = nil
-	m.chat.composer.SetValue("")
+	m.chat.composer.SetValue(m.drafts[m.chat.id])
 	m.chat.fitComposer()
 }
 
 func (m *model) copyMessage(chat Chat, message Message) tea.Cmd {
-	text, _ := m.decrypt(chat, message.ID, message.SenderID, message.Content)
+	text := m.show(chat, message.ID, message.SenderID, message.Content).text
 
 	if err := copyText(text); err != nil {
 		return m.showToast(err.Error(), true)
@@ -841,10 +865,10 @@ func (m *model) deleteMessage(message Message) tea.Cmd {
 // showQuoted jumps to the message a reply quotes, if it is loaded.
 func (m *model) showQuoted(messageID string) tea.Cmd {
 	c := m.chat
-	i := c.indexOf(messageID)
+	i := m.shownIndex(messageID)
 
 	if i < 0 {
-		return m.showToast("The quoted message is not loaded", true)
+		return m.showToast("The message is not loaded: scroll up", true)
 	}
 
 	c.highlight = messageID
@@ -991,6 +1015,14 @@ func (m *model) updateChatMouse(msg tea.MouseMsg) tea.Cmd {
 		c.replyTo = nil
 
 		return nil
+	case clicked(msg, "chat:pinned"):
+		if chat.PinnedMessage != nil {
+			return m.showQuoted(chat.PinnedMessage.ID)
+		}
+
+		return nil
+	case clicked(msg, "chat:unpin"):
+		return m.pinMessage(chat, "")
 	case clicked(msg, "chat:unblock"):
 		return m.setBlocked(chat, false)
 	case clicked(msg, "chat:send"):
@@ -1036,14 +1068,14 @@ func (m *model) updateChatMouse(msg tea.MouseMsg) tea.Cmd {
 		}
 
 		m.focus = paneChat
-		message := c.messages[meta.message]
+		message := m.shown()[meta.message]
 
 		if meta.quote && msg.Button == tea.MouseButtonLeft && message.ReplyTo != nil {
 			return m.showQuoted(message.ReplyTo.ID)
 		}
 
 		c.selecting = true
-		c.selected = meta.message
+		c.selectedID = message.ID
 		c.composer.Blur()
 		m.openMenu(m.messageMenu(chat, message))
 	}
@@ -1123,7 +1155,7 @@ func (m model) unreadLine() int {
 		return -1
 	}
 
-	for i, message := range c.messages {
+	for i, message := range m.shown() {
 		if message.SenderID != m.user.User.ID && later(&message.CreatedAt, c.unreadAfter) {
 			return i
 		}

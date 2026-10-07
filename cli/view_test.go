@@ -77,6 +77,16 @@ func testModel(t *testing.T, w, h int, mode string) model {
 	messages[1].EditedAt = &edited
 	messages = append(messages, Message{ID: newMessageID(), ChatID: v.ChatID, SenderID: v.SenderID, Content: "plain text from the server", CreatedAt: at(-1)})
 
+	// Formatting, and a forwarded message.
+	for _, text := range []string{
+		"**bold** and _italic_, `code` and a link https://example.org/page, ~~gone~~",
+		encodePayload(payload{text: "forwarded text", forwardedFrom: "carol"}),
+	} {
+		id := newMessageID()
+		messages = append(messages, Message{ID: id, ChatID: v.ChatID, SenderID: v.SenderID,
+			Content: encrypt(text, id, v.SenderID, privateA, v.PublicKeyB), CreatedAt: at(0)})
+	}
+
 	last := messages[len(messages)-1]
 	m.chats = []Chat{
 		{ID: v.ChatID, UserID: v.SenderID, Username: "alice", PublicKey: v.PublicKeyA, Pinned: true, UnreadCount: 3,
@@ -84,7 +94,9 @@ func testModel(t *testing.T, w, h int, mode string) model {
 			PeerLastReadAt: &edited, Created: at(-100)},
 		{ID: newMessageID(), UserID: newMessageID(), Username: "carol", Muted: true, IsDeveloper: true, Created: at(-3000)},
 	}
+	m.chats[0].PinnedMessage = &LastMessage{ID: messages[0].ID, SenderID: messages[0].SenderID, Content: messages[0].Content, CreatedAt: messages[0].CreatedAt}
 	m.chatsLoaded = true
+	m.drafts = map[string]string{m.chats[1].ID: "half-written"}
 	m.presence[v.SenderID] = presence{online: true}
 
 	m.chat = newChatState(v.ChatID, m.pal, m.paneWidth())
@@ -93,6 +105,11 @@ func testModel(t *testing.T, w, h int, mode string) model {
 	m.chat.unreadAfter = &messages[1].CreatedAt
 	m.focus = paneChat
 	m.layoutInputs()
+
+	// One message on its way, one refused.
+	_ = m.queueMessage(v.ChatID, newMessageID(), encrypt("on its way", "x", me, privateB, v.PublicKeyA), nil)
+	_ = m.queueMessage(v.ChatID, newMessageID(), "e2:AAAA", nil)
+	m.outgoing[1].state, m.outgoing[1].err = "failed", "Something went wrong"
 
 	return m
 }
@@ -122,7 +139,7 @@ func TestViews(t *testing.T) {
 
 			checkView(t, name+" chat", m.View(), w, h)
 
-			m.chat.selecting, m.chat.selected = true, 1
+			m.chat.selecting, m.chat.selectedID = true, m.chat.messages[1].ID
 			m.openMenu(m.messageMenu(m.chats[0], m.chat.messages[1]))
 			checkView(t, name+" message menu", m.View(), w, h)
 			m.menu = nil
@@ -226,8 +243,15 @@ func TestKeys(t *testing.T) {
 		}
 
 		// ↑ in the empty composer chooses messages; the menu replies.
-		m = press(m, "up", "up", "up", "up", "down")
-		check(m.chat.selecting && m.chat.selected == 1, "message 1 selected")
+		// ↑ until the oldest, then ↓ to the second.
+		m = press(m, "up")
+
+		for i := 0; i < 20; i++ {
+			m = press(m, "up")
+		}
+
+		m = press(m, "down")
+		check(m.chat.selecting && m.chat.selectedID == m.chat.messages[1].ID, "message 1 selected")
 		m = press(m, "enter")
 		check(m.menu != nil, "message menu open")
 		m = press(m, "enter")
@@ -236,7 +260,13 @@ func TestKeys(t *testing.T) {
 		check(m.chat.replyTo == nil, "reply cancelled")
 
 		// e edits an own message (1 is own).
-		m = press(m, "up", "up", "up", "e")
+		m = press(m, "up")
+
+		for m.chat.selectedID != m.chat.messages[1].ID {
+			m = press(m, "up")
+		}
+
+		m = press(m, "e")
 		check(m.chat.editing != nil && m.chat.composer.Value() != "", "editing")
 		m = press(m, "esc")
 		check(m.chat.editing == nil && m.chat.composer.Value() == "", "edit cancelled")
@@ -403,5 +433,79 @@ func TestNewerVersion(t *testing.T) {
 		if got := newerVersion(c.a, c.b); got != c.newer {
 			t.Errorf("newerVersion(%q, %q) = %v", c.a, c.b, got)
 		}
+	}
+}
+
+func TestOutboxForwardDrafts(t *testing.T) {
+	m := testModel(t, 120, 34, "dark")
+	chat := m.chats[0]
+	first := m.chat.messages[0]
+
+	// Pending messages are shown after the history.
+	shown := m.shown()
+
+	if len(shown) != len(m.chat.messages)+2 || m.outgoingState(shown[len(shown)-1].ID) != "failed" {
+		t.Fatalf("pending not shown: %d", len(shown))
+	}
+
+	// Their menu: send again, copy, delete.
+	menu := m.messageMenu(chat, shown[len(shown)-1])
+
+	if menu.reactionsFor != nil || menu.items[0].label[:10] != "Send again" {
+		t.Fatalf("pending menu: %+v", menu.items)
+	}
+
+	m.openMenu(menu)
+	_ = m.chooseItem(len(menu.items) - 1)
+
+	if len(m.outgoing) != 1 {
+		t.Fatalf("not dropped: %d", len(m.outgoing))
+	}
+
+	// A draft stays with its chat.
+	m.chat.composer.SetValue("unsent words")
+	m.closeChat()
+
+	if m.drafts[chat.ID] != "unsent words" {
+		t.Fatalf("draft %q", m.drafts[chat.ID])
+	}
+
+	_ = m.openChat(chat)
+
+	if m.chat.composer.Value() != "unsent words" {
+		t.Fatalf("draft not restored: %q", m.chat.composer.Value())
+	}
+
+	// Forwarding: the message goes to the outbox of the other chat, which
+	// opens, encrypted for it with whom it comes from.
+	target := m.chats[0]
+	target.ID, target.Username = newMessageID(), "erin"
+	m.chats = append(m.chats, target)
+	_ = m.forward(chat, first, target)
+
+	last := m.outgoing[len(m.outgoing)-1].message
+
+	if last.ChatID != target.ID || m.chat.id != target.ID {
+		t.Fatalf("forward went to %s, open %s", last.ChatID, m.chat.id)
+	}
+
+	if got := m.show(target, last.ID, last.SenderID, last.Content); got.forwardedFrom != "alice" || got.text != "Hi! How are you?" {
+		t.Fatalf("forwarded: %+v", got)
+	}
+}
+
+func TestMarkupLines(t *testing.T) {
+	p := newPalette(themeDark, defaultAccent)
+
+	lines := markupLines("**bold** words that wrap around and a https://example.org/very/long/link", 20, p.text, p.bg, p.panelAlt, p.accent)
+
+	for _, line := range lines {
+		if w := ansi.StringWidth(line); w > 20 {
+			t.Errorf("line of %d cells: %q", w, ansi.Strip(line))
+		}
+	}
+
+	if got := ansi.Strip(strings.Join(lines, "\n")); !strings.Contains(got, "bold words") || strings.Contains(got, "**") {
+		t.Errorf("text: %q", got)
 	}
 }

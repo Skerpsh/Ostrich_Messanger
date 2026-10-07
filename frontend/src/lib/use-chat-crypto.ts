@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useCurrentUser, usePrivateKey } from "@/context/auth";
 import type { Chat } from "./api";
+import { decodePayload, type Payload } from "./payload";
 import {
   decryptMessage,
   encryptMessage,
@@ -9,6 +10,24 @@ import {
   type Decrypted,
   type MessageRef,
 } from "./crypto";
+
+// A message as shown: its decryption status and what it carries.
+export type Shown = Decrypted & Omit<Payload, "text">;
+
+// Decrypts a message and reads its payload (text, forward); text that was
+// not encrypted is shown as it is.
+export function showMessage(
+  message: MessageRef & { content: string },
+  privateKey: Uint8Array | null,
+  peerKey: string | null,
+  chatId: string,
+): Shown {
+  const decrypted = decryptMessage(message, privateKey, peerKey, chatId);
+
+  return decrypted.status === "ok"
+    ? { ...decrypted, ...decodePayload(decrypted.text) }
+    : decrypted;
+}
 
 // Encrypting and decrypting a chat's messages with this device's keys.
 export function useChatCrypto(chat: Chat | null) {
@@ -23,11 +42,11 @@ export function useChatCrypto(chat: Chat | null) {
       // Can messages be sent? Not until the other member has keys.
       canEncrypt: Boolean(privateKey && peerKey && ownId),
 
-      decrypt: (message: MessageRef & { content: string }): Decrypted =>
-        decryptMessage(message, privateKey, peerKey, chatId),
+      decrypt: (message: MessageRef & { content: string }): Shown =>
+        showMessage(message, privateKey, peerKey, chatId),
 
-      // `messageId`: a new id (newMessageId()) or, for an edit, the
-      // message's own.
+      // `text`: the encoded payload (encodePayload). `messageId`: a new id
+      // (newMessageId()) or, for an edit, the message's own.
       encrypt: (text: string, messageId: string) => {
         if (!privateKey || !peerKey || !ownId) {
           throw new Error(

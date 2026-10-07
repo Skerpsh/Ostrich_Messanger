@@ -14,7 +14,9 @@ import { useAuth } from "@/context/auth";
 import { useRealtime } from "@/context/realtime";
 import * as api from "@/lib/api";
 import type { Chat, Message } from "@/lib/api";
-import { decryptMessage } from "@/lib/crypto";
+import { plainText } from "@/lib/markup";
+import { getItem, removeItem, setItem } from "@/lib/storage";
+import { showMessage } from "@/lib/use-chat-crypto";
 import {
   showMessageNotification,
   syncPushToken,
@@ -50,7 +52,18 @@ type ChatsContextValue = {
   // Deletes the chat for both members ("everyone") or clears it for this
   // user ("me").
   removeChat: (chatId: string, scope: "everyone" | "me") => Promise<void>;
+  // Unsent text per chat, kept on this device.
+  drafts: Record<string, string>;
+  setDraft: (chatId: string, text: string) => void;
+  // Pins a message for both members (null unpins).
+  pinMessage: (chatId: string, messageId: string | null) => Promise<void>;
 };
+
+// Drafts are kept per account: an index of the chats that have one, and
+// one entry per chat (secure storage on the phones limits value sizes).
+const draftIndexKey = (userId: string) => `ostrich-drafts-${userId}`;
+const draftKey = (userId: string, chatId: string) => `ostrich-draft-${userId}-${chatId}`;
+const DRAFT_SAVE_DELAY_MS = 500;
 
 const ChatsContext = createContext<ChatsContextValue | null>(null);
 
@@ -112,12 +125,15 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const visible = useAppVisible();
 
-  // Another account: forget the previous one's chats.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+
+  // Another account: forget the previous one's chats and drafts.
   const [chatsOwner, setChatsOwner] = useState(userId);
 
   if (chatsOwner !== userId) {
     setChatsOwner(userId);
     setChats(null);
+    setDrafts({});
   }
 
   const chatsRef = useLatest(chats);
@@ -139,6 +155,102 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
       setError(e instanceof Error ? e.message : "Failed to load chats");
     }
   }, [withToken, seedPresence]);
+
+  // Drafts: loaded with the account; removed from the device when it logs
+  // out (they are plain text).
+  const draftTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+
+  useEffect(() => {
+    if (!userId) {
+      return;
+    }
+
+    let current = true;
+    const timers = draftTimers.current;
+
+    (async () => {
+      const index: string[] = JSON.parse((await getItem(draftIndexKey(userId))) ?? "[]");
+      const loaded: Record<string, string> = {};
+
+      for (const chatId of index) {
+        const text = await getItem(draftKey(userId, chatId));
+
+        if (text) {
+          loaded[chatId] = text;
+        }
+      }
+
+      if (current) {
+        setDrafts(loaded);
+      }
+    })().catch(() => {});
+
+    return () => {
+      current = false;
+
+      for (const timer of timers.values()) {
+        clearTimeout(timer);
+      }
+
+      timers.clear();
+    };
+  }, [userId]);
+
+  const previousUser = useRef(userId);
+
+  useEffect(() => {
+    const previous = previousUser.current;
+    previousUser.current = userId;
+
+    if (previous && !userId) {
+      (async () => {
+        const index: string[] = JSON.parse((await getItem(draftIndexKey(previous))) ?? "[]");
+        await Promise.all(index.map((chatId) => removeItem(draftKey(previous, chatId))));
+        await removeItem(draftIndexKey(previous));
+      })().catch(() => {});
+    }
+  }, [userId]);
+
+  const draftsRef = useLatest(drafts);
+
+  const setDraft = useCallback(
+    (chatId: string, text: string) => {
+      if (!userId || (draftsRef.current[chatId] ?? "") === text) {
+        return;
+      }
+
+      setDrafts((current) => {
+        const next = { ...current };
+
+        if (text.trim()) {
+          next[chatId] = text;
+        } else {
+          delete next[chatId];
+        }
+
+        return next;
+      });
+
+      const timers = draftTimers.current;
+      clearTimeout(timers.get(chatId));
+      timers.set(
+        chatId,
+        setTimeout(() => {
+          timers.delete(chatId);
+          const all = draftsRef.current;
+          const index = Object.keys(all);
+
+          (all[chatId]
+            ? setItem(draftKey(userId, chatId), all[chatId])
+            : removeItem(draftKey(userId, chatId))
+          )
+            .then(() => setItem(draftIndexKey(userId), JSON.stringify(index)))
+            .catch(() => {});
+        }, DRAFT_SAVE_DELAY_MS),
+      );
+    },
+    [userId, draftsRef],
+  );
 
   // Reloading after every (re)connect also picks up what was missed.
   useEffect(() => {
@@ -249,12 +361,9 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
             if (chat && !chat.muted && !viewing) {
               showMessageNotification(
                 `@${chat.username}`,
-                decryptMessage(
-                  message,
-                  privateKeyRef.current,
-                  chat.public_key,
-                  chat.id,
-                ).text,
+                plainText(
+                  showMessage(message, privateKeyRef.current, chat.public_key, chat.id).text,
+                ),
                 chat.id,
                 openChat,
               );
@@ -320,6 +429,15 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
               break;
 
             case "message_deleted":
+              // A deleted pinned message is unpinned.
+              setChats((current) =>
+                current?.map((chat) =>
+                  chat.pinned_message?.id === event.messageId
+                    ? { ...chat, pinned_message: null }
+                    : chat,
+                ) ?? current,
+              );
+
               // The preview may need the message before it.
               if (
                 chatsRef.current?.some(
@@ -328,6 +446,14 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
               ) {
                 reload();
               }
+              break;
+
+            case "pinned_message":
+              setChats((current) =>
+                current?.map((chat) =>
+                  chat.id === event.chatId ? { ...chat, pinned_message: event.message } : chat,
+                ) ?? current,
+              );
               break;
 
             case "chat_deleted":
@@ -425,6 +551,18 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
     [withToken],
   );
 
+  const pinMessage = useCallback(
+    async (chatId: string, messageId: string | null) => {
+      const message = await withToken((token) => api.setPinnedMessage(token, chatId, messageId));
+      setChats(
+        (current) =>
+          current?.map((chat) => (chat.id === chatId ? { ...chat, pinned_message: message } : chat)) ??
+          current,
+      );
+    },
+    [withToken],
+  );
+
   // Mobile: register for push notifications; tapping one opens its chat.
   useEffect(() => {
     if (userId && privateKey) {
@@ -489,6 +627,9 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
         typing,
         updateChatSettings,
         removeChat,
+        drafts,
+        setDraft,
+        pinMessage,
       }}
     >
       {children}

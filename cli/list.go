@@ -530,14 +530,17 @@ func (m model) listRowView(r listRow, cursor bool, w int) string {
 	}
 
 	var preview string
+	draft := m.drafts[chat.ID]
 
 	switch {
 	case m.isTyping(chat.ID):
 		preview = seg("typing…", p.accent, bg)
+	case draft != "" && (m.chat == nil || m.chat.id != chat.ID):
+		preview = seg("Draft: ", p.danger, bg) + seg(oneLine(sanitize(draft)), p.muted, bg)
 	case last == nil:
 		preview = italic("No messages yet", p.muted, bg)
 	default:
-		text := oneLine(sanitize(m.textOf(chat, last.ID, last.SenderID, last.Content)))
+		text := oneLine(sanitize(plainText(m.textOf(chat, last.ID, last.SenderID, last.Content))))
 
 		if own {
 			preview = seg("You: ", p.textSoft, bg)

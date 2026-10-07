@@ -46,6 +46,8 @@ export type Chat = {
   online: boolean;
   last_seen_at: string | null;
   last_message: LastMessage | null;
+  // The message pinned at the top of the chat (for both members).
+  pinned_message: LastMessage | null;
   // Messages from the other user the signed-in user has not read.
   unread_count: number;
   // Up to when the other user has read the chat (for read receipts).
@@ -351,6 +353,7 @@ export async function createChat(token: string, username: string) {
     online: user.online ?? false,
     last_seen_at: user.last_seen_at ?? null,
     last_message: null,
+    pinned_message: null,
     unread_count: 0,
     peer_last_read_at: null,
     pinned: false,
@@ -431,6 +434,17 @@ export function deleteChat(token: string, chatId: string, scope: "everyone" | "m
     `/api/chats/${encodeURIComponent(chatId)}?for=${scope}`,
     { token },
   );
+}
+
+// Pins a message at the top of the chat for both members; null unpins.
+export async function setPinnedMessage(token: string, chatId: string, messageId: string | null) {
+  const { message } = await request<{ message: LastMessage | null }>(
+    "PUT",
+    `/api/chats/${encodeURIComponent(chatId)}/pinned-message`,
+    { token, body: { message_id: messageId } },
+  );
+
+  return message;
 }
 
 export function setBlocked(token: string, userId: string, blocked: boolean) {

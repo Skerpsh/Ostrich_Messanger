@@ -27,6 +27,7 @@ import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
 import type { Chat } from "@/lib/api";
 import { formatChatDate, previewText } from "@/lib/format";
+import { plainText } from "@/lib/markup";
 import { useIsWide } from "@/lib/layout";
 import { useChatCrypto } from "@/lib/use-chat-crypto";
 import { useMinuteTick } from "@/lib/use-minute-tick";
@@ -42,7 +43,7 @@ export default function ChatList() {
   const insets = useSafeAreaInsets();
   const wide = useIsWide();
   const user = useCurrentUser();
-  const { chats, error, reload, typing, updateChatSettings, removeChat } = useChats();
+  const { chats, error, reload, typing, updateChatSettings, removeChat, drafts } = useChats();
   const startChatWith = useStartChat();
   // The chat whose actions are shown (long press / right click).
   const [menuFor, setMenuFor] = useState<Chat | null>(null);
@@ -304,6 +305,8 @@ export default function ChatList() {
             ownId={user.id}
             online={status === "online" && Boolean(presence[item.user_id]?.online)}
             typing={typing.has(item.id)}
+            // Not for the chat on screen: its draft is in the input.
+            draft={item.id === selectedId ? undefined : drafts[item.id]}
             selected={wide && item.id === selectedId}
             onPress={() => openChat(item)}
             onMenu={() => setMenuFor(item)}
@@ -363,6 +366,7 @@ function ChatRow({
   ownId,
   online,
   typing,
+  draft,
   selected,
   onPress,
   onMenu,
@@ -371,6 +375,8 @@ function ChatRow({
   ownId: string;
   online: boolean;
   typing: boolean;
+  // Unsent text of the chat.
+  draft?: string;
   selected: boolean;
   onPress: () => void;
   // Long press / right click: pin, mute, delete.
@@ -444,10 +450,15 @@ function ChatRow({
           <Text numberOfLines={1} style={[styles.preview, { color: colors.muted }]}>
             {typing ? (
               <Text style={{ color: colors.accent }}>typing…</Text>
+            ) : draft ? (
+              <>
+                <Text style={{ color: colors.danger }}>Draft: </Text>
+                {previewText(draft)}
+              </>
             ) : last ? (
               <>
                 {own ? <Text style={{ color: colors.textSoft }}>You: </Text> : null}
-                {previewText(decrypt(last).text)}
+                {previewText(plainText(decrypt(last).text))}
               </>
             ) : (
               <Text style={styles.italic}>No messages yet</Text>

@@ -103,6 +103,19 @@ func deleteChat(token, chatID, scope string) error {
 	return authorizedJSON(token, http.MethodDelete, chatPath(chatID)+"?for="+scope, nil, nil)
 }
 
+// setPinnedMessage pins a message at the top of the chat for both
+// members; "" unpins.
+func setPinnedMessage(token, chatID, messageID string) error {
+	var value any = messageID
+
+	if messageID == "" {
+		value = nil
+	}
+
+	return authorizedJSON(token, http.MethodPut, chatPath(chatID)+"/pinned-message",
+		map[string]any{"message_id": value}, nil)
+}
+
 func setBlocked(token, userID string, blocked bool) error {
 	method := http.MethodDelete
 

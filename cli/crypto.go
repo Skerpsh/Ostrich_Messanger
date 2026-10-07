@@ -330,13 +330,13 @@ func (m model) decrypt(chat Chat, messageID, senderID, content string) (string, 
 // textOf is the decrypted text for previews and quotes; text that is not
 // encrypted is marked.
 func (m model) textOf(chat Chat, messageID, senderID, content string) string {
-	text, status := m.decrypt(chat, messageID, senderID, content)
+	shown := m.show(chat, messageID, senderID, content)
 
-	if status == decryptPlain {
-		return "[not encrypted] " + text
+	if shown.status == decryptPlain {
+		return "[not encrypted] " + shown.text
 	}
 
-	return text
+	return shown.text
 }
 
 // decryptMessage returns the text of an "e2" or "e1" message, or plain

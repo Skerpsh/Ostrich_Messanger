@@ -13,6 +13,7 @@ import * as SystemUI from "expo-system-ui";
 import { Platform } from "react-native";
 import { AuthProvider, useAuth } from "@/context/auth";
 import { ChatsProvider } from "@/context/chats";
+import { OutboxProvider } from "@/context/outbox";
 import { RealtimeProvider } from "@/context/realtime";
 import { AppThemeProvider, useAppTheme } from "@/context/theme";
 
@@ -25,7 +26,9 @@ export default function RootLayout() {
       <AuthProvider>
         <RealtimeProvider>
           <ChatsProvider>
-            <RootNavigator />
+            <OutboxProvider>
+              <RootNavigator />
+            </OutboxProvider>
           </ChatsProvider>
         </RealtimeProvider>
       </AuthProvider>

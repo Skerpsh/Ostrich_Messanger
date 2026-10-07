@@ -3,11 +3,13 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import { Animated, PanResponder, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import DevBadge from "@/components/dev-badge";
 import IconButton from "@/components/icon-button";
+import MarkupText from "@/components/markup-text";
 import { useAppTheme } from "@/context/theme";
 import type { Reaction } from "@/lib/api";
 import type { MessageRow } from "@/lib/chat-rows";
-import type { Decrypted } from "@/lib/crypto";
 import { formatTime, previewText } from "@/lib/format";
+import { plainText } from "@/lib/markup";
+import type { Shown } from "@/lib/use-chat-crypto";
 import { radius } from "@/theme/colors";
 
 // Phones and tablets (also their browsers): swipe left to reply, long press
@@ -28,6 +30,7 @@ export default function MessageBubble({
   ownId,
   text,
   quoteText,
+  sending,
   highlighted,
   onReply,
   onMenu,
@@ -37,9 +40,11 @@ export default function MessageBubble({
   row: MessageRow;
   read: boolean;
   ownId: string | undefined;
-  // Decrypted text of the message and of the message it replies to.
-  text: Decrypted;
-  quoteText: Decrypted | null;
+  // The decrypted message and the message it replies to.
+  text: Shown;
+  quoteText: Shown | null;
+  // Own message still on its way, or refused by the server.
+  sending?: "sending" | "failed";
   highlighted: boolean;
   onReply: () => void;
   // Long press / right click: the message's actions.
@@ -144,23 +149,34 @@ export default function MessageBubble({
                   quoteText.status === "error" && styles.unreadable,
                 ]}
               >
-                {previewText(quoteText.text)}
+                {previewText(plainText(quoteText.text))}
               </Text>
             </Pressable>
           ) : null}
 
-          <Text
-            // Touch screens copy through the long-press menu; selecting text
-            // there would take over the long press.
-            selectable={!TOUCH_UI}
-            style={[
-              styles.content,
-              { color: textColor },
-              text.status === "error" && styles.unreadable,
-            ]}
-          >
-            {text.text}
-          </Text>
+          {text.forwardedFrom ? (
+            <Text style={[styles.forwarded, { color: own ? colors.onAccent : colors.accent }]}>
+              Forwarded from @{text.forwardedFrom}
+            </Text>
+          ) : null}
+          {text.status === "ok" ? (
+            <MarkupText
+              text={text.text}
+              // Touch screens copy through the long-press menu; selecting
+              // text there would take over the long press.
+              selectable={!TOUCH_UI}
+              style={[styles.content, { color: textColor }]}
+              codeBackground={own ? "rgba(0, 0, 0, 0.16)" : colors.panelAlt}
+              linkColor={own ? colors.onAccent : colors.accent}
+            />
+          ) : (
+            <Text
+              selectable={!TOUCH_UI}
+              style={[styles.content, { color: textColor }, text.status === "error" && styles.unreadable]}
+            >
+              {text.text}
+            </Text>
+          )}
           {message.reactions.length > 0 ? (
             <View style={styles.reactions}>
               {groupReactions(message.reactions, ownId).map(({ emoji, count, mine }) => (
@@ -209,7 +225,11 @@ export default function MessageBubble({
             <Text style={[styles.time, { color: metaColor }]}>
               {formatTime(message.created_at)}
             </Text>
-            {own ? (
+            {sending === "failed" ? (
+              <Text style={[styles.time, styles.failed, { color: metaColor }]}>⚠ Not sent</Text>
+            ) : sending ? (
+              <Ionicons name="time-outline" size={13} color={metaColor} accessibilityLabel="sending" />
+            ) : own ? (
               <Ionicons
                 name={read ? "checkmark-done" : "checkmark"}
                 size={14}
@@ -399,6 +419,17 @@ const styles = StyleSheet.create({
   content: {
     fontSize: 16,
     lineHeight: 22,
+  },
+
+  forwarded: {
+    fontSize: 13,
+    fontWeight: "600",
+    marginBottom: 2,
+  },
+
+  failed: {
+    opacity: 1,
+    fontWeight: "700",
   },
 
   unreadable: {

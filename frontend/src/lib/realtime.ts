@@ -1,5 +1,5 @@
 import { Platform } from "react-native";
-import type { Message, Reaction } from "./api";
+import type { LastMessage, Message, Reaction } from "./api";
 import { WS_URL } from "./config";
 
 const RECONNECT_DELAY_MS = 3_000;
@@ -33,6 +33,7 @@ export type ChatEvent =
   | { type: "message_deleted"; chatId: string; messageId: string }
   | { type: "reactions"; chatId: string; messageId: string; reactions: Reaction[] }
   | { type: "chat_deleted"; chatId: string }
+  | { type: "pinned_message"; chatId: string; message: LastMessage | null }
   | { type: "chats_changed" };
 
 const CHAT_EVENTS = new Set([
@@ -41,6 +42,7 @@ const CHAT_EVENTS = new Set([
   "message_deleted",
   "reactions",
   "chat_deleted",
+  "pinned_message",
   "chats_changed",
 ]);
 

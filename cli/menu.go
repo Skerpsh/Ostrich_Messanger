@@ -51,12 +51,57 @@ func (menu *menuState) focusLabel(label string) {
 
 func (m *model) messageMenu(chat Chat, message Message) *menuState {
 	own := message.SenderID == m.user.User.ID
-	text, _ := m.decrypt(chat, message.ID, message.SenderID, message.Content)
+	shown := m.show(chat, message.ID, message.SenderID, message.Content)
+	title := oneLine(sanitize(plainText(shown.text)))
+	copyItem := menuItem{icon: "⧉", label: "Copy text", action: func(m *model) tea.Cmd { return m.copyMessage(chat, message) }}
+
+	// Still on its way: it can only be sent again, copied or dropped.
+	if state := m.outgoingState(message.ID); state != "" {
+		var items []menuItem
+
+		if state == "failed" {
+			label := "Send again"
+
+			if i := m.findOutgoing(message.ID); i >= 0 && m.outgoing[i].err != "" {
+				label += " (" + m.outgoing[i].err + ")"
+			}
+
+			items = append(items, menuItem{icon: "↻", label: label, action: func(m *model) tea.Cmd {
+				m.chat.resetSelection()
+				return m.attemptSend(message.ID)
+			}})
+		}
+
+		items = append(items, copyItem, menuItem{icon: "🗑", label: "Delete", danger: true, action: func(m *model) tea.Cmd {
+			m.chat.resetSelection()
+			m.dropOutgoing(message.ID)
+
+			return m.chat.composer.Focus()
+		}})
+
+		return &menuState{title: title, items: items, confirming: -1}
+	}
 
 	items := []menuItem{
 		{icon: "↪", label: "Reply", action: func(m *model) tea.Cmd { return m.startReply(message) }},
-		{icon: "⧉", label: "Copy text", action: func(m *model) tea.Cmd { return m.copyMessage(chat, message) }},
+		copyItem,
 	}
+
+	if shown.status == decryptOK {
+		items = append(items, menuItem{icon: "↷", label: "Forward", action: func(m *model) tea.Cmd {
+			m.openMenu(m.forwardMenu(chat, message))
+			return nil
+		}})
+	}
+
+	pinned := chat.PinnedMessage != nil && chat.PinnedMessage.ID == message.ID
+	pinLabel, pinID := "Pin", message.ID
+
+	if pinned {
+		pinLabel, pinID = "Unpin", ""
+	}
+
+	items = append(items, menuItem{icon: "📌", label: pinLabel, action: func(m *model) tea.Cmd { return m.pinMessage(chat, pinID) }})
 
 	if message.ReplyTo != nil {
 		reply := message.ReplyTo.ID
@@ -65,22 +110,83 @@ func (m *model) messageMenu(chat Chat, message Message) *menuState {
 		}})
 	}
 
+	if own && shown.status == decryptOK && shown.forwardedFrom == "" {
+		items = append(items, menuItem{icon: "✎", label: "Edit", action: func(m *model) tea.Cmd { return m.startEdit(chat, message) }})
+	}
+
 	if own {
-		items = append(items,
-			menuItem{icon: "✎", label: "Edit", action: func(m *model) tea.Cmd { return m.startEdit(chat, message) }},
-			menuItem{icon: "🗑", label: "Delete", danger: true, confirm: "Delete for everyone?", action: func(m *model) tea.Cmd {
-				m.chat.resetSelection()
-				return tea.Batch(m.deleteMessage(message), m.chat.composer.Focus())
-			}},
-		)
+		items = append(items, menuItem{icon: "🗑", label: "Delete", danger: true, confirm: "Delete for everyone?", action: func(m *model) tea.Cmd {
+			m.chat.resetSelection()
+			return tea.Batch(m.deleteMessage(message), m.chat.composer.Focus())
+		}})
 	}
 
 	return &menuState{
-		title:        oneLine(sanitize(text)),
+		title:        title,
 		reactionsFor: &message,
 		items:        items,
 		confirming:   -1,
 	}
+}
+
+// forwardMenu: the chats a message can be forwarded to.
+func (m *model) forwardMenu(from Chat, message Message) *menuState {
+	var items []menuItem
+
+	for _, target := range m.chats {
+		if target.Blocked || target.PublicKey == "" {
+			continue
+		}
+
+		target := target
+		items = append(items, menuItem{icon: "→", label: "@" + target.Username, action: func(m *model) tea.Cmd {
+			return m.forward(from, message, target)
+		}})
+	}
+
+	if len(items) == 0 {
+		items = append(items, menuItem{icon: " ", label: "No chats to forward to", action: func(*model) tea.Cmd { return nil }})
+	}
+
+	return &menuState{title: "Forward to…", items: items, confirming: -1}
+}
+
+// forward sends a message's text to another chat, encrypted for it, with
+// whom it comes from; then opens that chat.
+func (m *model) forward(from Chat, message Message, target Chat) tea.Cmd {
+	shown := m.show(from, message.ID, message.SenderID, message.Content)
+	origin := shown.forwardedFrom
+
+	if origin == "" {
+		origin = from.Username
+
+		if message.SenderID == m.user.User.ID {
+			origin = m.user.User.Username
+		}
+	}
+
+	id := newMessageID()
+	content, err := encryptMessage(encodePayload(payload{text: shown.text, forwardedFrom: origin}),
+		id, m.user.User.ID, m.user.PrivateKey, target.PublicKey, target.ID)
+	if err != nil {
+		return m.showToast(err.Error(), true)
+	}
+
+	if m.chat != nil {
+		m.chat.resetSelection()
+	}
+
+	return tea.Batch(m.queueMessage(target.ID, id, content, nil), m.openChat(target))
+}
+
+func (m *model) pinMessage(chat Chat, messageID string) tea.Cmd {
+	if m.chat != nil {
+		m.chat.resetSelection()
+	}
+
+	return m.chatAction(func(token string) error {
+		return setPinnedMessage(token, chat.ID, messageID)
+	}, "")
 }
 
 // chatMenu: the chat's actions; from the chat screen with search, safety
@@ -92,6 +198,12 @@ func (m *model) chatMenu(chat Chat, inChat bool) *menuState {
 		items = append(items, menuItem{icon: "🔍", label: "Search in chat", action: func(m *model) tea.Cmd {
 			return m.openChatSearch()
 		}})
+
+		if chat.PinnedMessage != nil {
+			items = append(items, menuItem{icon: "📌", label: "Unpin message", action: func(m *model) tea.Cmd {
+				return m.pinMessage(chat, "")
+			}})
+		}
 
 		if chat.PublicKey != "" {
 			items = append(items, menuItem{icon: "🛡", label: "Safety code", action: func(m *model) tea.Cmd {
@@ -161,6 +273,10 @@ func (m *model) chooseItem(i int) tea.Cmd {
 func (m *model) chooseReaction(i int) tea.Cmd {
 	message := *m.menu.reactionsFor
 	m.menu = nil
+
+	if m.outgoingState(message.ID) != "" {
+		return nil
+	}
 
 	if m.chat != nil {
 		m.chat.resetSelection()

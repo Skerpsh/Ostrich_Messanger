@@ -103,6 +103,12 @@ type model struct {
 
 	focus pane
 
+	// Own messages on their way (outbox.go).
+	outgoing []outgoing
+
+	// Unsent text per chat (while the CLI runs).
+	drafts map[string]string
+
 	// Overlays over the screen: an actions menu, the safety code.
 	menu       *menuState
 	safetyOpen bool
@@ -218,7 +224,7 @@ func (m *model) applyTheme() {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(tea.SetWindowTitle("Ostrich"), clockTick(), m.initCmd, checkForUpdate())
+	return tea.Batch(tea.SetWindowTitle("Ostrich"), clockTick(), outboxTick(), m.initCmd, checkForUpdate())
 }
 
 // --- background work ---
@@ -287,6 +293,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clockMsg:
 		return m, clockTick()
+
+	case outboxTickMsg:
+		return m, tea.Batch(m.flushOutbox(), outboxTick())
 
 	case toastExpiredMsg:
 		if msg.id == m.toastID {
@@ -478,6 +487,8 @@ func (m *model) startSession(result *LoginResponse) tea.Cmd {
 	m.chat = nil
 	m.settings = nil
 	m.menu = nil
+	m.outgoing = nil
+	m.drafts = map[string]string{}
 	m.focus = paneList
 	m.list = newListState(m.pal)
 	m.list.resize(m.sidebarWidth())
@@ -510,6 +521,8 @@ func (m *model) signOut(notice string) tea.Cmd {
 	m.user = nil
 	m.chats = nil
 	m.chat = nil
+	m.outgoing = nil
+	m.drafts = nil
 	m.settings = nil
 	m.menu = nil
 	m.safetyOpen = false

@@ -16,17 +16,19 @@ import {
   type TextInputKeyPressEventData,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import ActionMenu from "@/components/action-menu";
+import ActionMenu, { type ActionMenuItem } from "@/components/action-menu";
 import AppHeader from "@/components/app-header";
 import Avatar from "@/components/avatar";
 import Button from "@/components/button";
 import DevBadge from "@/components/dev-badge";
+import ForwardPicker from "@/components/forward-picker";
 import IconButton from "@/components/icon-button";
 import MessageBubble from "@/components/message-bubble";
 import SafetyCode from "@/components/safety-code";
 import { noWebOutline } from "@/components/text-field";
-import { useAuth, useCurrentUser } from "@/context/auth";
+import { useAuth, useCurrentUser, usePrivateKey } from "@/context/auth";
 import { useChats } from "@/context/chats";
+import { outgoingAsMessage, useOutbox, type Outgoing } from "@/context/outbox";
 import { usePresence, useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
 import {
@@ -34,12 +36,13 @@ import {
   editMessage,
   getMessages,
   REACTIONS,
+  type Chat,
   type ChatHistory,
-  sendMessage,
   setBlocked,
   setReaction,
   type Message,
   type Reaction,
+  type ReplyPreview,
 } from "@/lib/api";
 import {
   buildRows,
@@ -48,11 +51,13 @@ import {
   time,
   type Row,
 } from "@/lib/chat-rows";
-import { newMessageId, type Decrypted, type MessageRef } from "@/lib/crypto";
+import { encryptMessage, newMessageId, type MessageRef } from "@/lib/crypto";
 import { formatPresence, previewText } from "@/lib/format";
+import { plainText } from "@/lib/markup";
+import { encodePayload } from "@/lib/payload";
 import { acceptPeerKey, checkPeerKey } from "@/lib/known-keys";
 import { useIsWide } from "@/lib/layout";
-import { useChatCrypto } from "@/lib/use-chat-crypto";
+import { useChatCrypto, type Shown } from "@/lib/use-chat-crypto";
 import { useMinuteTick } from "@/lib/use-minute-tick";
 import { radius } from "@/theme/colors";
 
@@ -86,7 +91,12 @@ function ChatScreen({ chatId }: { chatId: string }) {
     updateChatSettings,
     removeChat,
     reload: reloadChats,
+    drafts,
+    setDraft: storeDraft,
+    pinMessage,
   } = useChats();
+  const outbox = useOutbox();
+  const privateKey = usePrivateKey();
   useMinuteTick();
 
   // Who the chat is with comes from the server's chats list, never from the
@@ -97,7 +107,8 @@ function ChatScreen({ chatId }: { chatId: string }) {
 
   const [messages, setMessages] = useState<Message[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
+  // Unsent text, kept per chat on this device.
+  const [draft, setDraft] = useState(() => drafts[chatId] ?? "");
   const [sending, setSending] = useState(false);
   const [inputHeight, setInputHeight] = useState(INPUT_MIN_HEIGHT);
   const [scrolledUp, setScrolledUp] = useState(false);
@@ -117,6 +128,8 @@ function ChatScreen({ chatId }: { chatId: string }) {
   // The chat's menu (search, safety code, pin, mute, block, delete).
   const [chatMenu, setChatMenu] = useState(false);
   const [showSafetyCode, setShowSafetyCode] = useState(false);
+  // The message being forwarded (choosing the chat).
+  const [forwarding, setForwarding] = useState<Message | null>(null);
   // The other member's key differs from the one this device saw before.
   const [keyChanged, setKeyChanged] = useState(false);
   // Search in the loaded messages.
@@ -126,6 +139,15 @@ function ChatScreen({ chatId }: { chatId: string }) {
   const lastTypingSent = useRef(0);
 
   const inputRef = useRef<TextInput>(null);
+  // Focusing the input is asked for here and done after the render.
+  const [focusRequest, setFocusRequest] = useState(0);
+  const requestFocus = () => setFocusRequest((n) => n + 1);
+
+  useEffect(() => {
+    if (focusRequest > 0) {
+      inputRef.current?.focus();
+    }
+  }, [focusRequest]);
   const listRef = useRef<FlatList<Row>>(null);
   const firstLoad = useRef(true);
 
@@ -267,17 +289,42 @@ function ChatScreen({ chatId }: { chatId: string }) {
     });
   }, [chatId, subscribeChat, loadHistory]);
 
+  // Messages the server accepted from the outbox (also without the
+  // realtime connection).
+  useEffect(
+    () =>
+      outbox.subscribeSent((message) => {
+        if (message.chat_id === chatId) {
+          setMessages((current) => mergeMessages(current ?? [], [message]));
+        }
+      }),
+    [outbox, chatId],
+  );
+
+  // The history with the own messages still on their way.
+  const shownMessages = useMemo(() => {
+    const loaded = messages ?? [];
+    const pending = outbox.outgoing
+      .filter((o) => o.chatId === chatId && !loaded.some((m) => m.id === o.id))
+      .map(outgoingAsMessage);
+
+    return pending.length ? mergeMessages(loaded, pending) : loaded;
+  }, [messages, outbox.outgoing, chatId]);
+
+  const outgoingOf = (message: Message): Outgoing | undefined =>
+    (message as Message & { outgoing?: Outgoing }).outgoing;
+
   // Decrypted once per message.
   const texts = useMemo(
-    () => new Map((messages ?? []).map((m) => [m.id, crypto.decrypt(m)])),
-    [messages, crypto],
+    () => new Map(shownMessages.map((m) => [m.id, crypto.decrypt(m)])),
+    [shownMessages, crypto],
   );
-  const textOf = (message: MessageRef & { content: string }): Decrypted =>
+  const textOf = (message: MessageRef & { content: string }): Shown =>
     texts.get(message.id) ?? crypto.decrypt(message);
 
   const rows = useMemo(
-    () => buildRows(messages ?? [], user?.id, unreadAfter),
-    [messages, user?.id, unreadAfter],
+    () => buildRows(shownMessages, user?.id, unreadAfter),
+    [shownMessages, user?.id, unreadAfter],
   );
 
   // Search: matching messages, newest first.
@@ -288,11 +335,11 @@ function ChatScreen({ chatId }: { chatId: string }) {
       return [];
     }
 
-    return (messages ?? [])
-      .filter((m) => (texts.get(m.id)?.text ?? "").toLowerCase().includes(needle))
+    return shownMessages
+      .filter((m) => plainText(texts.get(m.id)?.text ?? "").toLowerCase().includes(needle))
       .map((m) => m.id)
       .reverse();
-  }, [searching, query, messages, texts]);
+  }, [searching, query, shownMessages, texts]);
 
   const showError = (e: unknown, fallback: string) =>
     setError(e instanceof Error ? e.message : fallback);
@@ -313,7 +360,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
 
       try {
         const updated = await withToken((t) =>
-          editMessage(t, chatId, target.id, crypto.encrypt(content, target.id)),
+          editMessage(t, chatId, target.id, crypto.encrypt(encodePayload({ text: content }), target.id)),
         );
         setMessages((current) =>
           current?.map((m) => (m.id === updated.id ? updated : m)) ?? current,
@@ -331,36 +378,91 @@ function ChatScreen({ chatId }: { chatId: string }) {
       return;
     }
 
-    setSending(true);
-    // Clear right away so the user can type the next message meanwhile.
+    if (!user) {
+      return;
+    }
+
+    const id = newMessageId();
+    let encrypted: string;
+
+    try {
+      encrypted = crypto.encrypt(encodePayload({ text: content }), id);
+    } catch (e) {
+      showError(e, "Failed to send message");
+      return;
+    }
+
+    // Shown at once and sent in the background (again later if offline).
+    outbox.send({
+      id,
+      chatId,
+      senderId: user.id,
+      content: encrypted,
+      replyTo: replyTo ? replyPreview(replyTo) : null,
+    });
+
     setDraft("");
+    storeDraft(chatId, "");
     setInputHeight(INPUT_MIN_HEIGHT);
     // Own messages end the "unread" section.
     setUnreadAfter(null);
-    const replying = replyTo;
     setReplyTo(null);
+    setError(null);
+    listRef.current?.scrollToOffset({ offset: 0, animated: true });
+    inputRef.current?.focus();
+  };
+
+  // The quote of a reply, as the server would show it.
+  const replyPreview = (message: Message): ReplyPreview => ({
+    id: message.id,
+    sender_id: message.sender_id,
+    sender_username:
+      message.sender_id === user?.id ? (user?.username ?? "") : (chat?.username ?? message.sender_username),
+    sender_is_developer:
+      message.sender_id === user?.id ? Boolean(user?.is_developer) : Boolean(chat?.is_developer),
+    content: message.content,
+  });
+
+  // Forwards a message: its text, encrypted for the other chat, with whom
+  // it comes from.
+  const forward = (message: Message, target: Chat) => {
+    setForwarding(null);
+
+    if (!user || !privateKey || !target.public_key) {
+      return;
+    }
+
+    const shown = textOf(message);
+    const from =
+      shown.forwardedFrom ??
+      (message.sender_id === user.id ? user.username : (chat?.username ?? message.sender_username));
+    const id = newMessageId();
+
+    outbox.send({
+      id,
+      chatId: target.id,
+      senderId: user.id,
+      content: encryptMessage(
+        encodePayload({ text: shown.text, forwardedFrom: from }),
+        { id, sender_id: user.id },
+        privateKey,
+        target.public_key,
+        target.id,
+      ),
+      replyTo: null,
+    });
+
+    router.navigate({ pathname: "/chats/[chatId]", params: { chatId: target.id } });
+  };
+
+  const togglePin = async (message: Message | null) => {
+    setMenuFor(null);
+    setChatMenu(false);
 
     try {
-      const id = newMessageId();
-      const encrypted = crypto.encrypt(content, id);
-      const message = await withToken((t) =>
-        sendMessage(t, chatId, {
-          id,
-          content: encrypted,
-          replyTo: replying?.id ?? null,
-        }),
-      );
-      setMessages((current) => mergeMessages(current ?? [], [message]));
-      setError(null);
-      listRef.current?.scrollToOffset({ offset: 0, animated: true });
+      await pinMessage(chatId, message?.id ?? null);
     } catch (e) {
-      // Give the unsent text back unless something new was typed.
-      setDraft((current) => current || content);
-      setReplyTo((current) => current ?? replying);
-      showError(e, "Failed to send message");
-    } finally {
-      setSending(false);
-      inputRef.current?.focus();
+      showError(e, "Failed to pin the message");
     }
   };
 
@@ -368,7 +470,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
     setMenuFor(null);
     setEditing(null);
     setReplyTo(message);
-    inputRef.current?.focus();
+    requestFocus();
   };
 
   const startEdit = (message: Message) => {
@@ -376,12 +478,13 @@ function ChatScreen({ chatId }: { chatId: string }) {
     setReplyTo(null);
     setEditing(message);
     setDraft(textOf(message).text);
-    inputRef.current?.focus();
+    requestFocus();
   };
 
+  // Back to the draft that was there before editing.
   const cancelEdit = () => {
     setEditing(null);
-    setDraft("");
+    setDraft(drafts[chatId] ?? "");
   };
 
   const removeMessage = async (message: Message) => {
@@ -423,6 +526,10 @@ function ChatScreen({ chatId }: { chatId: string }) {
 
   const onDraftChange = (text: string) => {
     setDraft(text);
+
+    if (!editing) {
+      storeDraft(chatId, text);
+    }
 
     // "typing…" for the other member, at most every few seconds.
     if (text.trim() && !editing && Date.now() - lastTypingSent.current > 3000) {
@@ -483,6 +590,74 @@ function ChatScreen({ chatId }: { chatId: string }) {
     const next = Math.max(0, Math.min(matches.length - 1, index));
     setMatchIndex(next);
     showMessage(matches[next]);
+  };
+
+  // A message's actions; a message still on its way can only be sent
+  // again, copied or dropped.
+  const messageMenuItems = (message: Message): ActionMenuItem[] => {
+    const pending = outgoingOf(message);
+    const shown = textOf(message);
+    const own = message.sender_id === user?.id;
+    const copy: ActionMenuItem = { icon: "copy-outline", label: "Copy text", onPress: () => copyText(message) };
+
+    if (pending) {
+      return [
+        ...(pending.state === "failed"
+          ? [{
+              icon: "refresh" as const,
+              label: pending.error ? `Send again (${pending.error})` : "Send again",
+              onPress: () => {
+                setMenuFor(null);
+                outbox.retry(message.id);
+              },
+            }]
+          : []),
+        copy,
+        {
+          icon: "trash-outline",
+          label: "Delete",
+          danger: true,
+          onPress: () => {
+            setMenuFor(null);
+            outbox.discard(message.id);
+          },
+        },
+      ];
+    }
+
+    const pinned = chat?.pinned_message?.id === message.id;
+
+    return [
+      { icon: "arrow-undo-outline", label: "Reply", onPress: () => startReply(message) },
+      copy,
+      ...(shown.status === "ok"
+        ? [{
+            icon: "arrow-redo-outline" as const,
+            label: "Forward",
+            onPress: () => {
+              setMenuFor(null);
+              setForwarding(message);
+            },
+          }]
+        : []),
+      {
+        icon: pinned ? "pin" : "pin-outline",
+        label: pinned ? "Unpin" : "Pin",
+        onPress: () => togglePin(pinned ? null : message),
+      },
+      ...(own && !shown.forwardedFrom && shown.status === "ok"
+        ? [{ icon: "create-outline" as const, label: "Edit", onPress: () => startEdit(message) }]
+        : []),
+      ...(own
+        ? [{
+            icon: "trash-outline" as const,
+            label: "Delete",
+            confirmLabel: "Delete for everyone?",
+            danger: true,
+            onPress: () => removeMessage(message),
+          }]
+        : []),
+    ];
   };
 
   const copyText = async (message: Message) => {
@@ -611,6 +786,37 @@ function ChatScreen({ chatId }: { chatId: string }) {
           ) : null
         }
       />
+
+      {chat?.pinned_message ? (
+        <View style={[styles.pinnedBar, { backgroundColor: colors.surface, borderBottomColor: colors.line }]}>
+          <Pressable
+            onPress={() => {
+              const id = chat.pinned_message!.id;
+
+              if (shownMessages.some((m) => m.id === id)) {
+                showMessage(id);
+              } else {
+                setError("The pinned message is further up: scroll up to load it");
+              }
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Show the pinned message"
+            style={[styles.pinnedText, { borderLeftColor: colors.accent }]}
+          >
+            <Text style={[styles.pinnedLabel, { color: colors.accent }]}>Pinned message</Text>
+            <Text numberOfLines={1} style={[styles.pinnedPreview, { color: colors.textSoft }]}>
+              {previewText(plainText(crypto.decrypt(chat.pinned_message).text))}
+            </Text>
+          </Pressable>
+          <IconButton
+            icon="close"
+            label="Unpin"
+            size={18}
+            color={colors.muted}
+            onPress={() => togglePin(null)}
+          />
+        </View>
+      ) : null}
 
       {searching ? (
         <View style={[styles.searchBar, { backgroundColor: colors.surface, borderBottomColor: colors.line }]}>
@@ -773,6 +979,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
                     quoteText={
                       item.message.reply_to ? textOf(item.message.reply_to) : null
                     }
+                    sending={outgoingOf(item.message)?.state}
                     highlighted={item.message.id === highlightedId}
                     onReply={() => startReply(item.message)}
                     onMenu={() => setMenuFor(item.message)}
@@ -876,7 +1083,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
                     Edit message
                   </Text>
                   <Text numberOfLines={1} style={[styles.replyBarContent, { color: colors.muted }]}>
-                    {previewText(textOf(editing).text)}
+                    {previewText(plainText(textOf(editing).text))}
                   </Text>
                 </View>
                 <IconButton
@@ -903,7 +1110,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
                       : chat?.is_developer) ? <DevBadge /> : null}
                   </View>
                   <Text numberOfLines={1} style={[styles.replyBarContent, { color: colors.muted }]}>
-                    {previewText(textOf(replyTo).text)}
+                    {previewText(plainText(textOf(replyTo).text))}
                   </Text>
                 </View>
                 <IconButton
@@ -966,9 +1173,10 @@ function ChatScreen({ chatId }: { chatId: string }) {
           back to the message when it closes, away from the input. */}
       {menuFor ? (
         <ActionMenu
-          title={previewText(textOf(menuFor).text)}
+          title={previewText(plainText(textOf(menuFor).text))}
           onClose={() => setMenuFor(null)}
           header={
+            outgoingOf(menuFor) ? undefined : (
             <View style={styles.reactionPicker}>
               {REACTIONS.map((emoji) => {
                 const mine = menuFor.reactions.some(
@@ -991,24 +1199,14 @@ function ChatScreen({ chatId }: { chatId: string }) {
                 );
               })}
             </View>
+            )
           }
-          items={[
-            { icon: "arrow-undo-outline", label: "Reply", onPress: () => startReply(menuFor) },
-            { icon: "copy-outline", label: "Copy text", onPress: () => copyText(menuFor) },
-            ...(menuFor.sender_id === user?.id
-              ? [
-                  { icon: "create-outline" as const, label: "Edit", onPress: () => startEdit(menuFor) },
-                  {
-                    icon: "trash-outline" as const,
-                    label: "Delete",
-                    confirmLabel: "Delete for everyone?",
-                    danger: true,
-                    onPress: () => removeMessage(menuFor),
-                  },
-                ]
-              : []),
-          ]}
+          items={messageMenuItems(menuFor)}
         />
+      ) : null}
+
+      {forwarding ? (
+        <ForwardPicker onPick={(target) => forward(forwarding, target)} onClose={() => setForwarding(null)} />
       ) : null}
 
       {chatMenu && chat ? (
@@ -1017,6 +1215,9 @@ function ChatScreen({ chatId }: { chatId: string }) {
           onClose={() => setChatMenu(false)}
           items={[
             { icon: "search", label: "Search in chat", onPress: openSearch },
+            ...(chat.pinned_message
+              ? [{ icon: "pin-outline" as const, label: "Unpin message", onPress: () => togglePin(null) }]
+              : []),
             ...(crypto.safetyCode
               ? [
                   {
@@ -1049,7 +1250,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
             {
               icon: "eye-off-outline",
               label: "Clear history for me",
-              confirmLabel: "Clear? @" + chat.username + " keeps the messages",
+              confirmLabel: `Clear? @${chat.username} keeps the messages`,
               danger: true,
               onPress: () => deleteChat("me"),
             },
@@ -1159,6 +1360,30 @@ const styles = StyleSheet.create({
   unreadLabel: {
     fontSize: 12,
     fontWeight: "700",
+  },
+
+  pinnedBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+
+  pinnedText: {
+    flex: 1,
+    borderLeftWidth: 2,
+    paddingLeft: 8,
+  },
+
+  pinnedLabel: {
+    fontSize: 12,
+    fontWeight: "700",
+  },
+
+  pinnedPreview: {
+    fontSize: 13,
   },
 
   searchBar: {

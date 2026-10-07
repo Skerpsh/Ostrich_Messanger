@@ -1,6 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { PROFILE_COLUMNS, usernameSchema } from "../accounts.js";
 import { db, isChatMember, withTransaction } from "../database.js";
+import { isBlockedInChat } from "../messages.js";
 import { authenticate } from "../middleware/auth.js";
 import { isOnline, sendToChatMembers, sendToUserSockets } from "../realtime.js";
 import { blockedEitherWay, presenceVisible } from "../visibility.js";
@@ -220,6 +221,10 @@ export default async function chatsRoutes(server: FastifyInstance) {
           CASE WHEN me.read_receipts AND users.read_receipts
             THEN other_member.last_read_at
           END AS peer_last_read_at,
+          pinned.id AS pinned_message_id,
+          pinned.sender_id AS pinned_message_sender_id,
+          pinned.content AS pinned_message_content,
+          pinned.created_at AS pinned_message_created_at,
           last_message.id AS last_message_id,
           last_message.sender_id AS last_message_sender_id,
           last_message.content AS last_message_content,
@@ -253,6 +258,10 @@ export default async function chatsRoutes(server: FastifyInstance) {
           ORDER BY created_at DESC, id DESC
           LIMIT 1
         ) last_message ON TRUE
+        -- Not shown if it was cleared ("clear history for me").
+        LEFT JOIN messages pinned
+          ON pinned.id = chats.pinned_message_id
+         AND (chat_members.cleared_at IS NULL OR pinned.created_at > chat_members.cleared_at)
         WHERE chat_members.user_id = $1
           AND NOT chat_members.hidden
         ORDER BY chat_members.pinned_at DESC NULLS LAST,
@@ -265,6 +274,10 @@ export default async function chatsRoutes(server: FastifyInstance) {
       return {
         chats: result.rows.map(
           ({
+            pinned_message_id,
+            pinned_message_sender_id,
+            pinned_message_content,
+            pinned_message_created_at,
             last_message_id,
             last_message_sender_id,
             last_message_content,
@@ -278,6 +291,14 @@ export default async function chatsRoutes(server: FastifyInstance) {
               last_seen_at: chat.last_seen_at,
               presence_visible,
             }),
+            pinned_message: pinned_message_id
+              ? {
+                  id: pinned_message_id,
+                  sender_id: pinned_message_sender_id,
+                  content: pinned_message_content,
+                  created_at: pinned_message_created_at,
+                }
+              : null,
             last_message: last_message_id
               ? {
                   id: last_message_id,
@@ -342,6 +363,65 @@ export default async function chatsRoutes(server: FastifyInstance) {
       sendToUserSockets(request.user.id, { type: "chats_changed" });
 
       return result.rows[0];
+    },
+  );
+
+  // PIN A MESSAGE at the top of the chat, for both members; null unpins.
+  server.put<{ Params: { chatId: string }; Body: { message_id: string | null } }>(
+    "/api/chats/:chatId/pinned-message",
+    {
+      preHandler: authenticate,
+      config: chatsRateLimit,
+      schema: {
+        params: chatParamsSchema,
+        body: {
+          type: "object",
+          required: ["message_id"],
+          properties: {
+            message_id: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { chatId } = request.params;
+      const messageId = request.body.message_id;
+
+      if (!(await isChatMember(chatId, request.user.id))) {
+        return reply.status(404).send({ error: "Chat not found" });
+      }
+
+      if (await isBlockedInChat(chatId, request.user.id)) {
+        return reply.status(403).send({ error: "You can't change this chat" });
+      }
+
+      const result = await db.query(
+        `
+        UPDATE chats
+        SET pinned_message_id = $2
+        WHERE id = $1
+          AND ($2::uuid IS NULL OR EXISTS (
+            SELECT 1 FROM messages WHERE id = $2 AND chat_id = $1
+          ))
+        RETURNING (
+          SELECT json_build_object(
+            'id', m.id, 'sender_id', m.sender_id,
+            'content', m.content, 'created_at', m.created_at
+          )
+          FROM messages m WHERE m.id = $2
+        ) AS message
+        `,
+        [chatId, messageId],
+      );
+
+      if (result.rows.length === 0) {
+        return reply.status(404).send({ error: "Message not found in this chat" });
+      }
+
+      const message = result.rows[0].message ?? null;
+      await sendToChatMembers(chatId, { type: "pinned_message", chatId, message });
+
+      return { message };
     },
   );
 

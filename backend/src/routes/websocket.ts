@@ -68,6 +68,7 @@ type ClientMessage = {
 //                     message_deleted {chatId, messageId},
 //                     reactions {chatId, messageId, reactions},
 //                     chat_deleted {chatId}, chats_changed,
+//                     pinned_message {chatId, message},
 //                     presence {userId, online, lastSeenAt}, error {error}
 //
 // "message" and "read" events of all the user's chats are sent to all their

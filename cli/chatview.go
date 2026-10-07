@@ -41,12 +41,13 @@ func (m model) chatLines(w int) chatLinesResult {
 	separator := lineMeta{message: -1}
 	unread := m.unreadLine()
 	content := w - 2
+	shown := m.shown()
 
-	for i, message := range c.messages {
+	for i, message := range shown {
 		var prev *Message
 
 		if i > 0 {
-			prev = &c.messages[i-1]
+			prev = &shown[i-1]
 		}
 
 		at := parseTime(&message.CreatedAt)
@@ -71,7 +72,7 @@ func (m model) chatLines(w int) chatLinesResult {
 			add(blank(w, p.bg), separator)
 		}
 
-		for _, line := range m.bubble(chat, message, i, content) {
+		for _, line := range m.bubble(chat, message, content) {
 			add(line.text, lineMeta{message: i, quote: line.quote})
 		}
 	}
@@ -94,11 +95,12 @@ type bubbleLine struct {
 
 // bubble draws one message, aligned in a line of w cells plus a 1-cell
 // margin on each side (the left one marks the selected message).
-func (m model) bubble(chat Chat, message Message, index, w int) []bubbleLine {
+func (m model) bubble(chat Chat, message Message, w int) []bubbleLine {
 	c := m.chat
 	p := m.pal
 	own := message.SenderID == m.user.User.ID
-	selected := c.selecting && c.selected == index
+	selected := c.selecting && c.selectedID == message.ID
+	sending := m.outgoingState(message.ID)
 	highlighted := c.highlight == message.ID
 	read := own && chat.PeerLastReadAt != nil && !later(&message.CreatedAt, chat.PeerLastReadAt)
 
@@ -116,13 +118,13 @@ func (m model) bubble(chat Chat, message Message, index, w int) []bubbleLine {
 
 	key := strings.Join([]string{
 		message.ID, message.Content, edited, strings.Join(reactions, ","),
-		fmt.Sprint(read, w, p.mode, p.accent, chat.PublicKey),
+		fmt.Sprint(read, w, p.mode, p.accent, chat.PublicKey, sending),
 	}, "|")
 
 	body, ok := c.cache[key]
 
 	if !ok {
-		body = m.drawBubble(chat, message, own, read, w)
+		body = m.drawBubble(chat, message, own, read, sending, w)
 		c.cache[key] = body
 	}
 
@@ -154,7 +156,7 @@ func (m model) bubble(chat Chat, message Message, index, w int) []bubbleLine {
 }
 
 // drawBubble draws the bubble itself, aligned in w cells.
-func (m model) drawBubble(chat Chat, message Message, own, read bool, w int) []string {
+func (m model) drawBubble(chat Chat, message Message, own, read bool, sending string, w int) []string {
 	p := m.pal
 	fill, fg, meta := p.panel, p.text, p.muted
 
@@ -163,14 +165,14 @@ func (m model) drawBubble(chat Chat, message Message, own, read bool, w int) []s
 	}
 
 	maxInner := max(min(w*72/100, 64), 12)
-	text, status := m.decrypt(chat, message.ID, message.SenderID, message.Content)
-	text = sanitize(text)
+	shown := m.show(chat, message.ID, message.SenderID, message.Content)
+	text, status := sanitize(shown.text), shown.status
 
 	var content []string
 
 	// The quoted message.
 	if reply := message.ReplyTo; reply != nil {
-		quote := oneLine(sanitize(m.textOf(chat, reply.ID, reply.SenderID, reply.Content)))
+		quote := oneLine(sanitize(plainText(m.textOf(chat, reply.ID, reply.SenderID, reply.Content))))
 		name := bold(clip(m.quoteSender(reply), maxInner-2), fg, fill)
 
 		if reply.SenderIsDeveloper {
@@ -183,10 +185,31 @@ func (m model) drawBubble(chat Chat, message Message, own, read bool, w int) []s
 		)
 	}
 
-	for _, line := range wrap(text, maxInner) {
-		if status == decryptFailed {
+	if shown.forwardedFrom != "" {
+		forwardFg := p.accent
+
+		if own {
+			forwardFg = fg
+		}
+
+		content = append(content, bold(clip("Forwarded from @"+sanitize(shown.forwardedFrom), maxInner), forwardFg, fill))
+	}
+
+	switch status {
+	case decryptOK:
+		codeBg, linkFg := p.panelAlt, p.accent
+
+		if own {
+			codeBg, linkFg = lipgloss.Color(blend(string(p.onAccent), string(p.accent), 0.18)), fg
+		}
+
+		content = append(content, markupLines(text, maxInner, fg, fill, codeBg, linkFg)...)
+	case decryptFailed:
+		for _, line := range wrap(text, maxInner) {
 			content = append(content, italic(line, meta, fill))
-		} else {
+		}
+	default:
+		for _, line := range wrap(text, maxInner) {
 			content = append(content, seg(line, fg, fill))
 		}
 	}
@@ -209,7 +232,12 @@ func (m model) drawBubble(chat Chat, message Message, own, read bool, w int) []s
 	info = append(info, formatTime(message.CreatedAt))
 	metaLine := seg(strings.Join(info, " · "), meta, fill)
 
-	if own {
+	switch {
+	case sending == "failed":
+		metaLine += blank(1, fill) + bold("⚠ Not sent", meta, fill)
+	case sending != "":
+		metaLine += blank(1, fill) + seg("🕓", meta, fill)
+	case own:
 		tick := "✓"
 
 		if read {
@@ -340,6 +368,10 @@ func (m model) chatChromeHeight() int {
 	chat, _ := m.chatByID(c.id)
 	h := 3 // header
 
+	if chat.PinnedMessage != nil {
+		h++
+	}
+
 	if c.searching {
 		h += 2
 	}
@@ -362,6 +394,13 @@ func (m model) chatView(w, h int) string {
 
 	lines = append(lines, m.chatHeader(chat, w)...)
 
+	if pinned := chat.PinnedMessage; pinned != nil {
+		bg := p.surface
+		text := oneLine(sanitize(plainText(m.textOf(chat, pinned.ID, pinned.SenderID, pinned.Content))))
+		left := seg(" ▎", p.accent, bg) + bold("Pinned  ", p.accent, bg) + seg(text, p.textSoft, bg)
+		lines = append(lines, row(zone.Mark("chat:pinned", left), zone.Mark("chat:unpin", seg(" ✕ ", p.muted, bg)), w, bg))
+	}
+
 	if c.searching {
 		lines = append(lines, m.chatSearchBar(w), seg(strings.Repeat("─", w), p.line, p.surface))
 	}
@@ -373,7 +412,7 @@ func (m model) chatView(w, h int) string {
 	switch {
 	case !c.loaded:
 		messages = fitBlock(strings.Repeat("\n", area/2)+center(seg("Loading…", p.muted, p.bg), w, p.bg), w, area, p.bg)
-	case len(c.messages) == 0:
+	case len(m.shown()) == 0:
 		card := []string{
 			center(bold("  No messages yet  ", p.text, p.panel), w, p.bg),
 			center(seg("  Say hi to @"+sanitize(chat.Username)+"!  ", p.muted, p.panel), w, p.bg),

@@ -166,7 +166,7 @@ func (m *model) updateRealtime(msg tea.Msg) tea.Cmd {
 			m.send(map[string]string{"type": "join", "chatId": m.chat.id})
 		}
 
-		return tea.Batch(listenWebSocket(m.conn), m.loadChats())
+		return tea.Batch(listenWebSocket(m.conn), m.loadChats(), m.flushOutbox())
 
 	case wsConnectErrorMsg:
 		if msg.gen != m.connGen || m.user == nil {
@@ -226,6 +226,13 @@ func (m *model) handleEvent(event WSMessage) tea.Cmd {
 			m.chat.removeMessage(event.MessageID)
 		}
 
+		// A deleted pinned message is unpinned.
+		if i := m.findChat(event.ChatID); i >= 0 {
+			if pinned := m.chats[i].PinnedMessage; pinned != nil && pinned.ID == event.MessageID {
+				m.chats[i].PinnedMessage = nil
+			}
+		}
+
 		// The preview may need the message before it.
 		if i := m.findChat(event.ChatID); i >= 0 {
 			if last := m.chats[i].LastMessage; last != nil && last.ID == event.MessageID {
@@ -260,6 +267,15 @@ func (m *model) handleEvent(event WSMessage) tea.Cmd {
 		if m.chat != nil && m.chat.id == event.ChatID {
 			m.closeChat()
 			return m.showToast("This chat was deleted", true)
+		}
+
+	case "pinned_message":
+		if i := m.findChat(event.ChatID); i >= 0 {
+			m.chats[i].PinnedMessage = nil
+
+			if p := event.Message; p != nil {
+				m.chats[i].PinnedMessage = &LastMessage{ID: p.ID, SenderID: p.SenderID, Content: p.Content, CreatedAt: p.CreatedAt}
+			}
 		}
 
 	case "chats_changed":

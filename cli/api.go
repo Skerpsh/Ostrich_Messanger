@@ -120,6 +120,9 @@ type Chat struct {
 	// Up to when the other user has read the chat (read receipts); nil if
 	// either has them off.
 	PeerLastReadAt *string `json:"peer_last_read_at"`
+
+	// The message pinned at the top of the chat (for both members).
+	PinnedMessage *LastMessage `json:"pinned_message"`
 }
 
 // LastMessage is a chat's newest message (encrypted), for previews.
