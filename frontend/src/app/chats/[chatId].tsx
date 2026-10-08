@@ -18,15 +18,17 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import ActionMenu, { type ActionMenuItem } from "@/components/action-menu";
-import AppHeader from "@/components/app-header";
+import AppHeader, { HEADER_HEIGHT } from "@/components/app-header";
 import Button from "@/components/button";
 import Avatar from "@/components/avatar";
 import ChatAvatar from "@/components/chat-avatar";
 import DevBadge from "@/components/dev-badge";
+import EmojiPicker from "@/components/emoji-picker";
 import ForwardPicker from "@/components/forward-picker";
 import GroupInfo from "@/components/group-info";
 import IconButton from "@/components/icon-button";
 import MessageBubble from "@/components/message-bubble";
+import PhotoViewer from "@/components/photo-viewer";
 import SafetyCode from "@/components/safety-code";
 import { noWebOutline } from "@/components/text-field";
 import { useAuth, useCurrentUser, usePrivateKey } from "@/context/auth";
@@ -72,7 +74,8 @@ import { chatTitle, isGroupDistrusted } from "@/lib/groups";
 import { loadCachedMessages, saveCachedMessages } from "@/lib/local-cache";
 import { mentionedUsernames, plainText } from "@/lib/markup";
 import { encodePayload, type Attachment } from "@/lib/payload";
-import { pickDocument, pickPhoto } from "@/lib/pick-attachment";
+import { fromWebFile, pickDocument, pickPhoto } from "@/lib/pick-attachment";
+import { useLatest } from "@/lib/use-latest";
 import { messagePreview } from "@/lib/preview";
 import { acceptPeerKey, checkPeerKey } from "@/lib/known-keys";
 import { useIsWide } from "@/lib/layout";
@@ -84,6 +87,9 @@ import { radius } from "@/theme/colors";
 const MAX_MESSAGE_LENGTH = 4096;
 
 const INPUT_MIN_HEIGHT = 22;
+
+// Unread messages from which "N unread ↑" shows on opening a chat.
+const UNREAD_JUMP_FROM = 10;
 
 // Whether "typing…" may be sent again (every few seconds at most); marks
 // it sent.
@@ -102,12 +108,13 @@ const INPUT_MAX_HEIGHT = 140;
 // A new screen instance for every chat: nothing of the previous chat
 // (history, draft, requests still in flight) can end up in the next one.
 export default function ChatRoute() {
-  const { chatId } = useLocalSearchParams<{ chatId: string }>();
+  // message: a message to show (a search result).
+  const { chatId, message } = useLocalSearchParams<{ chatId: string; message?: string }>();
 
-  return <ChatScreen key={chatId} chatId={chatId} />;
+  return <ChatScreen key={`${chatId}:${message ?? ""}`} chatId={chatId} focusId={message} />;
 }
 
-function ChatScreen({ chatId }: { chatId: string }) {
+function ChatScreen({ chatId, focusId }: { chatId: string; focusId?: string }) {
   const router = useRouter();
   const { colors } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -157,6 +164,8 @@ function ChatScreen({ chatId }: { chatId: string }) {
   const [scrolledUp, setScrolledUp] = useState(false);
   // Where unread messages started when the chat was opened.
   const [unreadAfter, setUnreadAfter] = useState<string | null>(null);
+  // The "to the first unread" button was used (or is not needed any more).
+  const [unreadJumped, setUnreadJumped] = useState(false);
   // The message the next one replies to.
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   // Long-pressed message: its actions are shown.
@@ -174,13 +183,26 @@ function ChatScreen({ chatId }: { chatId: string }) {
   // Groups: the members (for names, presence and the group's screen).
   const [members, setMembers] = useState<GroupMember[] | null>(null);
   const [showGroupInfo, setShowGroupInfo] = useState(false);
-  // The message being forwarded (choosing the chat).
-  const [forwarding, setForwarding] = useState<Message | null>(null);
+  // The messages being forwarded (choosing the chat).
+  const [forwarding, setForwarding] = useState<Message[] | null>(null);
+  // Choosing messages (copy, forward, delete several): their ids; null
+  // when not choosing. Deleting takes a second tap.
+  const [selected, setSelected] = useState<Set<string> | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   // Files chosen for the next message, and the menu to choose them.
   const [picked, setPicked] = useState<PickedFile[]>([]);
   const [attachMenu, setAttachMenu] = useState(false);
-  // Uploading the chosen files.
+  // Emoji for the message being written, and for a reaction.
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const [reactingTo, setReactingTo] = useState<Message | null>(null);
+  // The photo shown on the whole screen (its id).
+  const [viewing, setViewing] = useState<string | null>(null);
+  // Uploading the chosen files, and how far (0–1, where known).
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  // Web: files dragged over the chat.
+  const [dragging, setDragging] = useState(false);
+  const screenRef = useRef<View>(null);
   // The other member's key differs from the one this device saw before.
   const [keyChanged, setKeyChanged] = useState(false);
   // Search in the loaded messages.
@@ -422,6 +444,27 @@ function ChatScreen({ chatId }: { chatId: string }) {
   const textOf = (message: MessageRef & { content: string }): Shown =>
     texts.get(message.id) ?? crypto.decrypt(message);
 
+  // Unread when the chat was opened: from this many on, a button leads to
+  // the first of them.
+  const unreadCount = useMemo(
+    () =>
+      unreadAfter
+        ? shownMessages.filter(
+            (m) => m.sender_id !== user?.id && m.kind !== "system" && time(m.created_at) > time(unreadAfter),
+          ).length
+        : 0,
+    [shownMessages, unreadAfter, user?.id],
+  );
+
+  // The chat's photos, oldest first (the viewer goes through them).
+  const photos = useMemo(
+    () =>
+      shownMessages.flatMap((m) =>
+        (texts.get(m.id)?.attachments ?? []).filter((a) => isImage(a.mime)),
+      ),
+    [shownMessages, texts],
+  );
+
   const rows = useMemo(
     () => buildRows(shownMessages, user?.id, unreadAfter),
     [shownMessages, user?.id, unreadAfter],
@@ -500,10 +543,21 @@ function ChatScreen({ chatId }: { chatId: string }) {
 
     if (picked.length > 0) {
       setUploading(true);
+      setUploadProgress(null);
+
+      const total = picked.reduce((sum, file) => sum + file.bytes.length, 0) || 1;
+      let done = 0;
 
       try {
         for (const file of picked) {
-          attachments.push(await withToken((t) => uploadAttachment(t, file)));
+          attachments.push(
+            await withToken((t) =>
+              uploadAttachment(t, file, (part) =>
+                setUploadProgress((done + part * file.bytes.length) / total),
+              ),
+            ),
+          );
+          done += file.bytes.length;
         }
       } catch (e) {
         showError(e, "Failed to upload the file");
@@ -570,6 +624,113 @@ function ChatScreen({ chatId }: { chatId: string }) {
     }
   };
 
+  const closeViewer = useCallback(() => setViewing(null), []);
+
+  // A search result: shown once its message is loaded.
+  const [focused, setFocused] = useState(false);
+  const focusRow = focusId && !focused ? rows.findIndex((row) => row.type === "message" && row.message.id === focusId) : -1;
+
+  useEffect(() => {
+    if (focusRow < 0 || !focusId) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setFocused(true);
+      listRef.current?.scrollToIndex({ index: focusRow, animated: true, viewPosition: 0.5 });
+      setHighlightedId(focusId);
+      setTimeout(() => setHighlightedId((current) => (current === focusId ? null : current)), 1600);
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [focusRow, focusId]);
+
+  const jumpToUnread = () => {
+    const index = rows.findIndex((row) => row.type === "unread");
+
+    setUnreadJumped(true);
+
+    if (index >= 0) {
+      // Inverted list: the line goes near the top of the screen.
+      listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.9 });
+    }
+  };
+
+  // Web: files pasted into the input or dropped on the chat.
+  const addFiles = async (files: File[]) => {
+    if (editing || uploading) {
+      return;
+    }
+
+    for (const file of files) {
+      try {
+        const picked = await fromWebFile(file);
+        setPicked((current) => [...current, picked].slice(0, MAX_ATTACHMENTS));
+      } catch (e) {
+        showError(e, "Failed to add the file");
+      }
+    }
+
+    requestFocus();
+  };
+
+  const addFilesRef = useLatest(addFiles);
+  const canDrop = Boolean(chat) && !chat?.blocked && !chat?.blocked_by_me;
+
+  useEffect(() => {
+    if (Platform.OS !== "web" || !canDrop) {
+      return;
+    }
+
+    const input = inputRef.current as unknown as HTMLElement | null;
+    const screen = screenRef.current as unknown as HTMLElement | null;
+    const hasFiles = (event: DragEvent) => Boolean(event.dataTransfer?.types.includes("Files"));
+
+    const onPaste = (event: ClipboardEvent) => {
+      const files = [...(event.clipboardData?.files ?? [])];
+
+      if (files.length > 0) {
+        event.preventDefault();
+        addFilesRef.current(files);
+      }
+    };
+
+    const onDragOver = (event: DragEvent) => {
+      if (hasFiles(event)) {
+        event.preventDefault();
+        setDragging(true);
+      }
+    };
+
+    const onDragLeave = (event: DragEvent) => {
+      // Left the chat, not just moved between its parts.
+      if (!screen?.contains(event.relatedTarget as Node | null)) {
+        setDragging(false);
+      }
+    };
+
+    const onDrop = (event: DragEvent) => {
+      setDragging(false);
+
+      if (hasFiles(event)) {
+        event.preventDefault();
+        addFilesRef.current([...(event.dataTransfer?.files ?? [])]);
+      }
+    };
+
+    input?.addEventListener("paste", onPaste);
+    screen?.addEventListener("dragover", onDragOver);
+    screen?.addEventListener("dragleave", onDragLeave);
+    screen?.addEventListener("drop", onDrop);
+
+    return () => {
+      input?.removeEventListener("paste", onPaste);
+      screen?.removeEventListener("dragover", onDragOver);
+      screen?.removeEventListener("dragleave", onDragLeave);
+      screen?.removeEventListener("drop", onDrop);
+    };
+  }, [canDrop, addFilesRef]);
+
   // Saves the files of a message.
   const saveAttachments = async (message: Message) => {
     setMenuFor(null);
@@ -597,11 +758,23 @@ function ChatScreen({ chatId }: { chatId: string }) {
 
   // Forwards a message: its text and files, encrypted for the other chat,
   // with whom it comes from. Files are copied on the server (same keys).
-  const forward = async (message: Message, target: Chat) => {
+  // Forwards messages in their order, then opens the chat they went to.
+  const forward = async (messages: Message[], target: Chat) => {
     setForwarding(null);
+    setSelected(null);
 
+    for (const message of messages) {
+      if (!(await forwardOne(message, target))) {
+        return;
+      }
+    }
+
+    router.navigate({ pathname: "/chats/[chatId]", params: { chatId: target.id } });
+  };
+
+  const forwardOne = async (message: Message, target: Chat) => {
     if (!user || !privateKey) {
-      return;
+      return false;
     }
 
     const shown = textOf(message);
@@ -615,7 +788,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
       attachments = await withToken((t) => copyAttachments(t, shown.attachments ?? []));
     } catch (e) {
       showError(e, "Failed to forward the files");
-      return;
+      return false;
     }
 
     const id = newMessageId();
@@ -630,7 +803,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
       );
     } catch (e) {
       showError(e, "Failed to forward the message");
-      return;
+      return false;
     }
 
     outbox.send({
@@ -642,7 +815,54 @@ function ChatScreen({ chatId }: { chatId: string }) {
       attachments: attachments.map((a) => a.id),
     });
 
-    router.navigate({ pathname: "/chats/[chatId]", params: { chatId: target.id } });
+    return true;
+  };
+
+  // --- choosing messages ---
+
+  const chosen = shownMessages.filter((m) => selected?.has(m.id));
+  const canDeleteChosen =
+    chosen.length > 0 &&
+    chosen.every((m) => !outgoingOf(m) && (m.sender_id === user?.id || groupAdmin));
+
+  const toggleChosen = (message: Message) => {
+    setConfirmingDelete(false);
+    setSelected((current) => {
+      const next = new Set(current ?? []);
+
+      if (next.has(message.id)) {
+        next.delete(message.id);
+      } else {
+        next.add(message.id);
+      }
+
+      return next.size > 0 ? next : null;
+    });
+  };
+
+  const copyChosen = async () => {
+    await Clipboard.setStringAsync(chosen.map((m) => textOf(m).text).filter(Boolean).join("\n\n"));
+    setSelected(null);
+  };
+
+  const deleteChosen = async () => {
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      return;
+    }
+
+    setConfirmingDelete(false);
+    setSelected(null);
+
+    for (const message of chosen) {
+      try {
+        await withToken((t) => deleteMessage(t, chatId, message.id));
+        setMessages((current) => current?.filter((m) => m.id !== message.id) ?? current);
+      } catch (e) {
+        showError(e, "Failed to delete a message");
+        return;
+      }
+    }
   };
 
   const togglePin = async (message: Message | null) => {
@@ -724,6 +944,17 @@ function ChatScreen({ chatId }: { chatId: string }) {
     // "typing…" for the other member, at most every few seconds.
     if (text.trim() && !editing && typingDue(lastTypingSent)) {
       sendTyping(chatId);
+    }
+  };
+
+  // An emoji goes in at the cursor.
+  const insertEmoji = (emoji: string) => {
+    const at = cursor ?? draft.length;
+    const next = draft.slice(0, at) + emoji + draft.slice(at);
+
+    if (next.length <= MAX_MESSAGE_LENGTH) {
+      onDraftChange(next);
+      setCursor(at + emoji.length);
     }
   };
 
@@ -869,6 +1100,14 @@ function ChatScreen({ chatId }: { chatId: string }) {
 
     return [
       { icon: "arrow-undo-outline", label: "Reply", onPress: () => startReply(message) },
+      {
+        icon: "checkmark-circle-outline",
+        label: "Select",
+        onPress: () => {
+          setMenuFor(null);
+          setSelected(new Set([message.id]));
+        },
+      },
       ...(shown.attachments?.length
         ? [{
             icon: "download-outline" as const,
@@ -883,7 +1122,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
             label: "Forward",
             onPress: () => {
               setMenuFor(null);
-              setForwarding(message);
+              setForwarding([message]);
             },
           }]
         : []),
@@ -1027,7 +1266,48 @@ function ChatScreen({ chatId }: { chatId: string }) {
       : null;
 
   return (
-    <View style={[styles.screen, { backgroundColor: colors.bg }]}>
+    <View ref={screenRef} style={[styles.screen, { backgroundColor: colors.bg }]}>
+      {dragging ? (
+        <View pointerEvents="none" style={[styles.dropZone, { borderColor: colors.accent, backgroundColor: colors.bg }]}>
+          <Ionicons name="cloud-upload-outline" size={44} color={colors.accent} />
+          <Text style={[styles.dropText, { color: colors.text }]}>Drop files to send them</Text>
+        </View>
+      ) : null}
+      {selected ? (
+        <View
+          style={[
+            styles.selectBar,
+            {
+              backgroundColor: colors.surface,
+              borderBottomColor: colors.line,
+              paddingTop: insets.top,
+              height: HEADER_HEIGHT + insets.top,
+            },
+          ]}
+        >
+          <IconButton icon="close" label="Stop choosing" onPress={() => setSelected(null)} />
+          <Text style={[styles.selectCount, { color: colors.text }]}>{chosen.length} selected</Text>
+          <IconButton icon="copy-outline" label="Copy" onPress={copyChosen} />
+          <IconButton
+            icon="arrow-redo-outline"
+            label="Forward"
+            disabled={chosen.some((m) => outgoingOf(m) || textOf(m).status !== "ok")}
+            onPress={() => setForwarding(chosen)}
+          />
+          {canDeleteChosen ? (
+            confirmingDelete ? (
+              <Pressable onPress={deleteChosen} accessibilityRole="button" style={styles.confirmDelete}>
+                <Text style={[styles.confirmDeleteText, { color: colors.danger }]}>
+                  Delete {chosen.length} for everyone?
+                </Text>
+              </Pressable>
+            ) : (
+              <IconButton icon="trash-outline" label="Delete" color={colors.danger} onPress={deleteChosen} />
+            )
+          ) : null}
+        </View>
+      ) : null}
+
       <AppHeader
         onBack={wide ? undefined : goBack}
         left={
@@ -1293,10 +1573,30 @@ function ChatScreen({ chatId }: { chatId: string }) {
                     onQuotePress={showMessage}
                     onReact={(emoji) => react(item.message, emoji)}
                     onError={setError}
+                    onOpenPhoto={(attachment) => setViewing(attachment.id)}
+                    selected={selected && !outgoingOf(item.message) ? selected.has(item.message.id) : undefined}
+                    onToggle={() => toggleChosen(item.message)}
                   />
                 );
               }}
             />
+
+            {unreadCount >= UNREAD_JUMP_FROM && !unreadJumped ? (
+              <Pressable
+                onPress={jumpToUnread}
+                accessibilityRole="button"
+                accessibilityLabel={`To the first of ${unreadCount} unread messages`}
+                style={[
+                  styles.unreadJump,
+                  { backgroundColor: colors.accent, boxShadow: `0 2px 8px ${colors.shadow}` },
+                ]}
+              >
+                <Ionicons name="arrow-up" size={16} color={colors.onAccent} />
+                <Text style={[styles.unreadJumpText, { color: colors.onAccent }]}>
+                  {unreadCount} unread
+                </Text>
+              </Pressable>
+            ) : null}
 
             {scrolledUp ? (
               <IconButton
@@ -1468,7 +1768,11 @@ function ChatScreen({ chatId }: { chatId: string }) {
                         {file.name}
                       </Text>
                       <Text style={[styles.pickedSize, { color: colors.muted }]}>
-                        {uploading ? "Uploading…" : formatSize(file.bytes.length)}
+                        {uploading
+                          ? uploadProgress === null
+                            ? "Uploading…"
+                            : `Uploading… ${Math.round(uploadProgress * 100)}%`
+                          : formatSize(file.bytes.length)}
                       </Text>
                     </View>
                     <IconButton
@@ -1484,7 +1788,20 @@ function ChatScreen({ chatId }: { chatId: string }) {
               </View>
             ) : null}
 
+            {emojiOpen ? (
+              <View style={styles.emojiPanel}>
+                <EmojiPicker onPick={insertEmoji} />
+              </View>
+            ) : null}
+
             <View style={styles.composerRow}>
+              <IconButton
+                icon={emojiOpen ? "happy" : "happy-outline"}
+                label="Emoji"
+                size={22}
+                color={emojiOpen ? colors.accent : colors.muted}
+                onPress={() => setEmojiOpen((open) => !open)}
+              />
               {editing ? null : (
                 <IconButton
                   icon="attach"
@@ -1570,11 +1887,48 @@ function ChatScreen({ chatId }: { chatId: string }) {
                   </Pressable>
                 );
               })}
+              <Pressable
+                onPress={() => {
+                  setReactingTo(menuFor);
+                  setMenuFor(null);
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="Another emoji"
+                style={({ hovered, pressed }) => [
+                  styles.reactionOption,
+                  (hovered || pressed) && { backgroundColor: colors.accentSoft },
+                ]}
+              >
+                <Ionicons name="add" size={22} color={colors.textSoft} />
+              </Pressable>
             </View>
             )
           }
           items={messageMenuItems(menuFor)}
         />
+      ) : null}
+
+      {viewing && photos.some((p) => p.id === viewing) ? (
+        <PhotoViewer
+          photos={photos}
+          start={photos.findIndex((p) => p.id === viewing)}
+          onClose={closeViewer}
+          onError={setError}
+        />
+      ) : null}
+
+      {reactingTo ? (
+        <Pressable style={styles.overlay} onPress={() => setReactingTo(null)} accessibilityLabel="Close">
+          <Pressable onPress={() => {}} style={styles.overlayCard}>
+            <EmojiPicker
+              onPick={(emoji) => {
+                const message = reactingTo;
+                setReactingTo(null);
+                react(message, emoji);
+              }}
+            />
+          </Pressable>
+        </Pressable>
       ) : null}
 
       {attachMenu ? (
@@ -1997,6 +2351,50 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
 
+  dropZone: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    bottom: 8,
+    left: 8,
+    zIndex: 30,
+    borderWidth: 2,
+    borderStyle: "dashed",
+    borderRadius: radius.card,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    opacity: 0.94,
+  },
+
+  dropText: {
+    fontSize: 17,
+    fontWeight: "600",
+  },
+
+  emojiPanel: {
+    alignItems: "flex-start",
+    marginBottom: 8,
+  },
+
+  overlay: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+    backgroundColor: "rgba(0, 0, 0, 0.45)",
+  },
+
+  overlayCard: {
+    width: "100%",
+    maxWidth: 380,
+  },
+
   reactionPicker: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -2049,6 +2447,52 @@ const styles = StyleSheet.create({
 
   replyBarContent: {
     fontSize: 13,
+  },
+
+  selectBar: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 5,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+
+  selectCount: {
+    flex: 1,
+    fontSize: 17,
+    fontWeight: "700",
+  },
+
+  confirmDelete: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+
+  confirmDeleteText: {
+    fontSize: 14,
+    fontWeight: "700",
+  },
+
+  unreadJump: {
+    position: "absolute",
+    alignSelf: "center",
+    top: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: radius.pill,
+  },
+
+  unreadJumpText: {
+    fontSize: 14,
+    fontWeight: "700",
   },
 
   scrollDown: {

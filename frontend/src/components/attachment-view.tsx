@@ -11,22 +11,30 @@ import type { Attachment } from "@/lib/payload";
 const MAX_WIDTH = 240;
 const MAX_HEIGHT = 320;
 
-// The files of a message: pictures shown in the bubble, other files as a
-// card; tapping one saves it (the share sheet on the phones).
+// The files of a message: pictures shown in the bubble (tapping one shows
+// it on the whole screen), other files as a card (tapping one saves it; the
+// share sheet on the phones).
 export default function AttachmentView({
   attachments,
   own,
   onError,
+  onOpenPhoto,
 }: {
   attachments: Attachment[];
   own: boolean;
   onError: (message: string) => void;
+  onOpenPhoto?: (attachment: Attachment) => void;
 }) {
   return (
     <View style={styles.list}>
       {attachments.map((attachment) =>
         isImage(attachment.mime) ? (
-          <AttachmentImage key={attachment.id} attachment={attachment} onError={onError} />
+          <AttachmentImage
+            key={attachment.id}
+            attachment={attachment}
+            onError={onError}
+            onOpen={onOpenPhoto ? () => onOpenPhoto(attachment) : undefined}
+          />
         ) : (
           <AttachmentFile key={attachment.id} attachment={attachment} own={own} onError={onError} />
         ),
@@ -59,9 +67,11 @@ function useSave(attachment: Attachment, onError: (message: string) => void) {
 function AttachmentImage({
   attachment,
   onError,
+  onOpen,
 }: {
   attachment: Attachment;
   onError: (message: string) => void;
+  onOpen?: () => void;
 }) {
   const { colors } = useAppTheme();
   const { withToken } = useAuth();
@@ -99,9 +109,9 @@ function AttachmentImage({
 
   return (
     <Pressable
-      onPress={save}
+      onPress={onOpen ?? save}
       accessibilityRole="button"
-      accessibilityLabel={`Photo ${attachment.name}, tap to save`}
+      accessibilityLabel={`Photo ${attachment.name}, tap to ${onOpen ? "open" : "save"}`}
       style={[styles.image, size, { backgroundColor: colors.panelAlt }]}
     >
       {uri ? (

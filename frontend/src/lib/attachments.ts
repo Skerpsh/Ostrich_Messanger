@@ -22,7 +22,12 @@ export type PickedFile = {
 
 export const isImage = (mime: string) => /^image\/(jpeg|png|gif|webp)$/.test(mime);
 
-export async function uploadAttachment(token: string, file: PickedFile): Promise<Attachment> {
+export async function uploadAttachment(
+  token: string,
+  file: PickedFile,
+  // 0–1, where the platform reports it (the web).
+  onProgress?: (done: number) => void,
+): Promise<Attachment> {
   if (file.bytes.length > MAX_ATTACHMENT_BYTES) {
     throw new api.ApiError("Files can be up to 25 MB", 400);
   }
@@ -30,7 +35,7 @@ export async function uploadAttachment(token: string, file: PickedFile): Promise
   const id = newMessageId();
   const { key, sealed } = encryptAttachment(file.bytes);
 
-  await uploadSealed(token, id, sealed);
+  await uploadSealed(token, id, sealed, onProgress);
 
   return {
     id,

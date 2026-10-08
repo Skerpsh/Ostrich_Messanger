@@ -783,14 +783,6 @@ const attachmentPath = (id: string) => `/api/attachments/${encodeURIComponent(id
 
 // Uploads an encrypted file under the id the client chose (web; the apps
 // upload from a file, see lib/files.ts).
-export function putAttachment(token: string, id: string, data: Blob) {
-  return request<unknown>("PUT", attachmentPath(id), {
-    token,
-    file: { data, type: "application/octet-stream" },
-    timeoutMs: 300_000,
-  });
-}
-
 // Copies an attachment the user can read under a new id (forwarding).
 export function copyAttachment(token: string, id: string, newId: string) {
   return request<unknown>("POST", `${attachmentPath(id)}/copy`, { token, body: { id: newId } });

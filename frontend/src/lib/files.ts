@@ -37,7 +37,13 @@ function failed(status: number, body: string): never {
   throw new ApiError(message, status);
 }
 
-export async function uploadSealed(token: string, id: string, sealed: Uint8Array) {
+// onProgress (0–1) is not reported on the phones.
+export async function uploadSealed(
+  token: string,
+  id: string,
+  sealed: Uint8Array,
+  _onProgress?: (done: number) => void,
+) {
   const file = new File(Paths.cache, `upload-${id}`);
 
   try {

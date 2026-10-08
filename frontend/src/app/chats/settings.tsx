@@ -22,6 +22,7 @@ import { useAuth, useCurrentUser } from "@/context/auth";
 import { useAppTheme, type ThemePreference } from "@/context/theme";
 import { useIsWide } from "@/lib/layout";
 import { profileLink } from "@/lib/links";
+import { installApp, useCanInstall } from "@/lib/pwa";
 import { accents } from "@/theme/colors";
 
 const THEME_OPTIONS: { value: ThemePreference; label: string; icon: IconName }[] =
@@ -39,6 +40,7 @@ export default function SettingsScreen() {
   const wide = useIsWide();
   const { signOut, signOutEverywhere } = useAuth();
   const user = useCurrentUser();
+  const canInstall = useCanInstall();
 
   const [open, setOpen] = useState<"username" | "password" | "delete" | null>(null);
   const [copied, setCopied] = useState(false);
@@ -235,6 +237,12 @@ export default function SettingsScreen() {
               </View>
             </View>
           </Section>
+
+          {canInstall ? (
+            <Section title="App">
+              <Row icon="download-outline" label="Install Ostrich as an app" onPress={() => installApp()} />
+            </Section>
+          ) : null}
 
           <Section title="Account">
             <Row

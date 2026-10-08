@@ -17,9 +17,11 @@ import { OutboxProvider } from "@/context/outbox";
 import { RealtimeProvider } from "@/context/realtime";
 import { AppThemeProvider, useAppTheme } from "@/context/theme";
 import { rememberLink } from "@/lib/links";
+import { registerServiceWorker } from "@/lib/pwa";
 
 // Keep the splash screen until the saved session has been checked.
 SplashScreen.preventAutoHideAsync();
+registerServiceWorker();
 
 export default function RootLayout() {
   return (

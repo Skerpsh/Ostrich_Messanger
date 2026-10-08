@@ -18,6 +18,13 @@ export async function pickPhoto(): Promise<PickedFile | null> {
   }
 
   const asset = result.assets[0];
+
+  return photo(asset.uri, asset.width, asset.height, asset.fileName);
+}
+
+// A photo made smaller (at most 2048 px, JPEG).
+async function photo(uri: string, width: number, height: number, name?: string | null): Promise<PickedFile> {
+  const asset = { uri, width, height, fileName: name };
   const scale = Math.min(1, MAX_PHOTO_SIDE / Math.max(asset.width, asset.height, 1));
   const context = ImageManipulator.manipulate(asset.uri);
 
@@ -39,6 +46,39 @@ export async function pickPhoto(): Promise<PickedFile | null> {
     width: saved.width,
     height: saved.height,
     previewUri: saved.uri,
+  };
+}
+
+// Photos made smaller; GIFs (moving) and other files as they are.
+const RESIZED = /^image\/(jpeg|png|webp)$/;
+
+// A file pasted or dropped into the web app.
+export async function fromWebFile(file: File): Promise<PickedFile> {
+  if (file.size > MAX_ATTACHMENT_BYTES) {
+    throw new ApiError("Files can be up to 25 MB", 400);
+  }
+
+  if (RESIZED.test(file.type)) {
+    const url = URL.createObjectURL(file);
+
+    try {
+      const bitmap = await createImageBitmap(file);
+      const { width, height } = bitmap;
+      bitmap.close();
+
+      // Pasted screenshots are called "image.png".
+      return await photo(url, width, height, file.name === "image.png" ? "screenshot" : file.name);
+    } catch {
+      // Not readable as a picture: sent as a file.
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  return {
+    bytes: new Uint8Array(await file.arrayBuffer()),
+    name: file.name || "file",
+    mime: file.type || "application/octet-stream",
   };
 }
 

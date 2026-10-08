@@ -22,13 +22,14 @@ import ChatAvatar from "@/components/chat-avatar";
 import DevBadge from "@/components/dev-badge";
 import IconButton from "@/components/icon-button";
 import { noWebOutline } from "@/components/text-field";
-import { useAuth, useCurrentUser } from "@/context/auth";
+import { useAuth, useCurrentUser, usePrivateKey } from "@/context/auth";
 import { useChats } from "@/context/chats";
 import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
 import { openSavedChat, type Chat } from "@/lib/api";
 import { formatChatDate, previewText } from "@/lib/format";
 import { takePendingLink } from "@/lib/links";
+import { searchMessages, snippet, type MessageMatch } from "@/lib/search";
 import { chatTitle } from "@/lib/groups";
 import { messagePreview } from "@/lib/preview";
 import { useIsWide } from "@/lib/layout";
@@ -47,6 +48,7 @@ export default function ChatList() {
   const wide = useIsWide();
   const user = useCurrentUser();
   const { withToken } = useAuth();
+  const privateKey = usePrivateKey();
   const { chats, error, reload, typing, updateChatSettings, removeChat, leaveGroup, drafts } =
     useChats();
   const startChatWith = useStartChat();
@@ -62,6 +64,37 @@ export default function ChatList() {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+
+  // Messages matching the search, in all chats (as saved on this device).
+  const [matches, setMatches] = useState<MessageMatch[]>([]);
+  const messageQuery = query.trim();
+  const userId = user?.id;
+
+  useEffect(() => {
+    if (!userId || !chats || messageQuery.length < 2) {
+      return;
+    }
+
+    let current = true;
+    const timer = setTimeout(() => {
+      searchMessages(userId, chats, privateKey, messageQuery).then(
+        (found) => current && setMatches(found),
+        () => {},
+      );
+    }, 250);
+
+    return () => {
+      current = false;
+      clearTimeout(timer);
+    };
+  }, [userId, chats, privateKey, messageQuery]);
+
+  const shownMatches = messageQuery.length < 2 ? [] : matches;
+
+  const openMatch = (match: MessageMatch) => {
+    setQuery("");
+    go({ pathname: "/chats/[chatId]", params: { chatId: match.chat.id, message: match.message.id } });
+  };
 
   // A link opened before logging in.
   useEffect(() => {
@@ -249,6 +282,45 @@ export default function ChatList() {
             />
           )
         }
+        ListFooterComponent={
+          shownMatches.length > 0 ? (
+            <View>
+              <Text style={[styles.sectionTitle, { color: colors.muted }]}>Messages</Text>
+              {shownMatches.map((match) => (
+                <Pressable
+                  key={match.message.id}
+                  onPress={() => openMatch(match)}
+                  accessibilityRole="button"
+                  style={({ hovered, pressed }) => [styles.row, (hovered || pressed) && { backgroundColor: colors.hover }]}
+                >
+                  <ChatAvatar chat={match.chat} size={40} />
+                  <View style={styles.rowText}>
+                    <View style={styles.rowLine}>
+                      <Text numberOfLines={1} style={[styles.name, { color: colors.text }]}>
+                        {chatTitle(match.chat)}
+                      </Text>
+                      <Text style={[styles.time, { color: colors.muted }]}>
+                        {formatChatDate(match.message.created_at)}
+                      </Text>
+                    </View>
+                    <Text numberOfLines={2} style={[styles.preview, { color: colors.muted }]}>
+                      {match.message.sender_id === user?.id
+                        ? "You: "
+                        : match.chat.type === "group"
+                          ? `@${match.message.sender_username}: `
+                          : ""}
+                      {snippet(match.text, messageQuery)}
+                    </Text>
+                  </View>
+                </Pressable>
+              ))}
+              <Text style={[styles.notice, { color: colors.muted }]}>
+                Searched the messages saved on this device: messages are encrypted, the server
+                cannot search them.
+              </Text>
+            </View>
+          ) : null
+        }
         ListHeaderComponent={
           <>
             {canStart ? (
@@ -296,7 +368,7 @@ export default function ChatList() {
           chats === null ? (
             <ActivityIndicator color={colors.muted} style={styles.loading} />
           ) : search ? (
-            canStart ? null : (
+            canStart || shownMatches.length > 0 ? null : (
               <Text style={[styles.notice, { color: colors.muted }]}>
                 No chats match “{query.trim()}”.
               </Text>
@@ -677,6 +749,15 @@ const styles = StyleSheet.create({
 
   italic: {
     fontStyle: "italic",
+  },
+
+  sectionTitle: {
+    fontSize: 13,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 4,
   },
 
   badge: {

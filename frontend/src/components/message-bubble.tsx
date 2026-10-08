@@ -8,6 +8,7 @@ import MarkupText from "@/components/markup-text";
 import { useAppTheme } from "@/context/theme";
 import type { Reaction } from "@/lib/api";
 import type { MessageRow } from "@/lib/chat-rows";
+import type { Attachment } from "@/lib/payload";
 import { formatTime, previewText } from "@/lib/format";
 import { messagePreview } from "@/lib/preview";
 import type { Shown } from "@/lib/use-chat-crypto";
@@ -39,6 +40,9 @@ export default function MessageBubble({
   onQuotePress,
   onReact,
   onError,
+  onOpenPhoto,
+  selected,
+  onToggle,
 }: {
   row: MessageRow;
   read: boolean;
@@ -59,7 +63,14 @@ export default function MessageBubble({
   onReact: (emoji: string) => void;
   // A file could not be loaded or saved.
   onError: (message: string) => void;
+  // A photo of the message was tapped.
+  onOpenPhoto?: (attachment: Attachment) => void;
+  // Choosing messages: whether this one is chosen (undefined: not
+  // choosing); a tap chooses it or not.
+  selected?: boolean;
+  onToggle?: () => void;
 }) {
+  const selecting = selected !== undefined;
   const { colors } = useAppTheme();
   const [hovered, setHovered] = useState(false);
   const { message, own, joinedAbove, joinedBelow } = row;
@@ -100,24 +111,41 @@ export default function MessageBubble({
         styles.row,
         own ? styles.rowOwn : styles.rowOther,
         { marginTop: joinedAbove ? 2 : 10 },
-        highlighted && { backgroundColor: colors.accentSoft },
+        (highlighted || selected) && { backgroundColor: colors.accentSoft },
         styles.rowHighlightable,
         TOUCH_UI && styles.rowTouch,
       ]}
     >
-      {own ? replyButton : null}
+      {selecting ? (
+        <Pressable
+          onPress={onToggle}
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: selected }}
+          accessibilityLabel="Choose the message"
+          style={styles.check}
+        >
+          <Ionicons
+            name={selected ? "checkmark-circle" : "ellipse-outline"}
+            size={22}
+            color={selected ? colors.accent : colors.muted}
+          />
+        </Pressable>
+      ) : null}
+
+      {own && !selecting ? replyButton : null}
 
       <Animated.View
         style={[styles.bubbleWrap, { transform: [{ translateX: swipe.offset }] }]}
       >
         <Pressable
-          onLongPress={onMenu}
+          onPress={selecting ? onToggle : undefined}
+          onLongPress={selecting ? onToggle : onMenu}
           delayLongPress={350}
           // Web: right click opens the message menu instead of the browser's.
           {...({
             onContextMenu: (event: { preventDefault: () => void }) => {
               event.preventDefault();
-              onMenu();
+              (selecting ? onToggle : onMenu)?.();
             },
           } as object)}
           style={[
@@ -172,7 +200,7 @@ export default function MessageBubble({
             </Text>
           ) : null}
           {text.attachments?.length ? (
-            <AttachmentView attachments={text.attachments} own={own} onError={onError} />
+            <AttachmentView attachments={text.attachments} own={own} onError={onError} onOpenPhoto={onOpenPhoto} />
           ) : null}
           {text.status === "ok" && !text.text && text.attachments?.length ? null : text.status === "ok" ? (
             <MarkupText
@@ -256,7 +284,7 @@ export default function MessageBubble({
         </Pressable>
       </Animated.View>
 
-      {own ? null : replyButton}
+      {own || selecting ? null : replyButton}
 
       {TOUCH_UI ? (
         <Animated.View
@@ -351,6 +379,11 @@ function useSwipeToReply(onReply: () => void) {
 }
 
 const styles = StyleSheet.create({
+  check: {
+    alignSelf: "center",
+    paddingHorizontal: 6,
+  },
+
   row: {
     flexDirection: "row",
     alignItems: "center",
