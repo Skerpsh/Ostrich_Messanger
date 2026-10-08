@@ -1,6 +1,7 @@
 import { FastifyInstance } from "fastify";
 import crypto from "node:crypto";
 import { db } from "../database.js";
+import { metrics } from "../metrics.js";
 import { getBearerToken } from "../middleware/auth.js";
 import { sharedState } from "../shared-state.js";
 
@@ -20,12 +21,12 @@ export default async function monitorRoutes(server: FastifyInstance) {
     return;
   }
 
-  server.get(
+  server.get<{ Querystring: { full?: string } }>(
     "/api/internal/stats",
     {
       config: {
         rateLimit: {
-          max: 30,
+          max: 60,
           timeWindow: "1 minute",
         },
       },
@@ -42,28 +43,41 @@ export default async function monitorRoutes(server: FastifyInstance) {
       const state = sharedState();
       const [connected, processes] = await Promise.all([state.connectedUsers(), state.runningProcesses()]);
 
-      // Online now, or last seen within a day.
-      const active = await db.query(
-        `
-        SELECT COUNT(*)::int AS count
-        FROM users
-        WHERE last_seen_at > NOW() - INTERVAL '1 day'
-           OR id = ANY($1::uuid[])
-        `,
-        [[...connected.keys()]],
-      );
-
       let sockets = 0;
 
       for (const count of connected.values()) {
         sockets += count;
       }
 
+      // Online now, or last seen within a day: for reports (?full=1), not
+      // for every check.
+      let active24h: number | undefined;
+
+      if (request.query.full === "1") {
+        const active = await db.query(
+          `
+          SELECT COUNT(*)::int AS count
+          FROM users
+          WHERE last_seen_at > NOW() - INTERVAL '1 day'
+             OR id = ANY($1::uuid[])
+          `,
+          [[...connected.keys()]],
+        );
+        active24h = active.rows[0].count;
+      }
+
       return {
         online: connected.size,
         sockets,
-        active24h: active.rows[0].count,
+        active24h,
         processes,
+        // This process.
+        process: {
+          instanceId: state.instanceId,
+          uptimeSeconds: Math.round(process.uptime()),
+          rssBytes: process.memoryUsage().rss,
+        },
+        counters: metrics,
       };
     },
   );

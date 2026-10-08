@@ -4,6 +4,7 @@ import rateLimit from "@fastify/rate-limit";
 import cors from "@fastify/cors";
 
 import { db, isPgError, PG_INVALID_TEXT } from "./database.js";
+import { metrics } from "./metrics.js";
 
 import authRoutes from "./routes/auth.js";
 import usersRoutes from "./routes/users.js";
@@ -65,6 +66,21 @@ const server = Fastify({
       },
     },
   },
+});
+
+// Health checks and the monitoring's own requests are not counted.
+server.addHook("onResponse", async (request, reply) => {
+  if (/^\/api\/(health|internal\/)/.test(request.url)) {
+    return;
+  }
+
+  metrics.requests++;
+
+  if (reply.statusCode >= 500) {
+    metrics.serverErrors++;
+  } else if (reply.statusCode === 429) {
+    metrics.rateLimited++;
+  }
 });
 
 server.setErrorHandler((error: FastifyError, request, reply) => {

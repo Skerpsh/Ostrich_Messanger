@@ -8,6 +8,7 @@ import {
   PG_UNIQUE_VIOLATION,
   withTransaction,
 } from "../database.js";
+import { metrics } from "../metrics.js";
 import {
   accountView,
   AUTH_KEY_PATTERN,
@@ -175,6 +176,7 @@ async function loginBlocked(request: FastifyRequest, username: string) {
 }
 
 function recordFailedLogin(request: FastifyRequest, username: string) {
+  metrics.failedLogins++;
   return sharedState().addFailure(failedLoginKey(request, username), FAILED_LOGIN_WINDOW_MS);
 }
 

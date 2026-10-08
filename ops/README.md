@@ -141,14 +141,32 @@ the backend runs and reaches PostgreSQL, so a stopped database alerts too.
 ### Monitoring bot
 
 A Telegram bot of our own, running on the server next to the backend
-(`backend/src/monitor/`, unit `ostrich-monitor`). Every 15 minutes (at
-:00, :15, :30, :45) it sends a silent report: users (total, new, online,
-active in a day), messages, database and attachments size, disks, memory,
-load, services and the last backup. Every minute it checks the server and
-alerts at once, with sound, when a problem has lasted two checks: the
-backend does not answer, the database fails, a service failed, a disk or
-the memory is nearly full, the last backup is more than 26 hours old; and
-again when it is fixed. It answers `/stats` and `/health` in its chats.
+(`backend/src/monitor/`, unit `ostrich-monitor`).
+
+- **Every 15 minutes** (at :00, :15, :30, :45), silently: a few lines of
+  summary (users, online, messages, disk/RAM/CPU), and details that open
+  with a tap: users and peak online, requests, 5xx, failed logins and log
+  errors, database and files, CPU, RAM, swap, disks (with a forecast of
+  when they are full), network, backend response time and memory,
+  Postgres connections, services, the last backup, SSL certificates,
+  pending updates. ▲/▼ show the change since the previous report.
+- **At midnight**, a summary of the day compared with the day before: new
+  users, messages, peak online, requests, errors, crashes, how much the
+  database, the files and the disks grew.
+- **Alerts** with sound, checked every minute, when a problem has lasted two
+  checks, and again when it is fixed: the backend does not answer or is
+  slow, the database fails, a service failed or crashed (restarted by
+  systemd), a disk or the memory is nearly full or a disk will be full
+  within two weeks, the last backup is more than 26 hours old, many
+  errors in the backend's log or many failed logins, an SSL certificate
+  expires within two weeks.
+- **Commands**: `/stats` (the report now), `/today` (the day so far),
+  `/health`, `/id`.
+
+The day's figures and the disk history are kept in
+`/var/lib/ostrich-monitor/state.json`, so a restart (each deploy) does not
+lose them. SSL certificates are checked for the sites in
+`/etc/caddy/Caddyfile`.
 
 It does not replace UptimeRobot above: if the whole server is down, the
 bot is down too.
@@ -203,8 +221,24 @@ Other settings, in `.env` as well (the defaults are shown):
 | `MONITOR_DISK_MIN_FREE_GB` | `2` | ... or this (uploads stop at 1 GB) |
 | `MONITOR_MEMORY_MIN_FREE_PERCENT` | `5` | |
 | `MONITOR_BACKUP_MAX_AGE_HOURS` | `26` | |
+| `MONITOR_DISK_FULL_ALERT_DAYS` | `14` | alert when a disk will be full sooner |
+| `MONITOR_SLOW_MS` | `3000` | the backend is slow above this |
+| `MONITOR_LOG_ERRORS_ALERT` | `20` | errors in the log within 5 minutes |
+| `MONITOR_FAILED_LOGINS_ALERT` | `50` | failed logins within 15 minutes |
+| `MONITOR_CERT_MIN_DAYS` | `14` | Caddy renews 30 days ahead |
+| `MONITOR_TLS_HOSTS` | sites in the Caddyfile | e.g. `api.example.com,example.com` |
 | `MONITOR_SERVICES` | `ostrich* postgresql* redis* caddy*` | systemd services to watch |
 | `BACKUP_DIR` | `/var/backups/ostrich` | where `backup.sh` writes |
+
+Times are the server's: `timedatectl set-timezone Europe/Moscow` (your
+city), then `systemctl restart ostrich-monitor`.
+
+Another person: they press *Start* in the bot and send you the chat id it
+answers; add it to the list (instead of `ID`):
+
+```bash
+sed -i 's/^MONITOR_CHAT_IDS=.*/&,ID/' /opt/ostrich/backend/.env && grep '^MONITOR_CHAT_IDS=' /opt/ostrich/backend/.env && systemctl restart ostrich-monitor
+```
 
 What it does: `journalctl -u ostrich-monitor -n 30`.
 
