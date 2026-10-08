@@ -10,7 +10,8 @@ Wants=network-online.target
 WorkingDirectory=/opt/ostrich/backend
 EnvironmentFile=/opt/ostrich/backend/.env
 Environment=NODE_ENV=production
-ExecStart=/usr/bin/node dist/monitor/main.js
+# Node from nvm (/root/.nvm) if installed there, else from PATH.
+ExecStart=/bin/bash -c '[ -s /root/.nvm/nvm.sh ] && . /root/.nvm/nvm.sh; exec node dist/monitor/main.js'
 Restart=always
 RestartSec=10
 
