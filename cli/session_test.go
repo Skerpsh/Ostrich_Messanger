@@ -168,3 +168,39 @@ func TestRememberMeCheckbox(t *testing.T) {
 		t.Fatal("Ctrl+R did not turn it off")
 	}
 }
+
+func TestCacheRoundTrip(t *testing.T) {
+	keyring.MockInit()
+	m := testModel(t, 120, 34, "dark")
+	m.remembered = true
+	m.cache = loadCache(m.user.User.ID)
+
+	// Remembered: the chats, the open chat's messages and the outbox are
+	// written, and come back at the next start.
+	m.saveCache()
+
+	if _, err := saveSession(m.user); err != nil {
+		t.Fatal(err)
+	}
+
+	next := newModel(true, loadSession())
+
+	if len(next.chats) != len(m.chats) || len(next.outgoing) != len(m.outgoing) {
+		t.Fatalf("restored %d chats, %d outgoing", len(next.chats), len(next.outgoing))
+	}
+
+	_ = next.openChat(next.chats[0])
+
+	if len(next.chat.messages) != len(m.chat.messages) || !next.chat.loaded {
+		t.Fatalf("cached messages not shown: %d", len(next.chat.messages))
+	}
+
+	// Logging out removes the cache.
+	path, _ := cachePath(m.user.User.ID)
+	cmd := next.signOut("")
+	cmd()
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("cache still there: %v", err)
+	}
+}

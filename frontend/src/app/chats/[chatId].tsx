@@ -53,6 +53,7 @@ import {
 } from "@/lib/chat-rows";
 import { encryptMessage, newMessageId, type MessageRef } from "@/lib/crypto";
 import { formatPresence, previewText } from "@/lib/format";
+import { loadCachedMessages, saveCachedMessages } from "@/lib/local-cache";
 import { plainText } from "@/lib/markup";
 import { encodePayload } from "@/lib/payload";
 import { acceptPeerKey, checkPeerKey } from "@/lib/known-keys";
@@ -84,6 +85,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
   const { status, subscribeChat, subscribeEvents, sendTyping } = useRealtime();
   const {
     chats,
+    synced,
     setActiveChat,
     markChatRead,
     setPeerReadAt,
@@ -275,6 +277,36 @@ function ChatScreen({ chatId }: { chatId: string }) {
       }),
     [subscribeEvents, chatId, router],
   );
+
+  // The history saved on the device shows until the server answers (and
+  // when offline); what the server sends is saved again.
+  useEffect(() => {
+    if (!ownId) {
+      return;
+    }
+
+    let current = true;
+
+    loadCachedMessages(ownId, chatId).then((cached) => {
+      if (current && cached?.length) {
+        setMessages((loaded) => loaded ?? cached);
+      }
+    });
+
+    return () => {
+      current = false;
+    };
+  }, [ownId, chatId]);
+
+  useEffect(() => {
+    if (!ownId || messages === null) {
+      return;
+    }
+
+    const timer = setTimeout(() => saveCachedMessages(ownId, chatId, messages), 1000);
+
+    return () => clearTimeout(timer);
+  }, [ownId, chatId, messages]);
 
   // Initial history, also when the realtime connection is down. History
   // is reloaded after every join as well, so nothing sent while
@@ -710,7 +742,8 @@ function ChatScreen({ chatId }: { chatId: string }) {
     }
   };
 
-  if (chats !== null && !chat) {
+  // Not in the list from the server (the saved list may just be old).
+  if (synced && !chat) {
     return (
       <View style={styles.screen}>
         <AppHeader onBack={wide ? undefined : goBack} title="Chat" />

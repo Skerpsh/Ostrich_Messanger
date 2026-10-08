@@ -11,10 +11,12 @@ import { useAuth } from "@/context/auth";
 import { useRealtime } from "@/context/realtime";
 import * as api from "@/lib/api";
 import type { Message, ReplyPreview } from "@/lib/api";
+import { loadCachedOutbox, saveCachedOutbox } from "@/lib/local-cache";
 import { useLatest } from "@/lib/use-latest";
 
 // Messages on their way: shown in the chat at once with a clock, sent in
-// the background, and kept and sent again while there is no network. The
+// the background, and kept and sent again while there is no network (also
+// after the app is restarted: the outbox is saved on the device). The
 // client chooses each message's id, so sending one twice is harmless (the
 // server answers 409 for the second).
 
@@ -72,11 +74,46 @@ export function OutboxProvider({ children }: { children: ReactNode }) {
 
   // Another account: drop the previous one's queue.
   const [owner, setOwner] = useState(userId);
+  // The account whose saved outbox has been read (saving waits for it,
+  // so an empty queue does not overwrite the saved one).
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
 
   if (owner !== userId) {
     setOwner(userId);
     setOutgoing([]);
+    setLoadedFor(null);
   }
+
+  useEffect(() => {
+    if (!userId) {
+      return;
+    }
+
+    let current = true;
+
+    loadCachedOutbox(userId).then((saved) => {
+      if (!current) {
+        return;
+      }
+
+      // Kept: what was sent meanwhile; added: what was waiting.
+      setOutgoing((now) => [
+        ...(saved ?? []).filter((item) => !now.some((o) => o.id === item.id)),
+        ...now,
+      ]);
+      setLoadedFor(userId);
+    });
+
+    return () => {
+      current = false;
+    };
+  }, [userId]);
+
+  useEffect(() => {
+    if (userId && loadedFor === userId) {
+      saveCachedOutbox(userId, outgoing);
+    }
+  }, [userId, loadedFor, outgoing]);
 
   const update = useCallback((id: string, change: Partial<Outgoing> | null) => {
     setOutgoing((current) =>

@@ -49,8 +49,14 @@ keyring (GNOME Keyring / KWallet, the macOS Keychain, the Windows Credential
 Manager); without one, e.g. on a server over SSH, to
 `~/.config/ostrich/session-*.json`, readable only by you.
 
+A remembered session also keeps a local cache in
+`~/.config/ostrich/cache-*.json` (readable only by you): the chats list, the
+newest messages of the chats you opened (end-to-end encrypted, as the server
+sends them) and messages not sent yet, so the CLI opens at once and works
+offline; unsent messages go out once it is back online.
+
 A remembered session stays when the CLI is closed. It ends, and is
-forgotten here, with Settings → Log out, Log out of all devices, deleting
+forgotten here together with the cache, with Settings → Log out, Log out of all devices, deleting
 the account, logging this device out from another one, or after 30 days
 unused. Uncheck "Remember me" on a computer you share: then closing the CLI
 logs out.

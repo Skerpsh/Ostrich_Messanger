@@ -109,6 +109,10 @@ type model struct {
 	// Unsent text per chat (while the CLI runs).
 	drafts map[string]string
 
+	// The local cache of a remembered session (cache.go); nil otherwise.
+	cache        *cacheFile
+	cacheWritten []byte
+
 	// Overlays over the screen: an actions menu, the safety code.
 	menu       *menuState
 	safetyOpen bool
@@ -136,7 +140,10 @@ func newModel(systemDark bool, saved *LoginResponse) model {
 
 	if saved != nil {
 		m.remembered = true
-		m.initCmd = tea.Batch(m.startSession(saved), m.verifySession())
+		cmd := m.startSession(saved)
+		m.cache = loadCache(saved.User.ID)
+		m.restoreCache()
+		m.initCmd = tea.Batch(cmd, m.verifySession())
 	}
 
 	return m
@@ -187,6 +194,10 @@ func (m *model) rememberSession() tea.Cmd {
 
 			m.remembered = true
 
+			if m.cache == nil && m.user != nil {
+				m.cache = loadCache(m.user.User.ID)
+			}
+
 			if !inKeyring {
 				return m.showToast("Remembered in ~/.config/ostrich (no system keyring found)", false)
 			}
@@ -224,7 +235,7 @@ func (m *model) applyTheme() {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(tea.SetWindowTitle("Ostrich"), clockTick(), outboxTick(), m.initCmd, checkForUpdate())
+	return tea.Batch(tea.SetWindowTitle("Ostrich"), clockTick(), outboxTick(), cacheTick(), m.initCmd, checkForUpdate())
 }
 
 // --- background work ---
@@ -296,6 +307,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case outboxTickMsg:
 		return m, tea.Batch(m.flushOutbox(), outboxTick())
+
+	case cacheTickMsg:
+		m.saveCache()
+		return m, cacheTick()
 
 	case toastExpiredMsg:
 		if msg.id == m.toastID {
@@ -518,6 +533,15 @@ func (m *model) signOut(notice string) tea.Cmd {
 	m.remembered = false
 	m.rememberLater = false
 
+	var userID string
+
+	if m.user != nil {
+		userID = m.user.User.ID
+	}
+
+	m.cache = nil
+	m.cacheWritten = nil
+
 	m.user = nil
 	m.chats = nil
 	m.chat = nil
@@ -540,12 +564,14 @@ func (m *model) signOut(notice string) tea.Cmd {
 
 	return func() tea.Msg {
 		forgetSession()
+		forgetCache(userID)
 		return nil
 	}
 }
 
 // quit exits; a session that is not remembered is ended on the server.
 func (m *model) quit() tea.Cmd {
+	m.saveCache()
 	m.closeConnection()
 
 	if m.user == nil || m.remembered || m.rememberLater {

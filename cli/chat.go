@@ -255,7 +255,17 @@ func (m *model) openChat(chat Chat) tea.Cmd {
 
 	if m.chat == nil || m.chat.id != chat.ID {
 		m.saveDraft()
+		m.snapshotCache()
 		m.chat = newChatState(chat.ID, m.pal, m.paneWidth())
+
+		// The saved history shows until the server answers.
+		if m.cache != nil {
+			if cached := m.cache.Messages[chat.ID]; len(cached) > 0 {
+				m.chat.messages = append([]Message(nil), cached...)
+				m.chat.loaded = true
+			}
+		}
+
 		m.chat.composer.SetValue(m.drafts[chat.ID])
 		m.chat.fitComposer()
 		m.send(map[string]string{"type": "join", "chatId": chat.ID})
@@ -285,6 +295,7 @@ func (m *model) saveDraft() {
 
 func (m *model) closeChat() {
 	m.saveDraft()
+	m.snapshotCache()
 
 	if m.chat != nil {
 		m.send(map[string]string{"type": "leave", "chatId": m.chat.id})

@@ -14,6 +14,12 @@ import { useAuth } from "@/context/auth";
 import { useRealtime } from "@/context/realtime";
 import * as api from "@/lib/api";
 import type { Chat, Message } from "@/lib/api";
+import {
+  forgetAccountCache,
+  forgetCachedChat,
+  loadCachedChats,
+  saveCachedChats,
+} from "@/lib/local-cache";
 import { plainText } from "@/lib/markup";
 import { getItem, removeItem, setItem } from "@/lib/storage";
 import { showMessage } from "@/lib/use-chat-crypto";
@@ -28,8 +34,10 @@ import { useLatest } from "@/lib/use-latest";
 const TYPING_MS = 6000;
 
 type ChatsContextValue = {
-  // null until the first load.
+  // null until the first load (from the device or the server).
   chats: Chat[] | null;
+  // The list has come from the server since the app started.
+  synced: boolean;
   error: string | null;
   reload: () => Promise<void>;
   totalUnread: number;
@@ -58,6 +66,9 @@ type ChatsContextValue = {
   // Pins a message for both members (null unpins).
   pinMessage: (chatId: string, messageId: string | null) => Promise<void>;
 };
+
+// The chats list is saved to the device this long after its last change.
+const CACHE_SAVE_DELAY_MS = 1000;
 
 // Drafts are kept per account: an index of the chats that have one, and
 // one entry per chat (secure storage on the phones limits value sizes).
@@ -121,6 +132,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
   const userId = state.status === "signedIn" ? state.user.id : null;
 
   const [chats, setChats] = useState<Chat[] | null>(null);
+  const [synced, setSynced] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const visible = useAppVisible();
@@ -133,6 +145,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
   if (chatsOwner !== userId) {
     setChatsOwner(userId);
     setChats(null);
+    setSynced(false);
     setDrafts({});
   }
 
@@ -150,11 +163,42 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
         })),
       );
       setChats(loaded);
+      setSynced(true);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load chats");
     }
   }, [withToken, seedPresence]);
+
+  // The chats saved on the device show until the server answers (and
+  // when offline). Presence is not taken from them: it is out of date.
+  useEffect(() => {
+    if (!userId) {
+      return;
+    }
+
+    let current = true;
+
+    loadCachedChats(userId).then((cached) => {
+      if (current && cached && chatsRef.current === null) {
+        setChats(cached);
+      }
+    });
+
+    return () => {
+      current = false;
+    };
+  }, [userId, chatsRef]);
+
+  useEffect(() => {
+    if (!userId || chats === null) {
+      return;
+    }
+
+    const timer = setTimeout(() => saveCachedChats(userId, chats), CACHE_SAVE_DELAY_MS);
+
+    return () => clearTimeout(timer);
+  }, [userId, chats]);
 
   // Drafts: loaded with the account; removed from the device when it logs
   // out (they are plain text).
@@ -203,6 +247,8 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
     previousUser.current = userId;
 
     if (previous && !userId) {
+      forgetAccountCache(previous);
+
       (async () => {
         const index: string[] = JSON.parse((await getItem(draftIndexKey(previous))) ?? "[]");
         await Promise.all(index.map((chatId) => removeItem(draftKey(previous, chatId))));
@@ -461,6 +507,10 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
                 (current) =>
                   current?.filter((chat) => chat.id !== event.chatId) ?? current,
               );
+
+              if (userId) {
+                forgetCachedChat(userId, event.chatId);
+              }
               break;
 
             case "chats_changed":
@@ -547,8 +597,12 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
     async (chatId: string, scope: "everyone" | "me") => {
       await withToken((token) => api.deleteChat(token, chatId, scope));
       setChats((current) => current?.filter((chat) => chat.id !== chatId) ?? current);
+
+      if (userId) {
+        forgetCachedChat(userId, chatId);
+      }
     },
-    [withToken],
+    [withToken, userId],
   );
 
   const pinMessage = useCallback(
@@ -617,6 +671,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
     <ChatsContext
       value={{
         chats,
+        synced,
         error,
         reload,
         totalUnread,
