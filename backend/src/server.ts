@@ -14,6 +14,8 @@ import pushRoutes from "./routes/push.js";
 import attachmentsRoutes from "./routes/attachments.js";
 import groupsRoutes from "./routes/groups.js";
 import { cleanupAttachments, ensureAttachmentsDir } from "./attachments.js";
+import { listenForEvents } from "./realtime.js";
+import { setUpSharedState, sharedRedis } from "./shared-state.js";
 import websocketRoutes from "./routes/websocket.js";
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -38,6 +40,12 @@ function parseTrustProxy(value: string): boolean | string {
 const CORS_ORIGINS = process.env.CORS_ORIGINS?.split(",").map((o) => o.trim());
 
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+
+// Redis, to run several backend processes (on one server or more) behind
+// a load balancer: they share websocket events, presence, tickets, failed
+// logins and rate limits through it. Without it the backend must run as
+// one process. E.g. redis://localhost:6379.
+const REDIS_URL = process.env.REDIS_URL || undefined;
 
 const server = Fastify({
   trustProxy: TRUST_PROXY,
@@ -98,10 +106,12 @@ async function healthRoutes(instance: FastifyInstance) {
     },
     async () => {
       await db.query("SELECT 1");
+      await sharedRedis()?.ping();
 
       return {
         status: "ok",
         database: "connected",
+        ...(sharedRedis() ? { redis: "connected" } : {}),
       };
     },
   );
@@ -133,9 +143,19 @@ const start = async () => {
       methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
     });
 
+    await setUpSharedState(REDIS_URL, (error) => server.log.error(error, "redis error"));
+    listenForEvents();
+
+    if (REDIS_URL) {
+      server.log.info("sharing state through Redis: several processes can run");
+    }
+
     await server.register(rateLimit, {
       // Only routes with a `rateLimit` config are limited.
       global: false,
+      // Counted for all processes together.
+      // Redis down: requests go through rather than fail.
+      ...(sharedRedis() ? { redis: sharedRedis()!, nameSpace: "ostrich:rate-limit:", skipOnError: true } : {}),
     });
 
     await server.register(websocket, {

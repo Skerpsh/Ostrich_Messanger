@@ -4,7 +4,7 @@ import { db, isChatMember, withTransaction } from "../database.js";
 import { groupMembership, isAdmin } from "../groups.js";
 import { isBlockedInChat } from "../messages.js";
 import { authenticate } from "../middleware/auth.js";
-import { isOnline, sendToChatMembers, sendToUserSockets } from "../realtime.js";
+import { onlineUsers, sendToChatMembers, sendToUserSockets } from "../realtime.js";
 import { blockedEitherWay, presenceVisible } from "../visibility.js";
 
 // Starting chats and changing them (settings, deletion).
@@ -23,14 +23,18 @@ const chatParamsSchema = {
   },
 } as const;
 
-// What the signed-in user may see of the other member's presence.
-function presenceView(row: {
-  user_id: string | null;
-  last_seen_at: Date | null;
-  presence_visible: boolean;
-}) {
+// What the signed-in user may see of the other member's presence;
+// `online`: the users online (onlineUsers()).
+function presenceView(
+  row: {
+    user_id: string | null;
+    last_seen_at: Date | null;
+    presence_visible: boolean;
+  },
+  online: Set<string>,
+) {
   return {
-    online: row.presence_visible && row.user_id !== null && isOnline(row.user_id),
+    online: row.presence_visible && row.user_id !== null && online.has(row.user_id),
     last_seen_at: row.presence_visible ? row.last_seen_at : null,
   };
 }
@@ -178,11 +182,14 @@ export default async function chatsRoutes(server: FastifyInstance) {
           is_developer: otherUser.is_developer,
           public_key: otherUser.public_key,
           blocked: otherUser.blocked,
-          ...presenceView({
-            user_id: otherUser.id,
-            last_seen_at: otherUser.last_seen_at,
-            presence_visible: chat.presence_visible,
-          }),
+          ...presenceView(
+            {
+              user_id: otherUser.id,
+              last_seen_at: otherUser.last_seen_at,
+              presence_visible: chat.presence_visible,
+            },
+            await onlineUsers([otherUser.id]),
+          ),
         },
       });
     },
@@ -312,6 +319,11 @@ export default async function chatsRoutes(server: FastifyInstance) {
         [request.user.id],
       );
 
+      // Asked once for all, not per chat (shared state, see realtime.ts).
+      const online = await onlineUsers(
+        result.rows.filter((row) => row.presence_visible && row.user_id).map((row) => row.user_id),
+      );
+
       return {
         chats: result.rows.map(
           ({
@@ -329,11 +341,14 @@ export default async function chatsRoutes(server: FastifyInstance) {
             ...chat
           }) => ({
             ...chat,
-            ...presenceView({
-              user_id: chat.user_id,
-              last_seen_at: chat.last_seen_at,
-              presence_visible,
-            }),
+            ...presenceView(
+              {
+                user_id: chat.user_id,
+                last_seen_at: chat.last_seen_at,
+                presence_visible,
+              },
+              online,
+            ),
             pinned_message: pinned_message_id
               ? {
                   id: pinned_message_id,

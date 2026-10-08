@@ -1,5 +1,5 @@
 import { db } from "./database.js";
-import { hasOpenSocket } from "./realtime.js";
+import { sessionsWithSockets } from "./realtime.js";
 
 // Push notifications to the mobile apps through Expo's push service.
 // Messages are end-to-end encrypted, so the notification only says that
@@ -75,8 +75,10 @@ export function notifyNewMessage(chatId: string, senderId: string) {
       [chatId, senderId],
     );
 
+    // Not to devices that have the app open.
+    const open = await sessionsWithSockets(result.rows.map((row) => row.token_hash));
     const messages = result.rows
-      .filter((row) => !hasOpenSocket(row.token_hash))
+      .filter((row) => !open.has(row.token_hash))
       .map((row) => ({
         to: row.token,
         title: "Ostrich",

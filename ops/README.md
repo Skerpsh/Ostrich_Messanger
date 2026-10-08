@@ -55,6 +55,65 @@ header {
 
 Then `systemctl reload caddy`.
 
+## Several backend processes
+
+One backend process is enough for a long time. For more (several CPU
+cores, or restarts without anyone noticing) run several processes behind
+Caddy; they share websocket events, who is online, websocket tickets,
+failed logins and rate limits through Redis. Without `REDIS_URL` the backend
+keeps all of that in memory and must run as one process.
+
+All processes must see the same files of messages (`ATTACHMENTS_DIR`):
+on one server they do; on several, put the directory on shared storage.
+
+On the server, one command per step:
+
+1. Redis, only for this machine (Debian/Ubuntu listens on localhost by default):
+
+```bash
+apt-get install -y redis-server && systemctl enable --now redis-server && redis-cli ping
+```
+
+2. Tell the backend about it:
+
+```bash
+grep -q '^REDIS_URL=' /opt/ostrich/backend/.env || echo 'REDIS_URL=redis://127.0.0.1:6379' >> /opt/ostrich/backend/.env
+```
+
+3. Two processes on ports 3001 and 3002 instead of the single service (check
+first with `systemctl cat ostrich` that it runs as the same user as
+`ops/ostrich@.service`, which has none, i.e. root; add `User=` there if not):
+
+```bash
+cp /opt/ostrich/ops/ostrich@.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now ostrich@3001 ostrich@3002 && curl -fsS http://127.0.0.1:3001/api/health && curl -fsS http://127.0.0.1:3002/api/health
+```
+
+Both should answer with `"redis":"connected"`.
+
+4. In the Caddyfile, the API site's `reverse_proxy 127.0.0.1:3000` becomes
+(websockets need nothing more):
+
+```
+reverse_proxy 127.0.0.1:3001 127.0.0.1:3002 {
+	lb_policy least_conn
+	health_uri /api/health
+}
+```
+
+```bash
+systemctl reload caddy && systemctl disable --now ostrich
+```
+
+5. Deploys then restart the processes one by one:
+
+```bash
+SERVICES="ostrich@3001 ostrich@3002" ops/deploy.sh
+```
+
+More processes: another port in steps 3–5. Back to one: the reverse in the
+opposite order (`reverse_proxy 127.0.0.1:3000`, `systemctl enable --now
+ostrich`, `systemctl disable --now ostrich@3001 ostrich@3002`).
+
 ## Monitoring
 
 Two free services watch the server from outside and write to Telegram:

@@ -18,6 +18,10 @@ main() {
 
 REPO="${REPO:-/opt/ostrich}"
 SERVICE="${SERVICE:-ostrich}"
+# Several backend processes (ostrich@3001 ostrich@3002 ..., see
+# ops/README.md): restarted one after another, each checked on its port,
+# so the others keep serving meanwhile.
+SERVICES="${SERVICES:-$SERVICE}"
 WEB_ROOT="${WEB_ROOT:-/var/www/ostrich-web}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:3000/api/health}"
 
@@ -62,23 +66,33 @@ if [ "$backend" = 1 ]; then
   step "Migrating the database"
   npm run db:migrate:prod
 
-  step "Restarting $SERVICE"
-  systemctl restart "$SERVICE"
+  for service in $SERVICES; do
+    # ostrich@3001 answers on port 3001; a single service at HEALTH_URL.
+    url="$HEALTH_URL"
+    port="${service#*@}"
 
-  step "Checking that the backend answers"
-  for _ in $(seq 1 30); do
-    if curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
-      echo "backend is up"
-      break
+    if [ "$port" != "$service" ]; then
+      url="http://127.0.0.1:$port/api/health"
     fi
-    sleep 1
-  done
 
-  if ! curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
-    echo "deploy: the backend does not answer at $HEALTH_URL; last log lines:" >&2
-    journalctl -u "$SERVICE" -n 30 --no-pager >&2 || true
-    exit 1
-  fi
+    step "Restarting $service"
+    systemctl restart "$service"
+
+    step "Checking that $service answers"
+    for _ in $(seq 1 30); do
+      if curl -fsS "$url" >/dev/null 2>&1; then
+        echo "$service is up"
+        break
+      fi
+      sleep 1
+    done
+
+    if ! curl -fsS "$url" >/dev/null 2>&1; then
+      echo "deploy: $service does not answer at $url; last log lines:" >&2
+      journalctl -u "$service" -n 30 --no-pager >&2 || true
+      exit 1
+    fi
+  done
 fi
 
 if [ "$web" = 1 ]; then

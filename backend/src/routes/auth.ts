@@ -28,6 +28,7 @@ import {
   SESSION_TTL_DAYS,
 } from "../middleware/auth.js";
 import { leaveAllGroups } from "../groups.js";
+import { sharedState } from "../shared-state.js";
 import {
   closeSessionSockets,
   closeUserSockets,
@@ -163,52 +164,22 @@ const frequentRateLimit = {
 const MAX_FAILED_LOGINS = 10;
 const FAILED_LOGIN_WINDOW_MS = 15 * 60 * 1000;
 
-const failedLogins = new Map<string, { count: number; resetAt: number }>();
-
+// Counted in the shared state (shared-state.ts), so it holds across
+// processes.
 function failedLoginKey(request: FastifyRequest, username: string) {
   return `${username.toLowerCase()} ${request.ip}`;
 }
 
-function loginBlocked(request: FastifyRequest, username: string): boolean {
-  const key = failedLoginKey(request, username);
-  const entry = failedLogins.get(key);
-
-  if (!entry) {
-    return false;
-  }
-
-  if (entry.resetAt <= Date.now()) {
-    failedLogins.delete(key);
-    return false;
-  }
-
-  return entry.count >= MAX_FAILED_LOGINS;
+async function loginBlocked(request: FastifyRequest, username: string) {
+  return (await sharedState().failures(failedLoginKey(request, username))) >= MAX_FAILED_LOGINS;
 }
 
 function recordFailedLogin(request: FastifyRequest, username: string) {
-  const key = failedLoginKey(request, username);
-  const now = Date.now();
-  const entry = failedLogins.get(key);
-
-  if (entry && entry.resetAt > now) {
-    entry.count++;
-    return;
-  }
-
-  // Drop stale entries so the map cannot grow without bound.
-  if (failedLogins.size >= 10_000) {
-    for (const [name, other] of failedLogins) {
-      if (other.resetAt <= now) {
-        failedLogins.delete(name);
-      }
-    }
-  }
-
-  failedLogins.set(key, { count: 1, resetAt: now + FAILED_LOGIN_WINDOW_MS });
+  return sharedState().addFailure(failedLoginKey(request, username), FAILED_LOGIN_WINDOW_MS);
 }
 
 function clearFailedLogins(request: FastifyRequest, username: string) {
-  failedLogins.delete(failedLoginKey(request, username));
+  return sharedState().clearFailures(failedLoginKey(request, username));
 }
 
 const TOO_MANY_ATTEMPTS = "Too many failed attempts, try again later";
@@ -298,7 +269,7 @@ export default async function authRoutes(server: FastifyInstance) {
       // "@alice" works too.
       const username = request.body.username.replace(/^@/, "");
 
-      if (loginBlocked(request, username)) {
+      if (await loginBlocked(request, username)) {
         return reply.status(429).send({ error: TOO_MANY_ATTEMPTS });
       }
 
@@ -319,8 +290,8 @@ export default async function authRoutes(server: FastifyInstance) {
         password,
       );
 
-      const fail = () => {
-        recordFailedLogin(request, username);
+      const fail = async () => {
+        await recordFailedLogin(request, username);
 
         return reply.status(401).send({
           error: "Invalid username, password or OstrichID",
@@ -358,7 +329,7 @@ export default async function authRoutes(server: FastifyInstance) {
         return fail();
       }
 
-      clearFailedLogins(request, username);
+      await clearFailedLogins(request, username);
 
       const token = await createSession(user.id, clientName(request));
 
@@ -414,7 +385,7 @@ export default async function authRoutes(server: FastifyInstance) {
     async (request, reply) => {
       const { ostrich_id, keys } = request.body;
 
-      if (loginBlocked(request, request.user.username)) {
+      if (await loginBlocked(request, request.user.username)) {
         return reply.status(429).send({ error: TOO_MANY_ATTEMPTS });
       }
 
@@ -440,7 +411,7 @@ export default async function authRoutes(server: FastifyInstance) {
         !row.ostrich_id_hash ||
         !ostrichIdMatches(ostrich_id, row.ostrich_id_hash)
       ) {
-        recordFailedLogin(request, request.user.username);
+        await recordFailedLogin(request, request.user.username);
 
         // Not 401: the session is fine, clients would log out on a 401.
         return reply.status(403).send({
@@ -524,7 +495,7 @@ export default async function authRoutes(server: FastifyInstance) {
     async (request, reply) => {
       const { current_password, new_password } = request.body;
 
-      if (loginBlocked(request, request.user.username)) {
+      if (await loginBlocked(request, request.user.username)) {
         return reply.status(429).send({ error: TOO_MANY_ATTEMPTS });
       }
 
@@ -543,7 +514,7 @@ export default async function authRoutes(server: FastifyInstance) {
       );
 
       if (!passwordValid) {
-        recordFailedLogin(request, request.user.username);
+        await recordFailedLogin(request, request.user.username);
 
         return reply.status(403).send({
           error: "Current password is incorrect",
@@ -594,7 +565,7 @@ export default async function authRoutes(server: FastifyInstance) {
     async (request, reply) => {
       const { username, password } = request.body;
 
-      if (loginBlocked(request, request.user.username)) {
+      if (await loginBlocked(request, request.user.username)) {
         return reply.status(429).send({ error: TOO_MANY_ATTEMPTS });
       }
 
@@ -608,7 +579,7 @@ export default async function authRoutes(server: FastifyInstance) {
       );
 
       if (!(await argon2.verify(current.rows[0].password_hash, password))) {
-        recordFailedLogin(request, request.user.username);
+        await recordFailedLogin(request, request.user.username);
 
         return reply.status(403).send({
           error: "Password is incorrect",
@@ -697,7 +668,7 @@ export default async function authRoutes(server: FastifyInstance) {
         });
       }
 
-      clearFailedLogins(request, request.user.username);
+      await clearFailedLogins(request, request.user.username);
 
       const user = accountView(result);
 
@@ -835,7 +806,7 @@ export default async function authRoutes(server: FastifyInstance) {
     async (request, reply) => {
       const { password, auth_key } = request.body;
 
-      if (loginBlocked(request, request.user.username)) {
+      if (await loginBlocked(request, request.user.username)) {
         return reply.status(429).send({ error: TOO_MANY_ATTEMPTS });
       }
 
@@ -848,7 +819,7 @@ export default async function authRoutes(server: FastifyInstance) {
       const passwordValid = await argon2.verify(row.password_hash, password);
 
       if (!passwordValid || !row.auth_key_hash || !authKeyMatches(auth_key, row.auth_key_hash)) {
-        recordFailedLogin(request, request.user.username);
+        await recordFailedLogin(request, request.user.username);
 
         return reply.status(403).send({
           error: "Wrong password or OstrichID",
@@ -906,7 +877,7 @@ export default async function authRoutes(server: FastifyInstance) {
     },
     async (request) => {
       return {
-        ticket: createTicket(hashToken(request.token)),
+        ticket: await createTicket(hashToken(request.token)),
       };
     },
   );

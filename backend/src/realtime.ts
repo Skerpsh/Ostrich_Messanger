@@ -2,18 +2,23 @@ import type { FastifyBaseLogger } from "fastify";
 import type { WebSocket } from "ws";
 import crypto from "node:crypto";
 import { db } from "./database.js";
+import { sharedState, type ClusterEvent } from "./shared-state.js";
 import { presenceVisible } from "./visibility.js";
 
-// All realtime state is kept in memory, so the backend must run as a
-// single process.
+// Websockets and presence. Each process has its own sockets; events go
+// through the shared state (shared-state.ts: in memory, or Redis for
+// several processes), and every process delivers them to its sockets.
 
-// Open sockets of each connected user. A user is online while they have
-// at least one.
+// This process's open sockets of each connected user. A user is online
+// while they have at least one on any process.
 const userSockets = new Map<string, Set<WebSocket>>();
 
 // Users whose last socket closed recently. They are reported offline only
 // after a grace period, so quick reconnects do not flicker.
 const OFFLINE_GRACE_MS = 5_000;
+// Kept longer in the shared state than the timer that ends it, so the
+// timer finds it.
+const LEAVING_TTL_MS = OFFLINE_GRACE_MS * 3;
 const offlineTimers = new Map<string, NodeJS.Timeout>();
 
 export type PresenceEvent = {
@@ -58,7 +63,7 @@ export function untrackSession(socket: WebSocket) {
   socketSessions.delete(socket);
 }
 
-// Closes the sockets of the sessions matching `predicate`.
+// Closes this process's sockets of the sessions matching `predicate`.
 function closeSessions(predicate: (session: SocketSession) => boolean) {
   for (const [socket, session] of socketSessions) {
     if (predicate(session)) {
@@ -67,27 +72,56 @@ function closeSessions(predicate: (session: SocketSession) => boolean) {
   }
 }
 
-// Whether the session has an open socket (the app is open on that device).
-export function hasOpenSocket(tokenHash: string) {
-  for (const session of socketSessions.values()) {
-    if (session.tokenHash === tokenHash) {
-      return true;
-    }
-  }
+// The sessions of these that have a socket open (the app is open on that
+// device), on any process.
+export function sessionsWithSockets(tokenHashes: string[]) {
+  return sharedState().sessionsWithSockets(tokenHashes);
+}
 
-  return false;
+// Commands go to every process; errors are logged, not thrown (the
+// session has ended in the database either way).
+function broadcast(event: ClusterEvent) {
+  sharedState()
+    .publish(event)
+    .catch((error) => log.error(error, "failed to publish a realtime event"));
 }
 
 export function closeSessionSockets(tokenHash: string) {
-  closeSessions((session) => session.tokenHash === tokenHash);
+  broadcast({ type: "close", tokenHash });
 }
 
 // Closes all sockets of the user, except those of the session `keepTokenHash`.
 export function closeUserSockets(userId: string, keepTokenHash?: string) {
-  closeSessions(
-    (session) =>
-      session.userId === userId && session.tokenHash !== keepTokenHash,
-  );
+  broadcast({ type: "close", userId, keepTokenHash });
+}
+
+// Applies events from all processes to this process's sockets.
+let subscribed = false;
+
+export function listenForEvents() {
+  if (subscribed) {
+    return;
+  }
+
+  subscribed = true;
+
+  sharedState().subscribe((event) => {
+    switch (event.type) {
+      case "deliver":
+        for (const userId of event.userIds) {
+          sendToUser(userId, event.data);
+        }
+        break;
+
+      case "close":
+        closeSessions((session) =>
+          event.tokenHash !== undefined
+            ? session.tokenHash === event.tokenHash
+            : session.userId === event.userId && session.tokenHash !== event.keepTokenHash,
+        );
+        break;
+    }
+  });
 }
 
 // Closes sockets whose session has expired or no longer exists (e.g. it
@@ -116,8 +150,9 @@ export async function closeEndedSessions() {
   closeSessions((session) => !active.has(session.tokenHash));
 }
 
-export function connectionCount(userId: string) {
-  return userSockets.get(userId)?.size ?? 0;
+// How many sockets the user has open, on all processes.
+export async function connectionCount(userId: string) {
+  return (await sharedState().socketCounts([userId])).get(userId) ?? 0;
 }
 
 // --- websocket tickets ---
@@ -127,33 +162,16 @@ export function connectionCount(userId: string) {
 // quickly, so a URL that ends up in a proxy log is useless.
 const TICKET_TTL_MS = 30_000;
 
-const tickets = new Map<string, { tokenHash: string; expiresAt: number }>();
-
-export function createTicket(tokenHash: string): string {
-  const now = Date.now();
-
-  for (const [ticket, entry] of tickets) {
-    if (entry.expiresAt <= now) {
-      tickets.delete(ticket);
-    }
-  }
-
+export async function createTicket(tokenHash: string): Promise<string> {
   const ticket = crypto.randomBytes(32).toString("hex");
-  tickets.set(ticket, { tokenHash, expiresAt: now + TICKET_TTL_MS });
+  await sharedState().putTicket(ticket, tokenHash, TICKET_TTL_MS);
 
   return ticket;
 }
 
 // Returns the ticket's session token hash and invalidates the ticket.
-export function consumeTicket(ticket: string): string | null {
-  const entry = tickets.get(ticket);
-  tickets.delete(ticket);
-
-  if (!entry || entry.expiresAt <= Date.now()) {
-    return null;
-  }
-
-  return entry.tokenHash;
+export function consumeTicket(ticket: string): Promise<string | null> {
+  return sharedState().takeTicket(ticket);
 }
 
 // --- chat events ---
@@ -177,18 +195,22 @@ export async function sendToChatMembers(
     [chatId],
   );
 
-  const data = JSON.stringify(payload);
+  await deliver(
+    result.rows.map((row) => row.user_id).filter((id) => id !== exceptUserId),
+    payload,
+  );
+}
 
-  for (const row of result.rows) {
-    if (row.user_id !== exceptUserId) {
-      sendToUser(row.user_id, data);
-    }
+// Sends to the sockets of these users on all processes.
+async function deliver(userIds: string[], payload: unknown) {
+  if (userIds.length > 0) {
+    await sharedState().publish({ type: "deliver", userIds, data: JSON.stringify(payload) });
   }
 }
 
 // Sends to all sockets of one user (their devices).
 export function sendToUserSockets(userId: string, payload: unknown) {
-  sendToUser(userId, JSON.stringify(payload));
+  deliver([userId], payload).catch((error) => log.error(error, "failed to send an event"));
 }
 
 // Sends to everyone who shares a chat with the user and to the user's own
@@ -204,24 +226,37 @@ export async function sendToContacts(userId: string, payload: unknown) {
     [userId],
   );
 
-  const data = JSON.stringify(payload);
   const recipients = new Set<string>([userId]);
 
   for (const row of result.rows) {
     recipients.add(row.user_id);
   }
 
-  for (const recipient of recipients) {
-    sendToUser(recipient, data);
-  }
+  await deliver([...recipients], payload);
 }
 
 // --- presence ---
 
-export function isOnline(userId: string) {
-  return userSockets.has(userId) || offlineTimers.has(userId);
+// The users of these that are online: with a socket open on any process,
+// or gone only a moment ago.
+export async function onlineUsers(userIds: string[]) {
+  const unique = [...new Set(userIds)];
+
+  if (unique.length === 0) {
+    return new Set<string>();
+  }
+
+  const state = sharedState();
+  const [counts, leaving] = await Promise.all([state.socketCounts(unique), state.leavingUsers(unique)]);
+
+  return new Set(unique.filter((id) => (counts.get(id) ?? 0) > 0 || leaving.has(id)));
 }
 
+export async function isOnline(userId: string) {
+  return (await onlineUsers([userId])).has(userId);
+}
+
+// Delivers to this process's sockets of the user.
 function sendToUser(userId: string, data: string) {
   for (const socket of userSockets.get(userId) ?? []) {
     send(socket, data);
@@ -245,11 +280,10 @@ async function notifyPeers(event: PresenceEvent) {
     [event.userId],
   );
 
-  const data = JSON.stringify(event);
-
-  for (const row of result.rows) {
-    sendToUser(row.user_id, data);
-  }
+  await deliver(
+    result.rows.map((row) => row.user_id),
+    event,
+  );
 }
 
 // The user's presence for the other members of a chat, e.g. once the user
@@ -267,24 +301,31 @@ export async function announcePresence(userId: string, chatId: string) {
     [userId, chatId],
   );
 
-  for (const row of result.rows) {
-    const online = isOnline(userId);
-
-    sendToUser(
-      row.user_id,
-      JSON.stringify({
-        type: "presence",
-        userId,
-        online,
-        lastSeenAt: online ? null : row.last_seen_at,
-      } satisfies PresenceEvent),
-    );
+  if (result.rows.length === 0) {
+    return;
   }
+
+  const online = await isOnline(userId);
+
+  await deliver(
+    result.rows.map((row) => row.user_id),
+    {
+      type: "presence",
+      userId,
+      online,
+      lastSeenAt: online ? null : result.rows[0].last_seen_at,
+    } satisfies PresenceEvent,
+  );
 }
 
-export function userConnected(userId: string, socket: WebSocket) {
+// Counting a socket in the shared state, per socket: its closing waits
+// for its opening to be counted.
+const counted = new WeakMap<WebSocket, Promise<unknown>>();
+
+// A socket opened: online for everyone who may see it, unless the user
+// was already (another device, or back within the grace period).
+export function userConnected(userId: string, tokenHash: string, socket: WebSocket) {
   const pendingOffline = offlineTimers.get(userId);
-  const wasOnline = isOnline(userId);
 
   if (pendingOffline) {
     clearTimeout(pendingOffline);
@@ -300,40 +341,58 @@ export function userConnected(userId: string, socket: WebSocket) {
 
   sockets.add(socket);
 
-  if (!wasOnline) {
-    notifyPeers({
-      type: "presence",
-      userId,
-      online: true,
-      lastSeenAt: null,
-    }).catch((error) => log.error(error, "failed to send presence"));
-  }
+  const state = sharedState();
+
+  const opening = (async () => {
+    const total = await state.addSocket(userId, tokenHash);
+    const wasLeaving = await state.takeLeaving(userId);
+
+    if (total === 1 && !wasLeaving) {
+      await notifyPeers({ type: "presence", userId, online: true, lastSeenAt: null });
+    }
+  })().catch((error) => log.error(error, "failed to update presence"));
+
+  counted.set(socket, opening);
 }
 
-export function userDisconnected(userId: string, socket: WebSocket) {
+// A socket closed: after the last one on all processes, and a grace
+// period without a new one, the user goes offline.
+export function userDisconnected(userId: string, tokenHash: string, socket: WebSocket) {
   const sockets = userSockets.get(userId);
 
-  if (!sockets) {
-    return;
+  sockets?.delete(socket);
+
+  if (sockets?.size === 0) {
+    userSockets.delete(userId);
   }
 
-  sockets.delete(socket);
+  const state = sharedState();
 
-  if (sockets.size > 0) {
-    return;
-  }
+  (async () => {
+    await counted.get(socket);
+    counted.delete(socket);
 
-  userSockets.delete(userId);
+    if ((await state.removeSocket(userId, tokenHash)) > 0) {
+      return;
+    }
 
-  offlineTimers.set(
-    userId,
-    setTimeout(() => {
-      offlineTimers.delete(userId);
-      goOffline(userId).catch((error) =>
-        log.error(error, "failed to update presence"),
-      );
-    }, OFFLINE_GRACE_MS),
-  );
+    await state.setLeaving(userId, LEAVING_TTL_MS);
+
+    clearTimeout(offlineTimers.get(userId));
+    offlineTimers.set(
+      userId,
+      setTimeout(() => {
+        offlineTimers.delete(userId);
+
+        // Back on another process meanwhile: it took the "leaving" mark.
+        (async () => {
+          if (await state.takeLeaving(userId)) {
+            await goOffline(userId);
+          }
+        })().catch((error) => log.error(error, "failed to update presence"));
+      }, OFFLINE_GRACE_MS),
+    );
+  })().catch((error) => log.error(error, "failed to update presence"));
 }
 
 async function goOffline(userId: string) {
@@ -374,15 +433,18 @@ export async function chatPresence(
     [chatId, userId],
   );
 
+  const online = await onlineUsers(result.rows.filter((row) => row.visible).map((row) => row.id));
+
   return result.rows.map((row) => ({
     type: "presence",
     userId: row.id,
-    online: row.visible && isOnline(row.id),
+    online: online.has(row.id),
     lastSeenAt: row.visible ? row.last_seen_at : null,
   }));
 }
 
-// On shutdown: remember when everyone connected was last seen.
+// On shutdown: remember when everyone connected here was last seen, and
+// take this process's sockets out of the shared state.
 export async function saveLastSeenForAll() {
   const userIds = [
     ...new Set([...userSockets.keys(), ...offlineTimers.keys()]),
@@ -400,4 +462,6 @@ export async function saveLastSeenForAll() {
       [userIds],
     );
   }
+
+  await sharedState().close();
 }

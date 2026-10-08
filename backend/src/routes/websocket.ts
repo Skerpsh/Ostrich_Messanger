@@ -122,7 +122,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
         const tokenHash = token
           ? hashToken(token)
           : typeof ticket === "string"
-            ? consumeTicket(ticket)
+            ? await consumeTicket(ticket)
             : null;
 
         const session = tokenHash ? await findSessionByHash(tokenHash) : null;
@@ -133,7 +133,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
           });
         }
 
-        if (connectionCount(session.user.id) >= MAX_CONNECTIONS_PER_USER) {
+        if ((await connectionCount(session.user.id)) >= MAX_CONNECTIONS_PER_USER) {
           return reply.status(429).send({
             error: "Too many connections",
           });
@@ -366,14 +366,14 @@ export default async function websocketRoutes(server: FastifyInstance) {
 
       socket.on("close", () => {
         untrackSession(socket);
-        userDisconnected(user.id, socket);
+        userDisconnected(user.id, session.tokenHash, socket);
       });
 
       trackSession(socket, {
         userId: user.id,
         tokenHash: session.tokenHash,
       });
-      userConnected(user.id, socket);
+      userConnected(user.id, session.tokenHash, socket);
 
       send({
         type: "connected",

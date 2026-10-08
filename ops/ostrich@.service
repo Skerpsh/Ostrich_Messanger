@@ -1,0 +1,21 @@
+# One backend process of several (see "Several backend processes" in
+# ops/README.md); the instance name is its port: ostrich@3001,
+# ostrich@3002, ... They share state through Redis (REDIS_URL in .env).
+[Unit]
+Description=Ostrich backend on port %i
+After=network.target postgresql.service redis-server.service
+
+[Service]
+WorkingDirectory=/opt/ostrich/backend
+EnvironmentFile=/opt/ostrich/backend/.env
+Environment=NODE_ENV=production
+# Set on the command line: values from EnvironmentFile would win over
+# Environment= (and .env may have a PORT).
+ExecStart=/usr/bin/env PORT=%i HOST=127.0.0.1 /usr/bin/node dist/server.js
+Restart=always
+RestartSec=2
+# Time to tell the connected users they were last seen now.
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
