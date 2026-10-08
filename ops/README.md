@@ -123,6 +123,9 @@ Two free services watch the server from outside and write to Telegram:
 - **Healthchecks.io** expects a ping from every daily backup and raises the
   alarm when one fails or none comes.
 
+And our own bot on the server reports every 15 minutes (see *Monitoring
+bot* below).
+
 ### Server down: UptimeRobot
 
 1. Sign up at <https://uptimerobot.com>.
@@ -134,6 +137,76 @@ Two free services watch the server from outside and write to Telegram:
 
 The health check answers `{"status":"ok","database":"connected"}` only when
 the backend runs and reaches PostgreSQL, so a stopped database alerts too.
+
+### Monitoring bot
+
+A Telegram bot of our own, running on the server next to the backend
+(`backend/src/monitor/`, unit `ostrich-monitor`). Every 15 minutes (at
+:00, :15, :30, :45) it sends a silent report: users (total, new, online,
+active in a day), messages, database and attachments size, disks, memory,
+load, services and the last backup. Every minute it checks the server and
+alerts at once, with sound, when a problem has lasted two checks: the
+backend does not answer, the database fails, a service failed, a disk or
+the memory is nearly full, the last backup is more than 26 hours old; and
+again when it is fixed. It answers `/stats` and `/health` in its chats.
+
+It does not replace UptimeRobot above: if the whole server is down, the
+bot is down too.
+
+On the server, one command per step:
+
+1. In Telegram, [@BotFather](https://t.me/BotFather) → `/newbot`; copy the
+   token it gives. Then put it (instead of `TOKEN`) and a random secret,
+   with which the bot asks the backend who is online, into `.env`:
+
+```bash
+printf 'MONITOR_BOT_TOKEN=TOKEN\nMONITOR_SECRET=%s\n' "$(openssl rand -hex 32)" >> /opt/ostrich/backend/.env
+```
+
+2. Build it and restart the backend, which now knows the secret:
+
+```bash
+cd /opt/ostrich && ops/deploy.sh --backend-only --no-backup
+```
+
+3. Start the bot:
+
+```bash
+cp /opt/ostrich/ops/ostrich-monitor.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now ostrich-monitor
+```
+
+4. Write `/start` to the bot: it answers with your chat id. For a group,
+   add the bot to it and send `/id` there. Put the id (instead of `ID`;
+   several separated by commas) into `.env`:
+
+```bash
+echo 'MONITOR_CHAT_IDS=ID' >> /opt/ostrich/backend/.env && systemctl restart ostrich-monitor
+```
+
+The bot says "Мониторинг запущен" with a first report. Only these chats
+get reports and answers. Deploys restart the bot with the backend.
+
+With several backend processes (above), give it all of their addresses:
+
+```bash
+echo 'MONITOR_BACKEND_URLS=http://127.0.0.1:3001,http://127.0.0.1:3002' >> /opt/ostrich/backend/.env && systemctl restart ostrich-monitor
+```
+
+Other settings, in `.env` as well (the defaults are shown):
+
+| Variable | Default | |
+|---|---|---|
+| `MONITOR_REPORT_MINUTES` | `15` | how often to report |
+| `MONITOR_CHECK_SECONDS` | `60` | how often to check |
+| `MONITOR_ALERT_AFTER` | `2` | checks in a row before an alert |
+| `MONITOR_DISK_MIN_FREE_PERCENT` | `10` | a disk is low below this ... |
+| `MONITOR_DISK_MIN_FREE_GB` | `2` | ... or this (uploads stop at 1 GB) |
+| `MONITOR_MEMORY_MIN_FREE_PERCENT` | `5` | |
+| `MONITOR_BACKUP_MAX_AGE_HOURS` | `26` | |
+| `MONITOR_SERVICES` | `ostrich* postgresql* redis* caddy*` | systemd services to watch |
+| `BACKUP_DIR` | `/var/backups/ostrich` | where `backup.sh` writes |
+
+What it does: `journalctl -u ostrich-monitor -n 30`.
 
 ### Files of messages
 

@@ -25,6 +25,10 @@ function behaves(name: string, make: () => Promise<SharedState>, makeOther: (fir
     assert.equal(await b.addSocket("u1", "s2"), 2);
     assert.deepEqual([...(await a.socketCounts(["u1", "u2"]))], [["u1", 2], ["u2", 0]]);
     assert.deepEqual([...(await b.sessionsWithSockets(["s1", "s2", "s3"]))], ["s1", "s2"]);
+    assert.equal(await b.addSocket("u2", "s3"), 1);
+    assert.deepEqual([...(await a.connectedUsers())].sort(), [["u1", 2], ["u2", 1]]);
+    assert.equal(await b.removeSocket("u2", "s3"), 0);
+    assert.deepEqual([...(await b.connectedUsers())], [["u1", 2]]);
 
     assert.equal(await a.removeSocket("u1", "s1"), 1);
     assert.equal(await b.removeSocket("u1", "s2"), 0);

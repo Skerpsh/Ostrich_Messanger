@@ -29,6 +29,11 @@ export interface SharedState {
   socketCounts(userIds: string[]): Promise<Map<string, number>>;
   // The sessions of these that have a socket open somewhere.
   sessionsWithSockets(tokenHashes: string[]): Promise<Set<string>>;
+  // Everyone with a socket open on any process, with how many (for the
+  // monitoring, src/monitor/).
+  connectedUsers(): Promise<Map<string, number>>;
+  // How many backend processes share this state.
+  runningProcesses(): Promise<number>;
 
   // A user's last socket closed: they count as online a little longer,
   // so quick reconnects do not flicker. takeLeaving() ends that and tells
@@ -100,6 +105,14 @@ export class MemoryState implements SharedState {
 
   async sessionsWithSockets(tokenHashes: string[]) {
     return new Set(tokenHashes.filter((hash) => this.sessionSockets.has(hash)));
+  }
+
+  async connectedUsers() {
+    return new Map(this.userSockets);
+  }
+
+  async runningProcesses() {
+    return 1;
   }
 
   async setLeaving(userId: string, ms: number) {
@@ -400,6 +413,39 @@ export class RedisState implements SharedState {
     const totals = await this.totals(keys, await this.hashes(keys));
 
     return new Set(tokenHashes.filter((_, i) => totals[i] > 0));
+  }
+
+  // All keys matching a pattern, a batch at a time (KEYS would block Redis).
+  private async scanKeys(pattern: string) {
+    const keys = new Set<string>();
+    let cursor = "0";
+
+    do {
+      const [next, batch] = await this.redis.scan(cursor, "MATCH", pattern, "COUNT", 500);
+      cursor = next;
+      batch.forEach((key) => keys.add(key));
+    } while (cursor !== "0");
+
+    return [...keys];
+  }
+
+  async connectedUsers() {
+    const prefix = userSocketsKey("");
+    const keys = await this.scanKeys(`${prefix}*`);
+    const totals = await this.totals(keys, await this.hashes(keys));
+    const users = new Map<string, number>();
+
+    keys.forEach((key, i) => {
+      if (totals[i] > 0) {
+        users.set(key.slice(prefix.length), totals[i]);
+      }
+    });
+
+    return users;
+  }
+
+  async runningProcesses() {
+    return (await this.scanKeys(instanceKey("*"))).length;
   }
 
   async setLeaving(userId: string, ms: number) {

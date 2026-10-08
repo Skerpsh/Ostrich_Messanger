@@ -12,7 +12,9 @@
     "db:migrate": "tsx src/migrate.ts",
     "db:migrate:prod": "node dist/migrate.js",
     "dev-badge": "tsx src/dev-badge.ts",
-    "dev-badge:prod": "node dist/dev-badge.js"
+    "dev-badge:prod": "node dist/dev-badge.js",
+    "monitor": "tsx src/monitor/main.ts",
+    "monitor:prod": "node dist/monitor/main.js"
   },
   "keywords": [],
   "author": "",

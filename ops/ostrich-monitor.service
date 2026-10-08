@@ -1,0 +1,18 @@
+# The monitoring bot (backend/src/monitor/): reports to Telegram every 15
+# minutes and alerts when something breaks. See "Monitoring bot" in
+# ops/README.md.
+[Unit]
+Description=Ostrich monitoring bot
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/ostrich/backend
+EnvironmentFile=/opt/ostrich/backend/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node dist/monitor/main.js
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

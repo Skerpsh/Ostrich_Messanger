@@ -93,6 +93,12 @@ if [ "$backend" = 1 ]; then
       exit 1
     fi
   done
+
+  # The monitoring bot runs the same build (see ops/README.md).
+  if systemctl is-enabled --quiet ostrich-monitor 2>/dev/null; then
+    step "Restarting ostrich-monitor"
+    systemctl restart ostrich-monitor
+  fi
 fi
 
 if [ "$web" = 1 ]; then

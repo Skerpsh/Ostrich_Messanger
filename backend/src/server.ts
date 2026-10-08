@@ -13,6 +13,7 @@ import avatarsRoutes from "./routes/avatars.js";
 import pushRoutes from "./routes/push.js";
 import attachmentsRoutes from "./routes/attachments.js";
 import groupsRoutes from "./routes/groups.js";
+import monitorRoutes from "./routes/monitor.js";
 import { cleanupAttachments, ensureAttachmentsDir } from "./attachments.js";
 import { listenForEvents } from "./realtime.js";
 import { setUpSharedState, sharedRedis } from "./shared-state.js";
@@ -174,6 +175,7 @@ const start = async () => {
     await server.register(pushRoutes);
     await server.register(attachmentsRoutes);
     await server.register(groupsRoutes);
+    await server.register(monitorRoutes);
 
     await ensureAttachmentsDir();
 
