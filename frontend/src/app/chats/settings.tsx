@@ -6,6 +6,7 @@ import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } fro
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AppHeader from "@/components/app-header";
 import DevBadge from "@/components/dev-badge";
+import QrCode from "@/components/qr-code";
 import type { IconName } from "@/components/icon-button";
 import {
   DeleteAccountForm,
@@ -20,6 +21,7 @@ import { Divider, Row, Section, styles } from "@/components/settings/ui";
 import { useAuth, useCurrentUser } from "@/context/auth";
 import { useAppTheme, type ThemePreference } from "@/context/theme";
 import { useIsWide } from "@/lib/layout";
+import { profileLink } from "@/lib/links";
 import { accents } from "@/theme/colors";
 
 const THEME_OPTIONS: { value: ThemePreference; label: string; icon: IconName }[] =
@@ -40,6 +42,8 @@ export default function SettingsScreen() {
 
   const [open, setOpen] = useState<"username" | "password" | "delete" | null>(null);
   const [copied, setCopied] = useState(false);
+  // The profile's QR code (scanned, it opens a chat with the user).
+  const [showQr, setShowQr] = useState(false);
 
   // Logging out everywhere takes a second tap, so it is not done by accident.
   const [confirmingSignOut, setConfirmingSignOut] = useState(false);
@@ -126,8 +130,32 @@ export default function SettingsScreen() {
                 {copied ? "Copied" : "Copy username"}
               </Text>
             </Pressable>
+            <Pressable
+              onPress={() => setShowQr((shown) => !shown)}
+              accessibilityRole="button"
+              accessibilityState={{ expanded: showQr }}
+              style={({ hovered }) => [
+                styles.chip,
+                { backgroundColor: colors.accentSoft },
+                hovered && styles.hovered,
+              ]}
+            >
+              <Ionicons name="qr-code-outline" size={15} color={colors.accent} />
+              <Text style={[styles.chipText, { color: colors.accent }]}>
+                {showQr ? "Hide QR code" : "My QR code"}
+              </Text>
+            </Pressable>
+            {showQr ? (
+              <>
+                <QrCode value={profileLink(user.username)} />
+                <Text selectable style={[styles.hint, { color: colors.muted }]}>
+                  {profileLink(user.username)}
+                </Text>
+              </>
+            ) : null}
             <Text style={[styles.hint, { color: colors.muted }]}>
-              Friends start chats with you by your username.
+              Friends start chats with you by your username, or by scanning
+              your QR code.
             </Text>
           </View>
 

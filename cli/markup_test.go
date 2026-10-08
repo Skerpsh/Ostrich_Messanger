@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"reflect"
 	"testing"
 )
@@ -60,5 +62,41 @@ func TestPayload(t *testing.T) {
 	// Malformed attachments are left out.
 	if got := decodePayload(payloadMarker + `{"t":"x","a":[{"i":"nope"},{"i":1}]}`); got.text != "x" || len(got.attachments) != 0 {
 		t.Fatalf("malformed attachments: %+v", got)
+	}
+}
+
+// The same cases as the app's (frontend/src/lib/markup.test.ts).
+func TestMentions(t *testing.T) {
+	data, err := os.ReadFile("../testdata/markup-mentions.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cases struct {
+		Mentions [][2]json.RawMessage `json:"mentions"`
+	}
+
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range cases.Mentions {
+		var text string
+		var want []string
+
+		_ = json.Unmarshal(c[0], &text)
+		_ = json.Unmarshal(c[1], &want)
+
+		got := []string{}
+
+		for _, s := range parseMarkup(text) {
+			if s.style.mention != "" && !s.style.code {
+				got = append(got, s.style.mention)
+			}
+		}
+
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%q: got %v, want %v", text, got, want)
+		}
 	}
 }

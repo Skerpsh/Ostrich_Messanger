@@ -20,9 +20,9 @@ export default function ChatAvatar({
   return (
     <Avatar
       name={chatName(chat)}
-      avatarId={group ? null : chat.avatar_id}
+      avatarId={chat.type === "direct" ? chat.avatar_id : null}
       uri={uri}
-      group={group}
+      icon={group ? "people" : chat.type === "saved" ? "bookmark" : undefined}
       size={size}
       online={online}
       ringColor={ringColor}

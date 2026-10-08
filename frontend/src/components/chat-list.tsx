@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import * as Clipboard from "expo-clipboard";
 import { usePathname, useRouter } from "expo-router";
@@ -22,12 +22,13 @@ import ChatAvatar from "@/components/chat-avatar";
 import DevBadge from "@/components/dev-badge";
 import IconButton from "@/components/icon-button";
 import { noWebOutline } from "@/components/text-field";
-import { useCurrentUser } from "@/context/auth";
+import { useAuth, useCurrentUser } from "@/context/auth";
 import { useChats } from "@/context/chats";
 import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
-import type { Chat } from "@/lib/api";
+import { openSavedChat, type Chat } from "@/lib/api";
 import { formatChatDate, previewText } from "@/lib/format";
+import { takePendingLink } from "@/lib/links";
 import { chatTitle } from "@/lib/groups";
 import { messagePreview } from "@/lib/preview";
 import { useIsWide } from "@/lib/layout";
@@ -45,6 +46,7 @@ export default function ChatList() {
   const insets = useSafeAreaInsets();
   const wide = useIsWide();
   const user = useCurrentUser();
+  const { withToken } = useAuth();
   const { chats, error, reload, typing, updateChatSettings, removeChat, leaveGroup, drafts } =
     useChats();
   const startChatWith = useStartChat();
@@ -60,6 +62,15 @@ export default function ChatList() {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+
+  // A link opened before logging in.
+  useEffect(() => {
+    takePendingLink().then((path) => {
+      if (path) {
+        router.navigate(path as never);
+      }
+    });
+  }, [router]);
 
   // The chat open on the right (wide screens).
   const selectedId = pathname.match(/^\/chats\/([0-9a-f-]{36})$/)?.[1];
@@ -113,6 +124,15 @@ export default function ChatList() {
       setActionError(e instanceof Error ? e.message : "Something went wrong");
     }
   };
+
+  // Saved messages: made on first use.
+  const openSaved = () =>
+    runAction(async () => {
+      const chatId = await withToken(openSavedChat);
+      await reload();
+      setQuery("");
+      go({ pathname: "/chats/[chatId]", params: { chatId } });
+    });
 
   const deleteChat = (chatId: string, scope: "everyone" | "me") =>
     runAction(async () => {
@@ -172,11 +192,14 @@ export default function ChatList() {
               : "Waiting for network…"
         }
         right={
-          <IconButton
-            icon="create-outline"
-            label="New chat"
-            onPress={() => go("/chats/new")}
-          />
+          <>
+            <IconButton icon="bookmark-outline" label="Saved messages" onPress={openSaved} />
+            <IconButton
+              icon="create-outline"
+              label="New chat or group"
+              onPress={() => go("/chats/new")}
+            />
+          </>
         }
       />
 
@@ -344,8 +367,8 @@ export default function ChatList() {
                   updateChatSettings(menuFor.id, { muted: !menuFor.muted }),
                 ),
               },
-              {
-                icon: "eye-off-outline",
+              ...(menuFor.type === "saved" ? [] : [{
+                icon: "eye-off-outline" as const,
                 label: "Clear history for me",
                 confirmLabel:
                   menuFor.type === "group"
@@ -353,8 +376,18 @@ export default function ChatList() {
                     : `Clear? @${menuFor.username} keeps the messages`,
                 danger: true,
                 onPress: () => deleteChat(menuFor.id, "me"),
-              },
-              ...(menuFor.type === "group"
+              }]),
+              ...(menuFor.type === "saved"
+                ? [
+                    {
+                      icon: "trash-outline" as const,
+                      label: "Delete Saved messages",
+                      confirmLabel: "Delete all saved messages?",
+                      danger: true,
+                      onPress: () => deleteChat(menuFor.id, "everyone"),
+                    },
+                  ]
+                : menuFor.type === "group"
                 ? [
                     {
                       icon: "exit-outline" as const,
@@ -444,7 +477,7 @@ function ChatRow({
         },
       } as object)}
       accessibilityRole="button"
-      accessibilityLabel={`${group ? title : `Chat with ${chat.username}`}${chat.unread_count ? `, ${chat.unread_count} unread` : ""}`}
+      accessibilityLabel={`${chat.type === "direct" ? `Chat with ${chat.username}` : title}${chat.unread_count ? `, ${chat.unread_count} unread` : ""}`}
       style={({ hovered, pressed }) => [
         styles.row,
         selected
@@ -457,7 +490,7 @@ function ChatRow({
         <View style={styles.rowLine}>
           <View style={styles.nameWrap}>
             <Text numberOfLines={1} style={[styles.name, { color: colors.text }]}>
-              {group ? title : chat.username}
+              {chat.type === "direct" ? chat.username : title}
             </Text>
             {chat.is_developer ? <DevBadge /> : null}
             {chat.muted ? (
@@ -470,7 +503,7 @@ function ChatRow({
             ) : null}
           </View>
           <View style={styles.meta}>
-            {own ? (
+            {own && chat.type !== "saved" ? (
               <Ionicons
                 name={read ? "checkmark-done" : "checkmark"}
                 size={16}
@@ -493,7 +526,7 @@ function ChatRow({
               </>
             ) : last && shownLast ? (
               <>
-                {shownLast.status === "system" ? null : own ? (
+                {shownLast.status === "system" || chat.type === "saved" ? null : own ? (
                   <Text style={{ color: colors.textSoft }}>You: </Text>
                 ) : group ? (
                   <Text style={{ color: colors.textSoft }}>@{last.sender_username}: </Text>
@@ -506,6 +539,23 @@ function ChatRow({
           </Text>
           {chat.pinned && chat.unread_count === 0 ? (
             <Ionicons name="pin" size={14} color={colors.muted} accessibilityLabel="pinned" />
+          ) : null}
+          {chat.unread_mentions ? (
+            <View
+              accessibilityLabel="you were mentioned"
+              style={[styles.badge, { backgroundColor: colors.accent }]}
+            >
+              <Text style={[styles.badgeText, { color: colors.onAccent }]}>@</Text>
+            </View>
+          ) : null}
+          {chat.join_requests ? (
+            <View
+              accessibilityLabel={`${chat.join_requests} asking to join`}
+              style={[styles.badge, { backgroundColor: colors.accentSoft }]}
+            >
+              <Ionicons name="person-add" size={11} color={colors.accent} />
+              <Text style={[styles.badgeText, { color: colors.accent }]}>{chat.join_requests}</Text>
+            </View>
           ) : null}
           {chat.unread_count > 0 ? (
             <View
@@ -630,6 +680,8 @@ const styles = StyleSheet.create({
   },
 
   badge: {
+    flexDirection: "row",
+    gap: 2,
     minWidth: 22,
     height: 22,
     borderRadius: 11,

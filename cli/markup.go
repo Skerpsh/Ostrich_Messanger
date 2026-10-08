@@ -10,12 +10,51 @@ import (
 
 // Text formatting in messages, the same as the app's
 // (frontend/src/lib/markup.ts): **bold**, *italic* or _italic_,
-// ~~strikethrough~~, `code`, ```code block```; links are found by
-// themselves.
+// ~~strikethrough~~, `code`, ```code block```; links and @mentions are
+// found by themselves.
 
 type spanStyle struct {
 	bold, italic, strike, code bool
 	link                       string
+	// The username (without "@"), for mentions.
+	mention string
+}
+
+// usernameRune: what usernames are made of (letters, digits, "_", ".",
+// "-"; ASCII).
+func usernameRune(r rune) bool {
+	return r < 128 && (wordRune(r) || r == '.' || r == '-')
+}
+
+// mentionAt reads "@username" at i: the longest username of 3–32
+// characters that starts and ends with a letter, digit or "_" and is not
+// followed by one.
+func mentionAt(text []rune, i int) (markupMatch, bool) {
+	if prev := runeAt(text, i-1); wordRune(prev) || prev == '@' {
+		return markupMatch{}, false
+	}
+
+	end := i + 1
+
+	for end < len(text) && usernameRune(text[end]) {
+		end++
+	}
+
+	run := text[i+1 : end]
+
+	if len(run) < 3 || !wordRune(run[0]) {
+		return markupMatch{}, false
+	}
+
+	for n := min(len(run), 32); n >= 3; n-- {
+		if wordRune(run[n-1]) && !wordRune(runeAt(text, i+1+n)) {
+			name := string(run[:n])
+
+			return markupMatch{i, i + 1 + n, "@" + name, spanStyle{mention: name}, false}, true
+		}
+	}
+
+	return markupMatch{}, false
 }
 
 type span struct {
@@ -124,6 +163,8 @@ func matchAt(text []rune, i int) (markupMatch, bool) {
 
 			break
 		}
+	case text[i] == '@':
+		return mentionAt(text, i)
 	case hasPrefixAt(text, i, "http://") || hasPrefixAt(text, i, "https://"):
 		if wordRune(runeAt(text, i-1)) {
 			break
@@ -187,11 +228,12 @@ func parseStyled(text []rune, outer spanStyle) []span {
 
 func combine(a, b spanStyle) spanStyle {
 	return spanStyle{
-		bold:   a.bold || b.bold,
-		italic: a.italic || b.italic,
-		strike: a.strike || b.strike,
-		code:   a.code || b.code,
-		link:   a.link + b.link,
+		bold:    a.bold || b.bold,
+		italic:  a.italic || b.italic,
+		strike:  a.strike || b.strike,
+		code:    a.code || b.code,
+		link:    a.link + b.link,
+		mention: a.mention + b.mention,
 	}
 }
 

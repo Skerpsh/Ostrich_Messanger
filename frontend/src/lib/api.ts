@@ -36,7 +36,8 @@ export type LastMessage = {
 
 export type Chat = {
   id: string;
-  type: "direct" | "group";
+  // "saved": the user's chat with themselves (Saved messages).
+  type: "direct" | "group" | "saved";
   created_at: string;
   updated_at: string;
   // Direct chats: the other user (null in groups).
@@ -56,6 +57,10 @@ export type Chat = {
   rotation_needed: boolean;
   role: "owner" | "admin" | "member";
   member_count: number;
+  // Groups: unread messages mentioning the user; for admins, people
+  // asking to join through the invite link.
+  unread_mentions?: number;
+  join_requests?: number;
   // Presence of the other user.
   online: boolean;
   last_seen_at: string | null;
@@ -110,6 +115,8 @@ export type Message = {
   edited_at: string | null;
   reply_to: ReplyPreview | null;
   reactions: Reaction[];
+  // Groups: the members it mentions.
+  mentions?: string[];
 };
 
 export type Session = {
@@ -548,6 +555,8 @@ export async function sendMessage(
     replyTo: string | null;
     // Ids of the encrypted files uploaded for it.
     attachments?: string[];
+    // Groups: members it mentions.
+    mentions?: string[];
   },
 ) {
   const { message: sent } = await request<{ message: Message }>(
@@ -560,11 +569,18 @@ export async function sendMessage(
         content: message.content,
         ...(message.replyTo ? { reply_to: message.replyTo } : {}),
         ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+        ...(message.mentions?.length ? { mentions: message.mentions } : {}),
       },
     },
   );
 
   return sent;
+}
+
+// The user's Saved messages chat (made the first time); its id.
+export async function openSavedChat(token: string) {
+  const { chat } = await request<{ chat: { id: string } }>("POST", "/api/chats/saved", { token });
+  return chat.id;
 }
 
 // --- groups (encrypted on the client, see lib/crypto.ts and
@@ -686,6 +702,79 @@ export function rotateGroupKey(token: string, chatId: string, rotation: GroupRot
     token,
     body: rotation,
   });
+}
+
+// --- invite links: opening one asks to join, an admin lets people in ---
+
+export async function getInvite(token: string, chatId: string) {
+  const { token: invite } = await request<{ token: string | null }>(
+    "GET",
+    `/api/chats/${encodeURIComponent(chatId)}/invite`,
+    { token },
+  );
+
+  return invite;
+}
+
+// A new link (the old one stops working).
+export async function makeInvite(token: string, chatId: string) {
+  const { token: invite } = await request<{ token: string }>(
+    "PUT",
+    `/api/chats/${encodeURIComponent(chatId)}/invite`,
+    { token },
+  );
+
+  return invite;
+}
+
+export function removeInvite(token: string, chatId: string) {
+  return request<unknown>("DELETE", `/api/chats/${encodeURIComponent(chatId)}/invite`, { token });
+}
+
+export type InviteInfo = {
+  // Only once the user is a member.
+  chat_id: string | null;
+  invited_by: string | null;
+  member_count: number;
+  status: "member" | "requested" | "none";
+};
+
+export async function getInviteInfo(token: string, invite: string) {
+  const { invite: info } = await request<{ invite: InviteInfo }>(
+    "GET",
+    `/api/invites/${encodeURIComponent(invite)}`,
+    { token },
+  );
+
+  return info;
+}
+
+export function requestToJoin(token: string, invite: string) {
+  return request<unknown>("POST", `/api/invites/${encodeURIComponent(invite)}/request`, { token });
+}
+
+export function cancelJoinRequest(token: string, invite: string) {
+  return request<unknown>("DELETE", `/api/invites/${encodeURIComponent(invite)}/request`, { token });
+}
+
+export type JoinRequest = FoundUser & { created_at: string };
+
+export async function getJoinRequests(token: string, chatId: string) {
+  const { requests } = await request<{ requests: JoinRequest[] }>(
+    "GET",
+    `/api/chats/${encodeURIComponent(chatId)}/requests`,
+    { token },
+  );
+
+  return requests;
+}
+
+export function declineJoinRequest(token: string, chatId: string, userId: string) {
+  return request<unknown>(
+    "DELETE",
+    `/api/chats/${encodeURIComponent(chatId)}/requests/${encodeURIComponent(userId)}`,
+    { token },
+  );
 }
 
 // --- attachments (encrypted on the client, see lib/attachments.ts) ---

@@ -331,7 +331,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
       }
 
       setChats((current) =>
-        current?.map((c) => (c.id === chatId ? { ...c, unread_count: 0 } : c)) ??
+        current?.map((c) => (c.id === chatId ? { ...c, unread_count: 0, unread_mentions: 0 } : c)) ??
         current,
       );
       sendRead(chatId, message.id);
@@ -350,7 +350,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
     if (chat?.last_message && chat.unread_count > 0) {
       setChats((current) =>
         current?.map((c) =>
-          c.id === activeChatId ? { ...c, unread_count: 0 } : c,
+          c.id === activeChatId ? { ...c, unread_count: 0, unread_mentions: 0 } : c,
         ) ?? current,
       );
       sendRead(activeChatId, chat.last_message.id);
@@ -371,6 +371,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
 
           const incoming = message.sender_id !== userId;
           const viewing = viewingRef.current === message.chat_id;
+          const mentionsMe = Boolean(userId && message.mentions?.includes(userId));
 
           setChats((current) => {
             if (!current) {
@@ -397,6 +398,8 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
               },
               unread_count:
                 incoming && !viewing ? chat.unread_count + 1 : chat.unread_count,
+              unread_mentions:
+                mentionsMe && !viewing ? (chat.unread_mentions ?? 0) + 1 : chat.unread_mentions,
             };
 
             // Most recently active first (after the pinned chats).
@@ -414,8 +417,8 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
             const chat = chatsRef.current?.find((c) => c.id === message.chat_id);
 
             // Web: a browser notification unless the chat is on screen or
-            // muted (none for group events).
-            if (chat && !chat.muted && !viewing && message.kind !== "system") {
+            // muted (a mention comes through anyway; none for group events).
+            if (chat && (!chat.muted || mentionsMe) && !viewing && message.kind !== "system") {
               const preview = messagePreview(
                 showMessage(message, privateKeyRef.current, chat, userId),
               );
@@ -450,7 +453,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
                 !chat.last_message ||
                 !isAfter(chat.last_message.created_at, lastReadAt)
               ) {
-                return { ...chat, unread_count: 0 };
+                return { ...chat, unread_count: 0, unread_mentions: 0 };
               }
 
               recount = true;

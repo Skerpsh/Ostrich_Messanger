@@ -20,6 +20,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import ActionMenu, { type ActionMenuItem } from "@/components/action-menu";
 import AppHeader from "@/components/app-header";
 import Button from "@/components/button";
+import Avatar from "@/components/avatar";
 import ChatAvatar from "@/components/chat-avatar";
 import DevBadge from "@/components/dev-badge";
 import ForwardPicker from "@/components/forward-picker";
@@ -69,7 +70,7 @@ import { saveFile } from "@/lib/files";
 import { formatPresence, previewText } from "@/lib/format";
 import { chatTitle, isGroupDistrusted } from "@/lib/groups";
 import { loadCachedMessages, saveCachedMessages } from "@/lib/local-cache";
-import { plainText } from "@/lib/markup";
+import { mentionedUsernames, plainText } from "@/lib/markup";
 import { encodePayload, type Attachment } from "@/lib/payload";
 import { pickDocument, pickPhoto } from "@/lib/pick-attachment";
 import { messagePreview } from "@/lib/preview";
@@ -83,6 +84,19 @@ import { radius } from "@/theme/colors";
 const MAX_MESSAGE_LENGTH = 4096;
 
 const INPUT_MIN_HEIGHT = 22;
+
+// Whether "typing…" may be sent again (every few seconds at most); marks
+// it sent.
+function typingDue(lastSent: { current: number }) {
+  const now = Date.now();
+
+  if (now - lastSent.current < 3000) {
+    return false;
+  }
+
+  lastSent.current = now;
+  return true;
+}
 const INPUT_MAX_HEIGHT = 140;
 
 // A new screen instance for every chat: nothing of the previous chat
@@ -125,6 +139,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
   // URL: anyone can craft a link with a misleading name.
   const chat = chats?.find((c) => c.id === chatId) ?? null;
   const group = chat?.type === "group";
+  const saved = chat?.type === "saved";
   // Groups: admins pin and delete others' messages.
   const groupAdmin = group && (chat?.role === "owner" || chat?.role === "admin");
   const peerPresence = usePresence(chat?.user_id ?? undefined);
@@ -137,6 +152,8 @@ function ChatScreen({ chatId }: { chatId: string }) {
   const [draft, setDraft] = useState(() => drafts[chatId] ?? "");
   const [sending, setSending] = useState(false);
   const [inputHeight, setInputHeight] = useState(INPUT_MIN_HEIGHT);
+  // Where the cursor is in the draft (for @mention suggestions).
+  const [cursor, setCursor] = useState<number | null>(null);
   const [scrolledUp, setScrolledUp] = useState(false);
   // Where unread messages started when the chat was opened.
   const [unreadAfter, setUnreadAfter] = useState<string | null>(null);
@@ -507,6 +524,14 @@ function ChatScreen({ chatId }: { chatId: string }) {
       return;
     }
 
+    // Groups: the server is told whom it mentions, to notify them.
+    const mentioned = new Set(mentionedUsernames(content));
+    const mentions = group
+      ? (members ?? [])
+          .filter((m) => m.id !== user.id && mentioned.has(m.username.toLowerCase()))
+          .map((m) => m.id)
+      : [];
+
     // Shown at once and sent in the background (again later if offline).
     outbox.send({
       id,
@@ -515,6 +540,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
       content: encrypted,
       replyTo: replyTo ? replyPreview(replyTo) : null,
       attachments: attachments.map((a) => a.id),
+      ...(mentions.length ? { mentions } : {}),
     });
 
     setDraft("");
@@ -696,10 +722,35 @@ function ChatScreen({ chatId }: { chatId: string }) {
     }
 
     // "typing…" for the other member, at most every few seconds.
-    if (text.trim() && !editing && Date.now() - lastTypingSent.current > 3000) {
-      lastTypingSent.current = Date.now();
+    if (text.trim() && !editing && typingDue(lastTypingSent)) {
       sendTyping(chatId);
     }
+  };
+
+  // Groups: members matching the "@…" being typed at the cursor.
+  const mentionQuery = (() => {
+    if (!group || editing) {
+      return null;
+    }
+
+    const match = /(^|[^\w@])@([A-Za-z0-9_.-]{0,32})$/.exec(draft.slice(0, cursor ?? draft.length));
+    return match ? match[2].toLowerCase() : null;
+  })();
+
+  const suggestions =
+    mentionQuery === null
+      ? []
+      : (members ?? [])
+          .filter((m) => m.id !== user?.id && m.username.toLowerCase().startsWith(mentionQuery))
+          .slice(0, 6);
+
+  const pickMention = (username: string) => {
+    const end = cursor ?? draft.length;
+    const before = draft.slice(0, end).replace(/@[A-Za-z0-9_.-]*$/, `@${username} `);
+
+    onDraftChange(before + draft.slice(end));
+    setCursor(before.length);
+    requestFocus();
   };
 
   const toggleBlocked = async () => {
@@ -889,6 +940,17 @@ function ChatScreen({ chatId }: { chatId: string }) {
       shiftKey?: boolean;
     };
 
+    // Enter or Tab takes the first @mention suggestion.
+    if (
+      Platform.OS === "web" &&
+      suggestions.length > 0 &&
+      (nativeEvent.key === "Tab" || (nativeEvent.key === "Enter" && !nativeEvent.shiftKey))
+    ) {
+      event.preventDefault();
+      pickMention(suggestions[0].username);
+      return;
+    }
+
     if (
       Platform.OS === "web" &&
       nativeEvent.key === "Enter" &&
@@ -939,7 +1001,9 @@ function ChatScreen({ chatId }: { chatId: string }) {
         : "waiting for network…"
       : group
         ? `${chat?.member_count ?? 0} members${onlineMembers ? `, ${onlineMembers} online` : ""}`
-        : formatPresence(peerPresence);
+        : saved
+          ? "only you"
+          : formatPresence(peerPresence);
 
   // Who is typing: in a group by name.
   const typingNames = (typingUsers[chatId] ?? []).map((id) => memberNames.get(id)).filter(Boolean);
@@ -978,7 +1042,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
             </Pressable>
           ) : null
         }
-        title={chat ? (group ? chatTitle(chat) : (chat.username ?? "…")) : "…"}
+        title={chat ? (chat.type === "direct" ? (chat.username ?? "…") : chatTitle(chat)) : "…"}
         titleBadge={chat?.is_developer ? <DevBadge size="md" /> : null}
         subtitle={
           typingText ? (
@@ -1152,7 +1216,11 @@ function ChatScreen({ chatId }: { chatId: string }) {
                       No messages yet
                     </Text>
                     <Text style={[styles.emptyText, { color: colors.muted }]}>
-                      {group ? "Say hi to the group!" : `Say hi to @${chat?.username ?? "…"}!`}
+                      {group
+                        ? "Say hi to the group!"
+                        : saved
+                          ? "Keep notes, links and files here: end-to-end encrypted, on all your devices."
+                          : `Say hi to @${chat?.username ?? "…"}!`}
                     </Text>
                   </View>
                 </View>
@@ -1318,6 +1386,26 @@ function ChatScreen({ chatId }: { chatId: string }) {
               },
             ]}
           >
+            {suggestions.length > 0 ? (
+              <View style={[styles.suggestions, { borderBottomColor: colors.line }]}>
+                {suggestions.map((member) => (
+                  <Pressable
+                    key={member.id}
+                    onPress={() => pickMention(member.username)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Mention @${member.username}`}
+                    style={({ hovered, pressed }) => [
+                      styles.suggestion,
+                      (hovered || pressed) && { backgroundColor: colors.hover },
+                    ]}
+                  >
+                    <Avatar name={member.username} avatarId={member.avatar_id} size={26} />
+                    <Text style={[styles.suggestionName, { color: colors.text }]}>@{member.username}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
+
             {editing ? (
               <View style={styles.replyBar}>
                 <Ionicons name="create-outline" size={18} color={colors.accent} />
@@ -1413,6 +1501,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
                   value={draft}
                   onChangeText={onDraftChange}
                   onKeyPress={onKeyPress}
+                  onSelectionChange={(event) => setCursor(event.nativeEvent.selection.end)}
                   placeholder="Message"
                   placeholderTextColor={colors.muted}
                   multiline
@@ -1578,7 +1667,32 @@ function ChatScreen({ chatId }: { chatId: string }) {
         />
       ) : null}
 
-      {chatMenu && chat && !group ? (
+      {chatMenu && chat && saved ? (
+        <ActionMenu
+          title={chatTitle(chat)}
+          onClose={() => setChatMenu(false)}
+          items={[
+            { icon: "search", label: "Search in chat", onPress: openSearch },
+            ...(chat.pinned_message
+              ? [{ icon: "pin-outline" as const, label: "Unpin message", onPress: () => togglePin(null) }]
+              : []),
+            {
+              icon: chat.pinned ? "pin" : "pin-outline",
+              label: chat.pinned ? "Unpin" : "Pin to top",
+              onPress: () => changeSettings({ pinned: !chat.pinned }),
+            },
+            {
+              icon: "trash-outline",
+              label: "Delete Saved messages",
+              confirmLabel: "Delete all saved messages?",
+              danger: true,
+              onPress: () => deleteChat("everyone"),
+            },
+          ]}
+        />
+      ) : null}
+
+      {chatMenu && chat && chat.type === "direct" ? (
         <ActionMenu
           title={`@${chat.username}`}
           onClose={() => setChatMenu(false)}
@@ -1700,6 +1814,8 @@ const styles = StyleSheet.create({
 
   emptyText: {
     fontSize: 14,
+    textAlign: "center",
+    maxWidth: 300,
   },
 
   separator: {
@@ -1718,6 +1834,25 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: radius.pill,
     overflow: "hidden",
+  },
+
+  suggestions: {
+    paddingBottom: 6,
+    marginBottom: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+
+  suggestion: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: radius.input,
+  },
+
+  suggestionName: {
+    fontSize: 15,
   },
 
   systemLabel: {

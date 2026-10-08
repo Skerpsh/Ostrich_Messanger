@@ -1,0 +1,61 @@
+{
+ "mentions": [
+  [
+   "hi @bob!",
+   [
+    "bob"
+   ]
+  ],
+  [
+   "@ann, @bob.smith and @cat.",
+   [
+    "ann",
+    "bob.smith",
+    "cat"
+   ]
+  ],
+  [
+   "mail a@bob.com",
+   []
+  ],
+  [
+   "@ab is short",
+   []
+  ],
+  [
+   "@@bob",
+   []
+  ],
+  [
+   "`@bob` in code",
+   []
+  ],
+  [
+   "**@bob** in bold",
+   [
+    "bob"
+   ]
+  ],
+  [
+   "@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   []
+  ],
+  [
+   "@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.x",
+   [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ]
+  ],
+  [
+   "@Bob-Ross- and @x_y_z",
+   [
+    "Bob-Ross",
+    "x_y_z"
+   ]
+  ],
+  [
+   "see https://x.org/@bob",
+   []
+  ]
+ ]
+}

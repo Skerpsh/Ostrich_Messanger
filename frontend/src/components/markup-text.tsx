@@ -2,7 +2,7 @@ import { Linking, Text, type StyleProp, type TextStyle } from "react-native";
 import { parseMarkup } from "@/lib/markup";
 
 // Message text with its formatting (lib/markup.ts); links open in the
-// browser.
+// browser, @mentions stand out.
 export default function MarkupText({
   text,
   style,
@@ -28,6 +28,7 @@ export default function MarkupText({
             span.strike && { textDecorationLine: "line-through" },
             span.code && { fontFamily: "monospace", backgroundColor: codeBackground },
             span.link && { color: linkColor, textDecorationLine: "underline" },
+            span.mention && { color: linkColor, fontWeight: "600" },
           ]}
         >
           {span.text}

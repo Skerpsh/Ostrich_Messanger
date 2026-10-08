@@ -1,7 +1,7 @@
 // Text formatting in messages, written like Markdown and kept in the
 // encrypted text: **bold**, *italic* or _italic_, ~~strikethrough~~,
-// `code`, ```code block```; links are found by themselves. The CLI draws
-// the same (cli/markup.go).
+// `code`, ```code block```; links and @mentions are found by themselves.
+// The CLI draws the same (cli/markup.go).
 
 export type Span = {
   text: string;
@@ -11,6 +11,8 @@ export type Span = {
   code?: boolean;
   // The address, for links.
   link?: string;
+  // The username (without "@"), for mentions.
+  mention?: string;
 };
 
 type Style = Omit<Span, "text">;
@@ -47,7 +49,25 @@ const RULES: Rule[] = [
     style: (match) => ({ link: match[0] }),
     inner: false,
   },
+  {
+    // A username (lib/validation.ts) not ending in "." or "-".
+    re: /(^|[^\w@])@([A-Za-z0-9_][A-Za-z0-9_.-]{1,30}[A-Za-z0-9_])(?![A-Za-z0-9_])/,
+    style: (match) => ({ mention: match[1] }),
+    inner: false,
+    lead: true,
+  },
 ];
+
+// The usernames a text mentions (lower case), e.g. to tell the server.
+export function mentionedUsernames(text: string) {
+  return [
+    ...new Set(
+      parseMarkup(text)
+        .filter((span) => span.mention && !span.code)
+        .map((span) => span.mention!.toLowerCase()),
+    ),
+  ];
+}
 
 // The formatted parts of a text, in order; joined they give the text
 // without the markers.
@@ -85,7 +105,7 @@ export function parseMarkup(text: string, style: Style = {}): Span[] {
     }
 
     const inner = rule.style(match);
-    const content = inner.link ? match[0] : match[1];
+    const content = inner.link || inner.mention ? match[0] : match[1];
 
     if (rule.inner && !style.code) {
       spans.push(...parseMarkup(content, { ...style, ...inner }));

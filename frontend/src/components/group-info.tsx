@@ -1,16 +1,30 @@
-import { useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useState, type ComponentProps } from "react";
+import * as Clipboard from "expo-clipboard";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import Avatar from "@/components/avatar";
 import Button from "@/components/button";
 import ChatAvatar from "@/components/chat-avatar";
 import DevBadge from "@/components/dev-badge";
+import QrCode from "@/components/qr-code";
 import SafetyCode from "@/components/safety-code";
 import TextField from "@/components/text-field";
 import { useAuth } from "@/context/auth";
 import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
-import { findUser, setGroupRole, type Chat, type GroupMember } from "@/lib/api";
+import {
+  declineJoinRequest,
+  findUser,
+  getInvite,
+  getJoinRequests,
+  makeInvite,
+  removeInvite,
+  setGroupRole,
+  type Chat,
+  type GroupMember,
+  type JoinRequest,
+} from "@/lib/api";
+import { inviteLink } from "@/lib/links";
 import { uploadAttachment } from "@/lib/attachments";
 import { publicKeyOf, safetyCode } from "@/lib/crypto";
 import {
@@ -66,6 +80,39 @@ export default function GroupInfo({
   // The member whose actions are shown, and whose safety code.
   const [selected, setSelected] = useState<string | null>(null);
   const [codeFor, setCodeFor] = useState<{ member: GroupMember; changed: boolean } | null>(null);
+
+  // Admins: the invite link (undefined while loading), its QR code, and
+  // who asks to join.
+  const [invite, setInvite] = useState<string | null | undefined>(undefined);
+  const [showInviteQr, setShowInviteQr] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [requests, setRequests] = useState<JoinRequest[]>([]);
+  const requestCount = chat.join_requests ?? 0;
+
+  const loadInvites = useCallback(() => {
+    if (!admin) {
+      return;
+    }
+
+    withToken((t) => getInvite(t, chat.id)).then(setInvite, () => setInvite(null));
+    withToken((t) => getJoinRequests(t, chat.id)).then(setRequests, () => {});
+  }, [admin, withToken, chat.id]);
+
+  useEffect(() => {
+    loadInvites();
+  }, [loadInvites, requestCount]);
+
+  const copyInvite = async (token: string) => {
+    await Clipboard.setStringAsync(inviteLink(token));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  const runInvite = (action: () => Promise<unknown>) =>
+    run(async () => {
+      await action();
+      loadInvites();
+    });
 
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
@@ -208,6 +255,85 @@ export default function GroupInfo({
             </View>
           ) : null}
 
+          {admin ? (
+            <View style={[styles.box, { backgroundColor: colors.panelAlt }]}>
+              <Text style={[styles.boxTitle, { color: colors.text }]}>Invite link</Text>
+              <Text style={[styles.note, { color: colors.muted }]}>
+                Whoever opens it asks to join; an admin lets them in here.
+              </Text>
+              {invite === undefined ? (
+                <ActivityIndicator color={colors.muted} />
+              ) : invite ? (
+                <>
+                  <Text selectable numberOfLines={2} style={[styles.inviteLink, { color: colors.accent }]}>
+                    {inviteLink(invite)}
+                  </Text>
+                  {showInviteQr ? (
+                    <View style={styles.qr}>
+                      <QrCode value={inviteLink(invite)} />
+                    </View>
+                  ) : null}
+                  <View style={styles.buttons}>
+                    <Button title={copied ? "Copied" : "Copy"} style={styles.flexButton} variant="secondary" onPress={() => copyInvite(invite)} />
+                    <Button
+                      title={showInviteQr ? "Hide QR" : "QR code"} style={styles.flexButton}
+                      variant="secondary"
+                      onPress={() => setShowInviteQr((shown) => !shown)}
+                    />
+                  </View>
+                  <View style={styles.buttons}>
+                    <Button
+                      title="New link" style={styles.flexButton}
+                      variant="secondary"
+                      disabled={busy}
+                      onPress={() => runInvite(() => withToken((t) => makeInvite(t, chat.id)))}
+                    />
+                    <Button
+                      title="Remove" style={styles.flexButton}
+                      variant="danger"
+                      disabled={busy}
+                      onPress={() => runInvite(() => withToken((t) => removeInvite(t, chat.id)))}
+                    />
+                  </View>
+                </>
+              ) : (
+                <Button
+                  title="Make an invite link"
+                  variant="secondary"
+                  disabled={busy}
+                  onPress={() => runInvite(() => withToken((t) => makeInvite(t, chat.id)))}
+                />
+              )}
+
+              {requests.length > 0 ? (
+                <>
+                  <Text style={[styles.boxTitle, { color: colors.text }]}>
+                    Asking to join ({requests.length})
+                  </Text>
+                  {requests.map((request) => (
+                    <View key={request.id} style={styles.member}>
+                      <Avatar name={request.username} avatarId={request.avatar_id} size={32} />
+                      <View style={styles.grow}>
+                        <Text numberOfLines={1} style={[styles.memberName, { color: colors.text }]}>
+                          @{request.username}
+                        </Text>
+                      </View>
+                      <Button
+                        title="Let in" style={styles.smallButton}
+                        disabled={busy || !me || chat.member_count >= MAX_GROUP_MEMBERS}
+                        onPress={() => runInvite(() => addGroupMember(withToken, me!, chat, request))}
+                      />
+                      <IconButtonLike
+                        label={`Decline @${request.username}`}
+                        onPress={() => runInvite(() => withToken((t) => declineJoinRequest(t, chat.id, request.id)))}
+                      />
+                    </View>
+                  ))}
+                </>
+              ) : null}
+            </View>
+          ) : null}
+
           {members === null ? (
             <ActivityIndicator color={colors.muted} />
           ) : (
@@ -305,6 +431,17 @@ export default function GroupInfo({
           onClose={() => setCodeFor(null)}
         />
       ) : null}
+    </Pressable>
+  );
+}
+
+// A small "decline" cross.
+function IconButtonLike({ label, onPress }: { label: string; onPress: () => void }) {
+  const { colors } = useAppTheme();
+
+  return (
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={label} hitSlop={8} style={styles.decline}>
+      <Ionicons name="close" size={20} color={colors.muted} />
     </Pressable>
   );
 }
@@ -421,6 +558,44 @@ const styles = StyleSheet.create({
   role: {
     fontSize: 12,
     fontWeight: "600",
+  },
+
+  box: {
+    borderRadius: radius.input,
+    padding: 14,
+    gap: 10,
+  },
+
+  boxTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+  },
+
+  inviteLink: {
+    fontSize: 14,
+  },
+
+  qr: {
+    alignItems: "center",
+  },
+
+  buttons: {
+    flexDirection: "row",
+    gap: 8,
+  },
+
+  flexButton: {
+    flex: 1,
+    paddingHorizontal: 8,
+  },
+
+  smallButton: {
+    minHeight: 36,
+    paddingHorizontal: 14,
+  },
+
+  decline: {
+    padding: 6,
   },
 
   memberActions: {

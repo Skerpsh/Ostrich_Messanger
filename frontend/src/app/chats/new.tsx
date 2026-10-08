@@ -13,6 +13,7 @@ import {
 import AppHeader from "@/components/app-header";
 import Avatar from "@/components/avatar";
 import Button from "@/components/button";
+import QrScanner from "@/components/qr-scanner";
 import TextField from "@/components/text-field";
 import { useAuth, useCurrentUser } from "@/context/auth";
 import { useChats } from "@/context/chats";
@@ -20,6 +21,7 @@ import { useAppTheme } from "@/context/theme";
 import { findUser, type FoundUser } from "@/lib/api";
 import { createGroup, MAX_GROUP_MEMBERS } from "@/lib/groups";
 import { useIsWide } from "@/lib/layout";
+import { linkPath, parseLink } from "@/lib/links";
 import { useStartChat } from "@/lib/use-start-chat";
 import { cleanUsername, USERNAME_RE, USERNAME_RULES } from "@/lib/validation";
 import { radius } from "@/theme/colors";
@@ -32,6 +34,7 @@ export default function NewChatScreen() {
   const startChat = useStartChat();
 
   const [mode, setMode] = useState<"chat" | "group">("chat");
+  const [scanning, setScanning] = useState(false);
   const [username, setUsername] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -102,6 +105,18 @@ export default function NewChatScreen() {
             ))}
           </View>
 
+          <View style={styles.scan}>
+            <Button
+              title="Scan a QR code"
+              icon="qr-code-outline"
+              variant="secondary"
+              onPress={() => {
+                setError(null);
+                setScanning(true);
+              }}
+            />
+          </View>
+
           {mode === "group" ? (
             <NewGroup onCreated={open} />
           ) : (
@@ -140,6 +155,32 @@ export default function NewChatScreen() {
           )}
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {scanning ? (
+        <QrScanner
+          title="Scan a QR code"
+          onClose={() => setScanning(false)}
+          onScan={(text) => {
+            const link = parseLink(text);
+            const path = link && linkPath(link);
+
+            if (path) {
+              setScanning(false);
+              router.replace(path as never);
+              return true;
+            }
+
+            if (link?.kind === "safety") {
+              setScanning(false);
+              setMode("chat");
+              setError("That is a safety code: open the chat with them, then Safety code → Scan their code.");
+              return true;
+            }
+
+            return false;
+          }}
+        />
+      ) : null}
     </View>
   );
 }
@@ -304,6 +345,13 @@ function NewGroup({ onCreated }: { onCreated: (chatId: string) => void }) {
 }
 
 const styles = StyleSheet.create({
+  scan: {
+    width: "100%",
+    maxWidth: 440,
+    alignSelf: "center",
+    marginTop: 12,
+  },
+
   tabs: {
     width: "100%",
     maxWidth: 440,

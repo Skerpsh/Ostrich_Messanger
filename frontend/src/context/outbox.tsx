@@ -39,6 +39,8 @@ export type Outgoing = {
   replyTo: ReplyPreview | null;
   // Ids of its encrypted files, already uploaded.
   attachments?: string[];
+  // Groups: members it mentions.
+  mentions?: string[];
   createdAt: string;
   // "sending": in flight or waiting for the network; "failed": refused.
   state: "sending" | "failed";
@@ -149,6 +151,7 @@ export function OutboxProvider({ children }: { children: ReactNode }) {
             content: item.content,
             replyTo: item.replyTo?.id ?? null,
             attachments: item.attachments,
+            mentions: item.mentions,
           }),
         );
 

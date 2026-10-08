@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseMarkup, plainText } from "./markup.ts";
+import { mentionedUsernames, parseMarkup, plainText } from "./markup.ts";
 import { readFileSync } from "node:fs";
 import { decodePayload, encodePayload } from "./payload.ts";
 
@@ -81,4 +81,20 @@ test("payloads with attachments", () => {
   // Malformed attachments are left out.
   const broken = '\u001eostrich1:{"t":"x","a":[{"i":"nope"},{"i":1}]}';
   assert.deepEqual(decodePayload(broken), { text: "x" });
+});
+
+// The same cases as the CLI's (cli/markup_test.go).
+test("mentions", () => {
+  const { mentions } = JSON.parse(
+    readFileSync(new URL("../../../testdata/markup-mentions.json", import.meta.url), "utf8"),
+  ) as { mentions: [string, string[]][] };
+
+  for (const [text, want] of mentions) {
+    const got = parseMarkup(text)
+      .filter((span) => span.mention && !span.code)
+      .map((span) => span.mention);
+    assert.deepEqual(got, want, text);
+  }
+
+  assert.deepEqual(mentionedUsernames("@Bob and @bob"), ["bob"]);
 });

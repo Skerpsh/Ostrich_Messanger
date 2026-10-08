@@ -203,8 +203,14 @@ export function groupInfo(chat: Chat): GroupInfo | null {
     : null;
 }
 
-// What a chat is called: "@user", or the group's name.
+export const SAVED_TITLE = "Saved messages";
+
+// What a chat is called: "@user", the group's name, Saved messages.
 export function chatTitle(chat: Chat) {
+  if (chat.type === "saved") {
+    return SAVED_TITLE;
+  }
+
   if (chat.type === "group") {
     return groupInfo(chat)?.name ?? "Group";
   }
@@ -214,6 +220,10 @@ export function chatTitle(chat: Chat) {
 
 // The name for avatars' first letter.
 export function chatName(chat: Chat) {
+  if (chat.type === "saved") {
+    return SAVED_TITLE;
+  }
+
   return chat.type === "group" ? (groupInfo(chat)?.name ?? "Group") : (chat.username ?? "?");
 }
 

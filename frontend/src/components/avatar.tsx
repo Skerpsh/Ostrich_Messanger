@@ -8,7 +8,7 @@ export default function Avatar({
   name,
   avatarId,
   uri,
-  group = false,
+  icon,
   size = 48,
   online = false,
   // Background behind the online dot's ring (the surface the avatar is on).
@@ -19,8 +19,9 @@ export default function Avatar({
   avatarId?: string | null;
   // A picture already on the device (a group's decrypted photo).
   uri?: string | null;
-  // A group without a photo shows a people icon.
-  group?: boolean;
+  // Shown instead of the first letter: a group without a photo, Saved
+  // messages.
+  icon?: "people" | "bookmark";
   size?: number;
   // Shows the green "online" dot.
   online?: boolean;
@@ -48,8 +49,8 @@ export default function Avatar({
           contentFit="cover"
           accessibilityIgnoresInvertColors
         />
-      ) : group ? (
-        <Ionicons name="people" size={size * 0.48} color={colors.textSoft} />
+      ) : icon ? (
+        <Ionicons name={icon} size={size * 0.48} color={colors.textSoft} />
       ) : avatarId ? (
         <Image
           source={{ uri: avatarUrl(avatarId) }}

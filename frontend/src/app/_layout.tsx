@@ -16,6 +16,7 @@ import { ChatsProvider } from "@/context/chats";
 import { OutboxProvider } from "@/context/outbox";
 import { RealtimeProvider } from "@/context/realtime";
 import { AppThemeProvider, useAppTheme } from "@/context/theme";
+import { rememberLink } from "@/lib/links";
 
 // Keep the splash screen until the saved session has been checked.
 SplashScreen.preventAutoHideAsync();
@@ -59,6 +60,18 @@ function RootNavigator() {
         ?.setAttribute("content", colors.surface);
     }
   }, [mode, colors.bg, colors.surface]);
+
+  // Web: an invite or profile link opened while logged out is opened
+  // after logging in (components/chat-list.tsx).
+  useEffect(() => {
+    if (
+      Platform.OS === "web" &&
+      state.status === "signedOut" &&
+      /^\/chats\/(join|u)\/[^/]+$/.test(location.pathname)
+    ) {
+      rememberLink(location.pathname);
+    }
+  }, [state.status]);
 
   if (state.status === "loading") {
     return null;
