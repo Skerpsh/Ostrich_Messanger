@@ -52,10 +52,28 @@ export type ChatMessage = {
   edited_at: Date | null;
   reply_to: ReplyPreview | null;
   reactions: Reaction[];
+  // Groups: the members it mentions.
+  mentions: string[];
 };
 
-// The emoji a message can be reacted with.
+// The emoji offered first for reactions; any single emoji is accepted.
 export const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🔥", "🙏", "👎"] as const;
+
+const graphemes = new Intl.Segmenter("en", { granularity: "grapheme" });
+
+// One emoji (with skin tone, flags, joined sequences): a reaction.
+export function isReactionEmoji(text: string) {
+  const parts = [...graphemes.segment(text)];
+
+  return (
+    text.length <= 32 &&
+    parts.length === 1 &&
+    /\p{Extended_Pictographic}|\p{Regional_Indicator}|[#*0-9]\uFE0F?\u20E3/u.test(text)
+  );
+}
+
+// The most people a message can mention.
+export const MAX_MENTIONS = 50;
 
 // Columns of the replied-to message, joined as "reply" and "reply_sender".
 const REPLY_COLUMNS = `
@@ -95,7 +113,11 @@ export const MESSAGE_SELECT = `
         WHERE r.message_id = m.id
       ),
       '[]'
-    ) AS reactions
+    ) AS reactions,
+    COALESCE(
+      (SELECT array_agg(mm.user_id) FROM message_mentions mm WHERE mm.message_id = m.id),
+      '{}'
+    ) AS mentions
   FROM messages m
   JOIN users sender ON sender.id = m.sender_id
   ${REPLY_JOINS("m")}
@@ -202,6 +224,8 @@ export async function createMessage(
   replyToId: string | null = null,
   messageId: string | null = null,
   attachmentIds: string[] = [],
+  // Groups: members the message mentions (others are ignored).
+  mentionIds: string[] = [],
 ): Promise<CreateMessageResult> {
   let result;
 
@@ -250,6 +274,17 @@ export async function createMessage(
         SET updated_at = NOW()
         WHERE id = (SELECT chat_id FROM inserted)
       ),
+      mentioned AS (
+        INSERT INTO message_mentions (message_id, user_id)
+        SELECT inserted.id, member.user_id
+        FROM inserted
+        JOIN chats ON chats.id = inserted.chat_id AND chats.type = 'group'
+        JOIN chat_members member ON member.chat_id = inserted.chat_id
+        WHERE member.user_id = ANY($8::uuid[])
+          AND member.user_id <> $2
+        ON CONFLICT DO NOTHING
+        RETURNING user_id
+      ),
       -- Whoever writes has read the chat up to their own message. A new
       -- message shows the chat to members who had it hidden.
       members AS (
@@ -270,6 +305,7 @@ export async function createMessage(
         inserted.content,
         inserted.created_at,
         ${REPLY_COLUMNS},
+        COALESCE((SELECT array_agg(user_id) FROM mentioned), '{}') AS mentions,
         -- The statement's snapshot does not contain the new row yet.
         NOT EXISTS (
           SELECT 1 FROM messages
@@ -280,7 +316,16 @@ export async function createMessage(
       JOIN users ON users.id = inserted.sender_id
       ${REPLY_JOINS("inserted")}
       `,
-      [chatId, senderId, content, replyToId, messageId, attachmentIds, groupEpochOf(content)],
+      [
+        chatId,
+        senderId,
+        content,
+        replyToId,
+        messageId,
+        attachmentIds,
+        groupEpochOf(content),
+        mentionIds.slice(0, MAX_MENTIONS),
+      ],
     );
   } catch (error) {
     if (isPgError(error, PG_UNIQUE_VIOLATION)) {

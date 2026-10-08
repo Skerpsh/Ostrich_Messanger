@@ -44,7 +44,7 @@ export async function addSystemMessage(
     [chatId, actorId, JSON.stringify(event)],
   );
 
-  return { ...result.rows[0], edited_at: null, reply_to: null, reactions: [] };
+  return { ...result.rows[0], edited_at: null, reply_to: null, reactions: [], mentions: [] };
 }
 
 export async function announceMessages(messages: ChatMessage[]) {

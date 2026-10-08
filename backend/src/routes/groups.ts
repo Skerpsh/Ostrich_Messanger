@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { FastifyInstance, FastifyReply } from "fastify";
 import type { PoolClient } from "pg";
 import { PROFILE_COLUMNS, usernameSchema } from "../accounts.js";
@@ -14,6 +15,21 @@ import {
 import type { ChatMessage } from "../messages.js";
 import { authenticate } from "../middleware/auth.js";
 import { sendToChatMembers, sendToUserSockets } from "../realtime.js";
+
+// Requests waiting at most per group.
+const MAX_JOIN_REQUESTS = 100;
+
+// The group's admins reload their chats list (its request count).
+async function notifyAdmins(chatId: string) {
+  const admins = await db.query(
+    "SELECT user_id FROM chat_members WHERE chat_id = $1 AND role IN ('owner', 'admin')",
+    [chatId],
+  );
+
+  for (const { user_id } of admins.rows) {
+    sendToUserSockets(user_id, { type: "chats_changed" });
+  }
+}
 
 // Groups. The client makes the group key and wraps it for each member
 // (frontend/src/lib/crypto.ts); the server checks who may do what and
@@ -348,6 +364,8 @@ export default async function groupsRoutes(server: FastifyInstance) {
         }
 
         await storeKeys(client, chatId, epoch, me, [{ user_id: userId, wrapped_key }]);
+        // Asked through the invite link: answered.
+        await client.query("DELETE FROM group_join_requests WHERE chat_id = $1 AND user_id = $2", [chatId, userId]);
 
         return [await addSystemMessage(client, chatId, me, { type: "added", users: user.rows })];
       });
@@ -664,6 +682,259 @@ export default async function groupsRoutes(server: FastifyInstance) {
       await sendToChatMembers(chatId, { type: "chats_changed" });
 
       return { epoch };
+    },
+  );
+
+  // --- invite links ---
+  // Whoever opens a group's link asks to join; an admin lets them in by
+  // adding them (POST …/members, their app wraps the key). The token only
+  // allows asking.
+
+  const adminOnly = async (chatId: string, userId: string) => {
+    const membership = await groupMembership(chatId, userId);
+    return membership && isAdmin(membership.role) ? membership : null;
+  };
+
+  // The group's link (admins); null if there is none.
+  server.get<{ Params: { chatId: string } }>(
+    "/api/chats/:chatId/invite",
+    { preHandler: authenticate, schema: { params: chatParams } },
+    async (request, reply) => {
+      if (!(await adminOnly(request.params.chatId, request.user.id))) {
+        return reply.status(403).send({ error: "Only the group's admins can see its link" });
+      }
+
+      const result = await db.query("SELECT token FROM group_invites WHERE chat_id = $1", [
+        request.params.chatId,
+      ]);
+
+      return { token: result.rows[0]?.token ?? null };
+    },
+  );
+
+  // A new link (the old one stops working).
+  server.put<{ Params: { chatId: string } }>(
+    "/api/chats/:chatId/invite",
+    { preHandler: authenticate, config: groupRateLimit, schema: { params: chatParams } },
+    async (request, reply) => {
+      const { chatId } = request.params;
+
+      if (!(await adminOnly(chatId, request.user.id))) {
+        return reply.status(403).send({ error: "Only the group's admins can make a link" });
+      }
+
+      const token = crypto.randomBytes(16).toString("base64url");
+
+      await db.query(
+        `
+        INSERT INTO group_invites (chat_id, token, created_by) VALUES ($1, $2, $3)
+        ON CONFLICT (chat_id) DO UPDATE
+        SET token = EXCLUDED.token, created_by = EXCLUDED.created_by, created_at = NOW()
+        `,
+        [chatId, token, request.user.id],
+      );
+
+      return { token };
+    },
+  );
+
+  server.delete<{ Params: { chatId: string } }>(
+    "/api/chats/:chatId/invite",
+    { preHandler: authenticate, config: groupRateLimit, schema: { params: chatParams } },
+    async (request, reply) => {
+      if (!(await adminOnly(request.params.chatId, request.user.id))) {
+        return reply.status(403).send({ error: "Only the group's admins can remove its link" });
+      }
+
+      await db.query("DELETE FROM group_invites WHERE chat_id = $1", [request.params.chatId]);
+
+      return { removed: true };
+    },
+  );
+
+  const tokenParams = {
+    type: "object",
+    required: ["token"],
+    properties: { token: { type: "string", pattern: "^[A-Za-z0-9_-]{16,64}$" } },
+  } as const;
+
+  // What a link leads to: the group's size and who made the link (its
+  // name is encrypted: members only), and where the user stands.
+  server.get<{ Params: { token: string } }>(
+    "/api/invites/:token",
+    {
+      preHandler: authenticate,
+      config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+      schema: { params: tokenParams },
+    },
+    async (request, reply) => {
+      const result = await db.query(
+        `
+        SELECT
+          i.chat_id,
+          creator.username AS invited_by,
+          (SELECT COUNT(*)::int FROM chat_members cm WHERE cm.chat_id = i.chat_id) AS member_count,
+          EXISTS (
+            SELECT 1 FROM chat_members cm WHERE cm.chat_id = i.chat_id AND cm.user_id = $2
+          ) AS member,
+          EXISTS (
+            SELECT 1 FROM group_join_requests r WHERE r.chat_id = i.chat_id AND r.user_id = $2
+          ) AS requested
+        FROM group_invites i
+        LEFT JOIN users creator ON creator.id = i.created_by
+        WHERE i.token = $1
+        `,
+        [request.params.token, request.user.id],
+      );
+
+      const invite = result.rows[0];
+
+      if (!invite) {
+        return reply.status(404).send({ error: "This invite link is not valid (any more)" });
+      }
+
+      return {
+        invite: {
+          chat_id: invite.member ? invite.chat_id : null,
+          invited_by: invite.invited_by,
+          member_count: invite.member_count,
+          status: invite.member ? "member" : invite.requested ? "requested" : "none",
+        },
+      };
+    },
+  );
+
+  // Asks to join; the group's admins see it.
+  server.post<{ Params: { token: string } }>(
+    "/api/invites/:token/request",
+    {
+      preHandler: authenticate,
+      config: { rateLimit: { max: 10, timeWindow: "1 minute" } },
+      schema: { params: tokenParams },
+    },
+    async (request, reply) => {
+      const me = request.user.id;
+
+      const done = await change(reply, async (client) => {
+        const invite = await client.query("SELECT chat_id FROM group_invites WHERE token = $1", [
+          request.params.token,
+        ]);
+        const chatId = invite.rows[0]?.chat_id as string | undefined;
+
+        if (!chatId) {
+          throw new Refused(404, "This invite link is not valid (any more)");
+        }
+
+        const member = await client.query(
+          "SELECT 1 FROM chat_members WHERE chat_id = $1 AND user_id = $2",
+          [chatId, me],
+        );
+
+        if (member.rows.length > 0) {
+          throw new Refused(409, "You are already in this group");
+        }
+
+        const keys = await client.query("SELECT public_key FROM users WHERE id = $1", [me]);
+
+        if (!keys.rows[0]?.public_key) {
+          throw new Refused(400, "Set up end-to-end encryption first: open the updated Ostrich");
+        }
+
+        const pending = await client.query(
+          "SELECT COUNT(*)::int AS n FROM group_join_requests WHERE chat_id = $1",
+          [chatId],
+        );
+
+        if (pending.rows[0].n >= MAX_JOIN_REQUESTS) {
+          throw new Refused(429, "This group has too many requests waiting; try later");
+        }
+
+        await client.query(
+          "INSERT INTO group_join_requests (chat_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+          [chatId, me],
+        );
+
+        return chatId;
+      });
+
+      if (!done) {
+        return;
+      }
+
+      await notifyAdmins(done);
+
+      return reply.status(201).send({ requested: true });
+    },
+  );
+
+  // Takes the user's request back.
+  server.delete<{ Params: { token: string } }>(
+    "/api/invites/:token/request",
+    { preHandler: authenticate, config: groupRateLimit, schema: { params: tokenParams } },
+    async (request) => {
+      const result = await db.query(
+        `
+        DELETE FROM group_join_requests r
+        USING group_invites i
+        WHERE i.token = $1 AND r.chat_id = i.chat_id AND r.user_id = $2
+        RETURNING r.chat_id
+        `,
+        [request.params.token, request.user.id],
+      );
+
+      if (result.rows[0]) {
+        await notifyAdmins(result.rows[0].chat_id);
+      }
+
+      return { cancelled: true };
+    },
+  );
+
+  // Who asks to join (admins), with their keys (to let them in).
+  server.get<{ Params: { chatId: string } }>(
+    "/api/chats/:chatId/requests",
+    { preHandler: authenticate, schema: { params: chatParams } },
+    async (request, reply) => {
+      if (!(await adminOnly(request.params.chatId, request.user.id))) {
+        return reply.status(403).send({ error: "Only the group's admins see the requests" });
+      }
+
+      const result = await db.query(
+        `
+        SELECT users.id, users.username, users.public_key, ${PROFILE_COLUMNS}, r.created_at
+        FROM group_join_requests r
+        JOIN users ON users.id = r.user_id
+        WHERE r.chat_id = $1
+        ORDER BY r.created_at
+        `,
+        [request.params.chatId],
+      );
+
+      return { requests: result.rows };
+    },
+  );
+
+  // Declines a request (admins).
+  server.delete<{ Params: { chatId: string; userId: string } }>(
+    "/api/chats/:chatId/requests/:userId",
+    {
+      preHandler: authenticate,
+      config: groupRateLimit,
+      schema: {
+        params: { type: "object", required: ["chatId", "userId"], properties: { chatId: UUID, userId: UUID } },
+      },
+    },
+    async (request, reply) => {
+      const { chatId, userId } = request.params;
+
+      if (!(await adminOnly(chatId, request.user.id))) {
+        return reply.status(403).send({ error: "Only the group's admins can decline requests" });
+      }
+
+      await db.query("DELETE FROM group_join_requests WHERE chat_id = $1 AND user_id = $2", [chatId, userId]);
+      await notifyAdmins(chatId);
+
+      return { declined: true };
     },
   );
 }

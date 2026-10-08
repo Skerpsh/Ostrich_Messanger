@@ -57,9 +57,9 @@ async function send(messages: { to: string; [key: string]: unknown }[]) {
   }
 }
 
-// After a new message: notify the other member's devices that do not
-// have the app open, unless they muted the chat.
-export function notifyNewMessage(chatId: string, senderId: string) {
+// After a new message: notify the other members' devices that do not
+// have the app open, unless they muted the chat (and were not mentioned).
+export function notifyNewMessage(chatId: string, senderId: string, mentions: string[] = []) {
   (async () => {
     const result = await db.query(
       `
@@ -70,9 +70,9 @@ export function notifyNewMessage(chatId: string, senderId: string) {
       JOIN push_tokens ON push_tokens.session_id = sessions.id
       WHERE chat_members.chat_id = $1
         AND chat_members.user_id <> $2
-        AND NOT chat_members.muted
+        AND (NOT chat_members.muted OR chat_members.user_id = ANY($3::uuid[]))
       `,
-      [chatId, senderId],
+      [chatId, senderId, mentions],
     );
 
     // Not to devices that have the app open.

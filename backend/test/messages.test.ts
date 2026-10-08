@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   groupEpochOf,
+  isReactionEmoji,
   isEncryptedMessage,
   MAX_MESSAGE_LENGTH,
   needsClientId,
@@ -62,4 +63,14 @@ test("group messages carry their key epoch", () => {
   assert.ok(needsClientId("e3:1:AAAA"));
   assert.equal(groupEpochOf("e3:12:AAAA"), 12);
   assert.equal(groupEpochOf("e2:AAAA"), null);
+});
+
+test("a reaction is one emoji", () => {
+  for (const emoji of ["👍", "❤️", "🦤", "👍🏽", "👨‍👩‍👧", "🇺🇦", "#️⃣"]) {
+    assert.ok(isReactionEmoji(emoji), emoji);
+  }
+
+  for (const text of ["", "a", "👍👍", "ok", "👍 ", "<script>"]) {
+    assert.ok(!isReactionEmoji(text), text);
+  }
 });

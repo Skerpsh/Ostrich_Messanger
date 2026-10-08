@@ -40,6 +40,44 @@ function presenceView(
 }
 
 export default async function chatsRoutes(server: FastifyInstance) {
+  // SAVED MESSAGES: the user's chat with themselves, made the first time.
+  server.post(
+    "/api/chats/saved",
+    {
+      preHandler: authenticate,
+      config: chatsRateLimit,
+    },
+    async (request) => {
+      const userId = request.user.id;
+
+      const chatId = await withTransaction(async (client) => {
+        const user = await client.query(
+          "SELECT saved_chat_id FROM users WHERE id = $1 FOR UPDATE",
+          [userId],
+        );
+        const existing = user.rows[0]?.saved_chat_id;
+
+        if (existing) {
+          await client.query(
+            "UPDATE chat_members SET hidden = FALSE WHERE chat_id = $1 AND user_id = $2",
+            [existing, userId],
+          );
+          return existing as string;
+        }
+
+        const chat = await client.query("INSERT INTO chats (type) VALUES ('saved') RETURNING id");
+        const id = chat.rows[0].id as string;
+
+        await client.query("INSERT INTO chat_members (chat_id, user_id) VALUES ($1, $2)", [id, userId]);
+        await client.query("UPDATE users SET saved_chat_id = $2 WHERE id = $1", [userId, id]);
+
+        return id;
+      });
+
+      return { chat: { id: chatId, type: "saved" } };
+    },
+  );
+
   // CREATE (or return the existing) direct chat with a user, found by
   // their exact @username
   server.post<{ Body: { username: string } }>(
@@ -220,8 +258,9 @@ export default async function chatsRoutes(server: FastifyInstance) {
           peer.id AS user_id,
           peer.username,
           peer.last_seen_at,
-          -- The other member's key, to encrypt for them.
-          peer.public_key,
+          -- The other member's key, to encrypt for them ("saved": the
+          -- user's own).
+          CASE WHEN chats.type = 'saved' THEN me.public_key ELSE peer.public_key END AS public_key,
           peer.avatar_id,
           COALESCE(peer.is_developer, FALSE) AS is_developer,
           chat_members.pinned_at IS NOT NULL AS pinned,
@@ -263,7 +302,19 @@ export default async function chatsRoutes(server: FastifyInstance) {
               AND messages.sender_id <> $1
               AND messages.kind = 'text'
               AND messages.created_at > chat_members.last_read_at
-          ) AS unread_count
+          ) AS unread_count,
+          -- Unread messages that mention the user (groups).
+          (
+            SELECT COUNT(*)::int
+            FROM messages
+            JOIN message_mentions mm ON mm.message_id = messages.id AND mm.user_id = $1
+            WHERE messages.chat_id = chats.id
+              AND messages.created_at > chat_members.last_read_at
+          ) AS unread_mentions,
+          -- Admins: people asking to join (invite link).
+          CASE WHEN chat_members.role IN ('owner', 'admin') THEN (
+            SELECT COUNT(*)::int FROM group_join_requests r WHERE r.chat_id = chats.id
+          ) ELSE 0 END AS join_requests
         FROM chats
         JOIN chat_members
           ON chat_members.chat_id = chats.id

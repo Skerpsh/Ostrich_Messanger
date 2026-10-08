@@ -13,6 +13,7 @@ import {
   createMessage,
   isBlockedInChat,
   isEncryptedMessage,
+  MAX_MENTIONS,
   needsClientId,
 } from "../messages.js";
 import { notifyNewMessage } from "../push.js";
@@ -58,11 +59,12 @@ type ClientMessage = {
   content?: unknown;
   replyTo?: unknown;
   attachments?: unknown;
+  mentions?: unknown;
 };
 
 // Protocol (JSON messages):
 //   client -> server: join {chatId}, leave {chatId},
-//                     message {chatId, id?, content, replyTo?, attachments?},
+//                     message {chatId, id?, content, replyTo?, attachments?, mentions?},
 //                     typing {chatId}
 //   server -> client: connected, joined {chatId}, left {chatId},
 //                     message {message}, read {chatId, userId, lastReadAt},
@@ -244,6 +246,13 @@ export default async function websocketRoutes(server: FastifyInstance) {
             return;
           }
 
+          const { mentions = [] } = data;
+
+          if (!Array.isArray(mentions) || mentions.length > MAX_MENTIONS || !mentions.every(validId)) {
+            sendError("mentions must be up to 50 user ids");
+            return;
+          }
+
           const result = await createMessage(
             chatId,
             user.id,
@@ -251,6 +260,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
             replyTo ?? null,
             messageId,
             attachments,
+            [...new Set(mentions)],
           );
 
           if ("error" in result) {
@@ -262,7 +272,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
             type: "message",
             message: result.message,
           });
-          notifyNewMessage(chatId, user.id);
+          notifyNewMessage(chatId, user.id, result.message.mentions);
 
           if (result.firstFromSender) {
             await announcePresence(user.id, chatId);

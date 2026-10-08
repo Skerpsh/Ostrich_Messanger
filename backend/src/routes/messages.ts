@@ -14,7 +14,8 @@ import {
   MESSAGE_PATTERN,
   MESSAGE_SELECT,
   needsClientId,
-  REACTIONS,
+  isReactionEmoji,
+  MAX_MENTIONS,
   withReply,
 } from "../messages.js";
 import { notifyNewMessage } from "../push.js";
@@ -67,7 +68,13 @@ export default async function messagesRoutes(server: FastifyInstance) {
   // SEND MESSAGE
   server.post<{
     Params: ChatParams;
-    Body: { id?: string; content: string; reply_to?: string; attachments?: string[] };
+    Body: {
+      id?: string;
+      content: string;
+      reply_to?: string;
+      attachments?: string[];
+      mentions?: string[];
+    };
   }>(
     "/api/chats/:chatId/messages",
     {
@@ -95,6 +102,13 @@ export default async function messagesRoutes(server: FastifyInstance) {
               uniqueItems: true,
               items: { type: "string", format: "uuid" },
             },
+            // Groups: members the text mentions (@username).
+            mentions: {
+              type: "array",
+              maxItems: MAX_MENTIONS,
+              uniqueItems: true,
+              items: { type: "string", format: "uuid" },
+            },
           },
         },
       },
@@ -116,6 +130,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
         request.body.reply_to ?? null,
         id ?? null,
         request.body.attachments ?? [],
+        request.body.mentions ?? [],
       );
 
       if ("error" in result) {
@@ -125,7 +140,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
       }
 
       const { message } = result;
-      notifyNewMessage(chatId, request.user.id);
+      notifyNewMessage(chatId, request.user.id, message.mentions);
 
       // Deliver to clients connected over websocket.
       await sendToChatMembers(chatId, {
@@ -363,7 +378,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
           type: "object",
           required: ["emoji"],
           properties: {
-            emoji: { type: ["string", "null"], enum: [...REACTIONS, null] },
+            emoji: { anyOf: [{ type: "string", maxLength: 32 }, { type: "null" }] },
           },
         },
       },
@@ -371,6 +386,10 @@ export default async function messagesRoutes(server: FastifyInstance) {
     async (request, reply) => {
       const { chatId, messageId } = request.params;
       const { emoji } = request.body;
+
+      if (emoji !== null && !isReactionEmoji(emoji)) {
+        return reply.status(400).send({ error: "A reaction is one emoji" });
+      }
 
       const target = await db.query(
         `
