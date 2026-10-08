@@ -18,6 +18,9 @@ import (
 
 const maxGroupMembers = 50
 
+// The user's chat with themselves.
+const savedTitle = "Saved messages"
+
 // resetGroups forgets the groups' keys (new session, logging out).
 func (m *model) resetGroups() {
 	m.groupKeys = map[string]map[int][]byte{}
@@ -259,6 +262,10 @@ func (m model) groupInfoOf(chat Chat) (groupInfo, bool) {
 // chatName is what a chat is called: the other user's username, or the
 // group's name.
 func (m model) chatName(chat Chat) string {
+	if chat.Type == "saved" {
+		return savedTitle
+	}
+
 	if chat.Type != "group" {
 		return chat.Username
 	}
@@ -272,7 +279,7 @@ func (m model) chatName(chat Chat) string {
 
 // chatTitle: "@user", or the group's name.
 func (m model) chatTitle(chat Chat) string {
-	if chat.Type == "group" {
+	if chat.Type == "group" || chat.Type == "saved" {
 		return m.chatName(chat)
 	}
 

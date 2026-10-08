@@ -359,6 +359,10 @@ func markupLines(text string, w int, fg, bg, codeBg, linkFg lipgloss.Color) []st
 				style = style.Foreground(linkFg).Underline(true)
 			}
 
+			if st.mention != "" {
+				style = style.Foreground(linkFg).Bold(true)
+			}
+
 			b.WriteString(style.Render(string(runes)))
 			j = k
 		}

@@ -130,6 +130,8 @@ type model struct {
 	safetyOpen bool
 	safetyPeer *foundUser
 	prompt     *promptState
+	// A QR code shown (invite and profile links).
+	qr *qrState
 
 	// A short message instead of the key hints, e.g. an error.
 	toast    string
@@ -376,6 +378,14 @@ func (m *model) updateKey(msg tea.KeyMsg) tea.Cmd {
 		return m.updatePromptKey(msg)
 	}
 
+	if m.qr != nil {
+		if s := msg.String(); s == "esc" || s == "enter" || s == "q" {
+			m.qr = nil
+		}
+
+		return nil
+	}
+
 	if m.menu != nil {
 		return m.updateMenuKey(msg)
 	}
@@ -408,6 +418,14 @@ func (m *model) updateMouse(msg tea.MouseMsg) tea.Cmd {
 
 	if m.prompt != nil {
 		return m.updatePromptMouse(msg)
+	}
+
+	if m.qr != nil {
+		if msg.Action == tea.MouseActionPress && !zone.Get("qr").InBounds(msg) {
+			m.qr = nil
+		}
+
+		return nil
 	}
 
 	if m.menu != nil {
@@ -576,6 +594,7 @@ func (m *model) signOut(notice string) tea.Cmd {
 	m.settings = nil
 	m.menu = nil
 	m.prompt = nil
+	m.qr = nil
 	m.safetyOpen = false
 	m.safetyPeer = nil
 	m.knownKeys = nil
@@ -704,6 +723,8 @@ func (m model) mainView() string {
 	switch {
 	case m.prompt != nil:
 		view = overlay(view, m.promptView(), m.width, m.height)
+	case m.qr != nil:
+		view = overlay(view, m.qrView(), m.width, m.height)
 	case m.menu != nil:
 		view = overlay(view, m.menuView(), m.width, m.height)
 	case m.safetyOpen && (m.chat != nil || m.safetyPeer != nil):

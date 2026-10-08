@@ -29,10 +29,14 @@ type listState struct {
 
 	// Starting a chat with the searched @username.
 	starting bool
+
+	// Messages matching the search (search.go).
+	matches []messageMatch
 }
 
 func newListState(p palette) listState {
-	return listState{search: newInput("Search or @username", 33, false, p)}
+	// Long enough for a pasted link.
+	return listState{search: newInput("Search, @username or a link", 200, false, p)}
 }
 
 func (l *listState) restyle(p palette) {
@@ -43,10 +47,14 @@ func (l *listState) resize(w int) {
 	l.search.Width = max(w-8, 4)
 }
 
-// listRow is a chat, or the offer to start one with the searched name.
+// listRow is a chat, the offer to start one with the searched name, a
+// pasted link to open, or a message found by the search.
 type listRow struct {
 	chat     *Chat
 	username string
+
+	linkKind, linkValue string
+	match               *messageMatch
 }
 
 // query is the search text, without "@", in lower case.
@@ -58,6 +66,10 @@ func (m model) listRows() []listRow {
 	query := m.list.query()
 	var rows []listRow
 
+	if kind, value := parseLink(m.list.search.Value()); kind != "" {
+		return []listRow{{linkKind: kind, linkValue: value}}
+	}
+
 	if m.canStartChat(query) {
 		rows = append(rows, listRow{username: query})
 	}
@@ -66,6 +78,10 @@ func (m model) listRows() []listRow {
 		if query == "" || strings.Contains(strings.ToLower(m.chatName(m.chats[i])), query) {
 			rows = append(rows, listRow{chat: &m.chats[i]})
 		}
+	}
+
+	for i := range m.list.matches {
+		rows = append(rows, listRow{match: &m.list.matches[i]})
 	}
 
 	return rows
@@ -151,6 +167,7 @@ func (m *model) startSearch(prefix string) tea.Cmd {
 }
 
 func (m *model) stopSearch() {
+	m.list.matches = nil
 	m.list.searching = false
 	m.list.search.SetValue("")
 	m.list.search.Blur()
@@ -179,6 +196,7 @@ func (m *model) updateListKey(msg tea.KeyMsg) tea.Cmd {
 			var cmd tea.Cmd
 			l.search, cmd = l.search.Update(msg)
 			l.cursor = 0
+			l.matches = m.searchMessages(l.search.Value())
 
 			return cmd
 		}
@@ -203,6 +221,8 @@ func (m *model) updateListKey(msg tea.KeyMsg) tea.Cmd {
 		return m.startSearch("@")
 	case "N":
 		return m.newGroup()
+	case "v":
+		return m.openSaved()
 	case "m", ".":
 		rows := m.listRows()
 
@@ -234,6 +254,20 @@ func (m *model) activateRow() tea.Cmd {
 	}
 
 	row := rows[m.list.cursor]
+
+	if row.linkKind != "" {
+		m.stopSearch()
+		return m.openLink(row.linkKind, row.linkValue)
+	}
+
+	if row.match != nil {
+		match := *row.match
+		m.stopSearch()
+
+		return tea.Sequence(m.openChat(match.chat), func() tea.Msg {
+			return resultMsg{apply: func(m *model) tea.Cmd { return m.showQuoted(match.message.ID) }}
+		})
+	}
 
 	if row.chat == nil {
 		return m.startChat(row.username)
@@ -437,7 +471,7 @@ func (m model) listView(w, h int) string {
 	rowsBlock := zone.Mark("list:rows", fitBlock(strings.Join(rowLines, "\n"), w, area, bg))
 	lines = append(lines, rowsBlock)
 
-	hints := "↑↓ Move  Enter Open  / Search  n New chat  N New group  m Menu  s Settings  t Theme  q Quit"
+	hints := "↑↓ Move  Enter Open  / Search  n New chat  N New group  v Saved  m Menu  s Settings  t Theme  q Quit"
 
 	switch {
 	case m.list.searching && w < 60:
@@ -471,6 +505,39 @@ func (m model) listRowView(r listRow, cursor bool, w int) string {
 		bg = p.hover
 	}
 
+	if r.linkKind != "" {
+		label, sub := "Open the group invite", "Ask to join; an admin lets you in"
+
+		if r.linkKind == "user" {
+			label, sub = "Open @"+r.linkValue+"'s profile", "Start a chat with them"
+		}
+
+		return strings.Join([]string{
+			row(blank(1, bg)+seg(" 🔗 ", p.onAccent, p.accent)+blank(1, bg)+bold(clip(label, w-8), p.text, bg), "", w, bg),
+			blank(5, bg) + seg(clip(sub, w-6), p.muted, bg),
+			blank(w, p.surface),
+		}, "\n")
+	}
+
+	if r.match != nil {
+		match := r.match
+		who := ""
+
+		switch {
+		case match.message.SenderID == m.user.User.ID:
+			who = "You: "
+		case match.chat.Type == "group":
+			who = "@" + match.message.SenderUsername + ": "
+		}
+
+		return strings.Join([]string{
+			row(blank(1, bg)+seg(" 🔍 ", p.muted, bg)+bold(clip(sanitize(m.chatName(match.chat)), w-16), p.text, bg),
+				seg(formatChatDate(match.message.CreatedAt), p.muted, bg)+blank(1, bg), w, bg),
+			blank(5, bg) + seg(clip(oneLine(sanitize(who+match.text)), w-6), p.muted, bg),
+			blank(w, p.surface),
+		}, "\n")
+	}
+
 	if r.chat == nil {
 		label := "Start a chat with @" + r.username
 		sub := "Find this user by their exact username"
@@ -492,6 +559,10 @@ func (m model) listRowView(r listRow, cursor bool, w int) string {
 
 	if group {
 		name = seg("👥 ", p.muted, bg) + name
+	}
+
+	if chat.Type == "saved" {
+		name = seg("🔖 ", p.muted, bg) + name
 	}
 
 	if chat.IsDeveloper {
@@ -523,7 +594,7 @@ func (m model) listRowView(r listRow, cursor bool, w int) string {
 	right := seg(formatChatDate(stamp), timeColor, bg) + blank(1, bg)
 	own := last != nil && last.SenderID == m.user.User.ID
 
-	if own {
+	if own && chat.Type != "saved" {
 		right = m.ticks(chat, last.CreatedAt, bg) + blank(1, bg) + right
 	}
 
@@ -552,6 +623,7 @@ func (m model) listRowView(r listRow, cursor bool, w int) string {
 		text := oneLine(sanitize(plainText(m.textOf(chat, last.ID, last.SenderID, last.Content))))
 
 		switch {
+		case chat.Type == "saved":
 		case own:
 			preview = seg("You: ", p.textSoft, bg)
 		case group:
@@ -562,6 +634,14 @@ func (m model) listRowView(r listRow, cursor bool, w int) string {
 	}
 
 	var badge string
+
+	if chat.UnreadMentions > 0 {
+		badge += bold(" @ ", p.onAccent, p.accent) + blank(1, bg)
+	}
+
+	if chat.JoinRequests > 0 {
+		badge += bold(fmt.Sprintf(" +%d ", chat.JoinRequests), p.accent, p.accentSoft) + blank(1, bg)
+	}
 
 	switch {
 	case chat.UnreadCount > 0:
@@ -577,9 +657,9 @@ func (m model) listRowView(r listRow, cursor bool, w int) string {
 			fg, badgeBg = p.bg, p.muted
 		}
 
-		badge = bold(" "+count+" ", fg, badgeBg) + blank(1, bg)
+		badge += bold(" "+count+" ", fg, badgeBg) + blank(1, bg)
 	case chat.Pinned:
-		badge = seg("📌", p.muted, bg) + blank(1, bg)
+		badge += seg("📌", p.muted, bg) + blank(1, bg)
 	}
 
 	line2 := row(blank(1, bg)+dot+blank(1, bg)+preview, badge, w, bg)

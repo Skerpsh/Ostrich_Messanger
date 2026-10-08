@@ -20,6 +20,9 @@ type Message struct {
 
 	EditedAt  *string    `json:"edited_at"`
 	Reactions []Reaction `json:"reactions"`
+
+	// Groups: the members it mentions.
+	Mentions []string `json:"mentions"`
 }
 
 // ReplyPreview is the message a reply refers to.

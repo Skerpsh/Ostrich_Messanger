@@ -175,6 +175,10 @@ func (m model) settingsRows() []settingsRow {
 
 			return m.showToast("Copied @"+m.user.User.Username, false)
 		}},
+		{kind: rowAction, id: "qr", icon: "▦", label: "My QR code", action: func(m *model) tea.Cmd {
+			m.qr = &qrState{title: "@" + m.user.User.Username + ": scanned, it opens a chat with you", text: profileLink(m.user.User.Username)}
+			return nil
+		}},
 		{kind: rowAction, id: "photo", icon: "▣", label: "Set photo from a file", form: "photo"},
 	}
 

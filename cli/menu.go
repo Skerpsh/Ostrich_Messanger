@@ -86,6 +86,15 @@ func (m *model) messageMenu(chat Chat, message Message) *menuState {
 
 	items := []menuItem{
 		{icon: "↪", label: "Reply", action: func(m *model) tea.Cmd { return m.startReply(message) }},
+		{icon: "☺", label: "React with another emoji…", action: func(m *model) tea.Cmd {
+			return m.openPrompt("React with", "an emoji", "Type or paste one emoji.", "", 32, func(m *model, value string) tea.Cmd {
+				if m.chat != nil {
+					m.chat.resetSelection()
+				}
+
+				return m.react(message, value)
+			})
+		}},
 	}
 
 	if n := len(shown.attachments); n > 0 {
@@ -245,6 +254,10 @@ func (m *model) pinMessage(chat Chat, messageID string) tea.Cmd {
 func (m *model) chatMenu(chat Chat, inChat bool) *menuState {
 	if chat.Type == "group" {
 		return m.groupMenu(chat, inChat)
+	}
+
+	if chat.Type == "saved" {
+		return m.savedMenu(chat, inChat)
 	}
 
 	var items []menuItem

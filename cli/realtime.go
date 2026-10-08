@@ -338,10 +338,20 @@ func (m *model) messageArrived(message Message) tea.Cmd {
 		switch {
 		case own || viewing:
 			chat.UnreadCount = 0
+			chat.UnreadMentions = 0
 		default:
 			chat.UnreadCount++
 
-			if !chat.Muted && message.Kind != "system" {
+			mentioned := false
+
+			for _, id := range message.Mentions {
+				if id == m.user.User.ID {
+					mentioned = true
+					chat.UnreadMentions++
+				}
+			}
+
+			if (!chat.Muted || mentioned) && message.Kind != "system" {
 				m.bell()
 			}
 		}
@@ -423,11 +433,13 @@ func (m *model) readEvent(event WSMessage) {
 
 	if last == nil {
 		m.chats[i].UnreadCount = 0
+		m.chats[i].UnreadMentions = 0
 		return
 	}
 
 	if created := parseTime(&last.CreatedAt); created != nil && readAt != nil && !created.After(*readAt) {
 		m.chats[i].UnreadCount = 0
+		m.chats[i].UnreadMentions = 0
 	}
 }
 
@@ -470,6 +482,7 @@ func (m *model) profileEvent(event WSMessage) tea.Cmd {
 func (m *model) markRead(chatID, messageID string) tea.Cmd {
 	if i := m.findChat(chatID); i >= 0 {
 		m.chats[i].UnreadCount = 0
+		m.chats[i].UnreadMentions = 0
 	}
 
 	token := m.user.Token

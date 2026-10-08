@@ -19,6 +19,8 @@ type outgoing struct {
 	message Message
 	// Ids of its encrypted files, already uploaded.
 	attachments []string
+	// Groups: members it mentions.
+	mentions []string
 	// "sending" (in flight or waiting for the network) or "failed".
 	state    string
 	err      string
@@ -32,9 +34,11 @@ type outgoing struct {
 const reencryptTries = 3
 
 // queueMessage adds an encrypted message to the outbox and sends it.
-func (m *model) queueMessage(chatID, id, content string, replyTo *ReplyPreview, attachments []string) tea.Cmd {
+// mentions: in a group, the members it mentions.
+func (m *model) queueMessage(chatID, id, content string, replyTo *ReplyPreview, attachments []string, mentions ...string) tea.Cmd {
 	m.outgoing = append(m.outgoing, outgoing{
 		attachments: attachments,
+		mentions:    mentions,
 		message: Message{
 			ID:             id,
 			ChatID:         chatID,
@@ -78,6 +82,7 @@ func (m *model) attemptSend(id string) tea.Cmd {
 	m.outgoing[i].err = ""
 	o := m.outgoing[i].message
 	files := m.outgoing[i].attachments
+	mentions := m.outgoing[i].mentions
 	token := m.user.Token
 
 	replyID := ""
@@ -87,7 +92,7 @@ func (m *model) attemptSend(id string) tea.Cmd {
 	}
 
 	return task(func() func(*model) tea.Cmd {
-		sent, err := sendMessage(token, o.ChatID, o.ID, o.Content, replyID, files)
+		sent, err := sendMessage(token, o.ChatID, o.ID, o.Content, replyID, files, mentions)
 
 		return func(m *model) tea.Cmd {
 			i := m.findOutgoing(id)

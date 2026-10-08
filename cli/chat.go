@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -433,6 +434,17 @@ func (m *model) updateChatKey(msg tea.KeyMsg) tea.Cmd {
 
 		return nil
 	case "tab":
+		// Groups: completes the @mention being typed.
+		if names := m.mentionSuggestions(chat); len(names) > 0 {
+			value := c.composer.Value()
+			at := strings.LastIndex(value, "@")
+			c.composer.SetValue(value[:at] + "@" + names[0] + " ")
+			c.composer.CursorEnd()
+			c.fitComposer()
+
+			return nil
+		}
+
 		if m.wide() {
 			c.composer.Blur()
 			m.focus = paneList
@@ -837,7 +849,62 @@ func (m *model) queueText(chat Chat, text string, attachments []attachment, repl
 		ids = append(ids, a.ID)
 	}
 
-	return m.queueMessage(chat.ID, id, encrypted, replyTo, ids), nil
+	return m.queueMessage(chat.ID, id, encrypted, replyTo, ids, m.mentionsIn(chat, text)...), nil
+}
+
+var mentionTyped = regexp.MustCompile(`(^|[^\w@])@([A-Za-z0-9_.-]{0,32})$`)
+
+// mentionSuggestions: in a group, the members whose username starts with
+// the "@…" at the end of the message being written.
+func (m model) mentionSuggestions(chat Chat) []string {
+	if chat.Type != "group" || m.chat == nil || m.chat.editing != nil {
+		return nil
+	}
+
+	match := mentionTyped.FindStringSubmatch(m.chat.composer.Value())
+	if match == nil {
+		return nil
+	}
+
+	prefix := strings.ToLower(match[2])
+	var names []string
+
+	for _, member := range m.members {
+		if member.ID != m.user.User.ID && strings.HasPrefix(strings.ToLower(member.Username), prefix) {
+			names = append(names, member.Username)
+		}
+	}
+
+	if len(names) > 5 {
+		names = names[:5]
+	}
+
+	return names
+}
+
+// mentionsIn: the group's members the text mentions (@username).
+func (m model) mentionsIn(chat Chat, text string) []string {
+	if chat.Type != "group" {
+		return nil
+	}
+
+	named := map[string]bool{}
+
+	for _, s := range parseMarkup(text) {
+		if s.style.mention != "" && !s.style.code {
+			named[strings.ToLower(s.style.mention)] = true
+		}
+	}
+
+	var ids []string
+
+	for _, member := range m.members {
+		if member.ID != m.user.User.ID && named[strings.ToLower(member.Username)] {
+			ids = append(ids, member.ID)
+		}
+	}
+
+	return ids
 }
 
 // messageSent clears the composer after sending.

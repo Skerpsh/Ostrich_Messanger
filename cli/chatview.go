@@ -375,6 +375,16 @@ func (m model) chatBanners(chat Chat, w int) []string {
 				bold("Compare the safety code", p.accent, bg), w, bg)))
 	}
 
+	if names := m.mentionSuggestions(chat); len(names) > 0 {
+		hint := seg(" Tab ", p.accent, bg)
+
+		for _, name := range names {
+			hint += bold("@"+sanitize(name), p.text, bg) + blank(2, bg)
+		}
+
+		lines = append(lines, fitLine(hint, w, bg))
+	}
+
 	if c.err != "" {
 		lines = append(lines, zone.Mark("chat:error", row(seg(" "+clip(sanitize(c.err), w-6), p.danger, bg), seg(" ✕ ", p.danger, bg), w, bg)))
 	}
@@ -517,6 +527,10 @@ func (m model) chatHeader(chat Chat, w int) []string {
 		name = zone.Mark("chat:groupinfo", seg("👥 ", p.muted, bg)+name)
 	}
 
+	if chat.Type == "saved" {
+		name = seg("🔖 ", p.muted, bg) + name
+	}
+
 	if chat.IsDeveloper {
 		name += blank(1, bg) + devBadge()
 	}
@@ -526,6 +540,10 @@ func (m model) chatHeader(chat Chat, w int) []string {
 
 	if group {
 		middle = iconButton("chat:groupinfo", "👥", p.textSoft, bg)
+	}
+
+	if chat.Type == "saved" {
+		middle = ""
 	}
 
 	right := iconButton("chat:search", "🔍", p.textSoft, bg) + middle +
@@ -542,6 +560,8 @@ func (m model) chatHeader(chat Chat, w int) []string {
 		status = seg(m.typingText(chat), p.accent, bg)
 	case group:
 		status = seg(m.membersText(chat), p.muted, bg)
+	case chat.Type == "saved":
+		status = seg("only you", p.muted, bg)
 	case m.presence[chat.UserID].online:
 		status = seg("online", p.online, bg)
 	default:

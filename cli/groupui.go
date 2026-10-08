@@ -20,6 +20,10 @@ func (m model) sayHi(chat Chat) string {
 		return "Say hi to the group!"
 	}
 
+	if chat.Type == "saved" {
+		return "Notes, links and files: end-to-end encrypted, on all your devices"
+	}
+
 	return "Say hi to @" + sanitize(chat.Username) + "!"
 }
 
@@ -240,6 +244,65 @@ func (m *model) createGroup(name, usernames string) tea.Cmd {
 	})
 }
 
+// --- Saved messages ---
+
+// openSaved opens the user's Saved messages (made the first time).
+func (m *model) openSaved() tea.Cmd {
+	token := m.user.Token
+
+	return task(func() func(*model) tea.Cmd {
+		id, err := openSavedChat(token)
+
+		var chats []Chat
+
+		if err == nil {
+			chats, err = getChats(token)
+		}
+
+		return func(m *model) tea.Cmd {
+			if m.user == nil || m.user.Token != token {
+				return nil
+			}
+
+			if err != nil {
+				return m.fail(err)
+			}
+
+			m.setChats(chats)
+
+			if chat, ok := m.chatByID(id); ok {
+				return m.openChat(chat)
+			}
+
+			return nil
+		}
+	})
+}
+
+func (m *model) savedMenu(chat Chat, inChat bool) *menuState {
+	var items []menuItem
+
+	if inChat {
+		items = append(items, menuItem{icon: "🔍", label: "Search in chat", action: func(m *model) tea.Cmd {
+			return m.openChatSearch()
+		}})
+	}
+
+	pinLabel := "Pin to top"
+
+	if chat.Pinned {
+		pinLabel = "Unpin"
+	}
+
+	items = append(items,
+		menuItem{icon: "📌", label: pinLabel, action: func(m *model) tea.Cmd { return m.setPinned(chat, !chat.Pinned) }},
+		menuItem{icon: "🗑", label: "Delete Saved messages", danger: true, confirm: "Delete all saved messages?",
+			action: func(m *model) tea.Cmd { return m.removeChat(chat, "everyone") }},
+	)
+
+	return &menuState{title: savedTitle, items: items, confirming: -1}
+}
+
 // --- the group's menu and info ---
 
 // groupMenu: a group's actions (from the list or the chat).
@@ -334,7 +397,15 @@ func (m *model) groupInfoMenu(chat Chat) *menuState {
 			}})
 		}
 
+		requests := "Asking to join"
+
+		if chat.JoinRequests > 0 {
+			requests = fmt.Sprintf("Asking to join (%d)", chat.JoinRequests)
+		}
+
 		items = append(items,
+			menuItem{icon: "🔗", label: "Invite link…", action: func(m *model) tea.Cmd { return m.inviteMenu(chat) }},
+			menuItem{icon: "?", label: requests, action: func(m *model) tea.Cmd { return m.requestsMenu(chat) }},
 			menuItem{icon: "✎", label: "Rename…", action: func(m *model) tea.Cmd {
 				return m.openPrompt("Rename the group", "Name", "", m.chatName(chat), 64, func(m *model, value string) tea.Cmd {
 					return m.renameGroup(chat, value)

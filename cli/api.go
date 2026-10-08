@@ -133,6 +133,11 @@ type Chat struct {
 	RotationNeeded bool   `json:"rotation_needed"`
 	Role           string `json:"role"`
 	MemberCount    int    `json:"member_count"`
+
+	// Groups: unread messages mentioning the user; for admins, people
+	// asking to join through the invite link.
+	UnreadMentions int `json:"unread_mentions"`
+	JoinRequests   int `json:"join_requests"`
 }
 
 // isAdmin: the user may change the group (owner or admin).

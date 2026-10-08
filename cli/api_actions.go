@@ -32,8 +32,12 @@ func getMe(token string) (*Account, error) {
 
 // sendMessage sends an encrypted message; id was chosen here (the
 // encryption is bound to it). attachments: ids of its uploaded files.
-func sendMessage(token, chatID, id, content, replyTo string, attachments []string) (Message, error) {
+func sendMessage(token, chatID, id, content, replyTo string, attachments, mentions []string) (Message, error) {
 	body := map[string]any{"id": id, "content": content}
+
+	if len(mentions) > 0 {
+		body["mentions"] = mentions
+	}
 
 	if replyTo != "" {
 		body["reply_to"] = replyTo
@@ -99,6 +103,20 @@ func setChatSettings(token, chatID string, pinned, muted *bool) error {
 	}
 
 	return authorizedJSON(token, http.MethodPut, chatPath(chatID)+"/settings", body, nil)
+}
+
+// openSavedChat returns the user's Saved messages chat (made the first
+// time).
+func openSavedChat(token string) (string, error) {
+	var result struct {
+		Chat struct {
+			ID string `json:"id"`
+		} `json:"chat"`
+	}
+
+	err := authorizedPost(token, "/api/chats/saved", map[string]any{}, &result)
+
+	return result.Chat.ID, err
 }
 
 // deleteChat deletes the chat for both ("everyone") or clears its history
