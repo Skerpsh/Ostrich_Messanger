@@ -65,11 +65,29 @@ func (m model) chatLines(w int) chatLinesResult {
 				seg(strings.Repeat("─", max(content-rule-width(label), 0)), p.accent, p.bg)+blank(1, p.bg), separator)
 		}
 
+		// A group event: a line in the middle.
+		if message.Kind == "system" {
+			if !newDay {
+				add(blank(w, p.bg), separator)
+			}
+
+			text := clip(sanitize(systemText(message.SenderID, message.SenderUsername, message.Content, m.user.User.ID)), w-4)
+			add(center(seg(" "+text+" ", p.muted, p.panel), w, p.bg), lineMeta{message: i})
+
+			continue
+		}
+
 		grouped := !newDay && i != unread && prev != nil && prev.SenderID == message.SenderID &&
-			at != nil && at.Sub(*parseTime(&prev.CreatedAt)) < groupGap
+			prev.Kind != "system" && at != nil && at.Sub(*parseTime(&prev.CreatedAt)) < groupGap
 
 		if !grouped && !newDay {
 			add(blank(w, p.bg), separator)
+		}
+
+		// Groups: who wrote it, over the first of their bubbles.
+		if chat.Type == "group" && !grouped && message.SenderID != m.user.User.ID {
+			name := "@" + sanitize(m.memberName(message.SenderID, message.SenderUsername))
+			add(blank(2, p.bg)+bold(clip(name, content-2), avatarColor(name), p.bg), lineMeta{message: i})
 		}
 
 		for _, line := range m.bubble(chat, message, content) {
@@ -342,11 +360,16 @@ func (m model) chatBanners(chat Chat, w int) []string {
 
 	closeButton := zone.Mark("chat:cancel", seg(" ✕ ", p.muted, bg))
 
-	if chat.PublicKey == "" && !chat.Blocked {
+	switch {
+	case chat.Type == "group" && m.groupDistrusted[chat.ID] && m.groupKeyOf(chat.ID, chat.KeyEpoch) == nil:
+		lines = append(lines, fitLine(seg(" ⚠ "+clip("The group's key came from someone whose security key has changed. Compare safety codes (Ctrl+G)", w-4), p.danger, bg), w, bg))
+	case chat.Type == "group" && m.groupKeyOf(chat.ID, chat.KeyEpoch) == nil:
+		lines = append(lines, fitLine(seg(" "+clip("Loading the group's key…", w-2), p.muted, bg), w, bg))
+	case chat.Type != "group" && chat.PublicKey == "" && !chat.Blocked:
 		lines = append(lines, fitLine(seg(" "+clip("@"+sanitize(chat.Username)+" has not set up end-to-end encryption yet", w-2), p.muted, bg), w, bg))
 	}
 
-	if m.keyChanged[chat.UserID] {
+	if chat.Type != "group" && m.keyChanged[chat.UserID] {
 		lines = append(lines, zone.Mark("chat:keywarning", fitLine(
 			seg(" ⚠ ", p.danger, bg)+seg(clip("The security key of @"+sanitize(chat.Username)+" has changed. ", w-30), p.text, bg)+
 				bold("Compare the safety code", p.accent, bg), w, bg)))
@@ -451,7 +474,7 @@ func (m model) chatView(w, h int) string {
 	case len(m.shown()) == 0:
 		card := []string{
 			center(bold("  No messages yet  ", p.text, p.panel), w, p.bg),
-			center(seg("  Say hi to @"+sanitize(chat.Username)+"!  ", p.muted, p.panel), w, p.bg),
+			center(seg("  "+m.sayHi(chat)+"  ", p.muted, p.panel), w, p.bg),
 		}
 		messages = fitBlock(strings.Repeat("\n", max(area/2-1, 0))+strings.Join(card, "\n"), w, area, p.bg)
 	default:
@@ -487,14 +510,25 @@ func (m model) chatHeader(chat Chat, w int) []string {
 		left = zone.Mark("chat:back", seg(" ‹ ", p.accent, bg))
 	}
 
-	name := bold(sanitize(chat.Username), p.text, bg)
+	group := chat.Type == "group"
+	name := bold(sanitize(m.chatName(chat)), p.text, bg)
+
+	if group {
+		name = zone.Mark("chat:groupinfo", seg("👥 ", p.muted, bg)+name)
+	}
 
 	if chat.IsDeveloper {
 		name += blank(1, bg) + devBadge()
 	}
 
-	right := iconButton("chat:search", "🔍", p.textSoft, bg) +
-		iconButton("chat:safety", "🛡", p.textSoft, bg) +
+	// Groups: the group's screen instead of the safety code.
+	middle := iconButton("chat:safety", "🛡", p.textSoft, bg)
+
+	if group {
+		middle = iconButton("chat:groupinfo", "👥", p.textSoft, bg)
+	}
+
+	right := iconButton("chat:search", "🔍", p.textSoft, bg) + middle +
 		iconButton("chat:menu", "⋮", p.textSoft, bg)
 
 	var status string
@@ -505,7 +539,9 @@ func (m model) chatHeader(chat Chat, w int) []string {
 	case m.connStatus == connOffline:
 		status = seg("waiting for network…", p.muted, bg)
 	case m.isTyping(c.id):
-		status = seg("typing…", p.accent, bg)
+		status = seg(m.typingText(chat), p.accent, bg)
+	case group:
+		status = seg(m.membersText(chat), p.muted, bg)
 	case m.presence[chat.UserID].online:
 		status = seg("online", p.online, bg)
 	default:
@@ -524,7 +560,7 @@ func (m model) chatHeader(chat Chat, w int) []string {
 	indent := width(left) + 4
 
 	return []string{
-		row(left+avatar(chat.Username)+blank(1, bg)+name, right, w, bg),
+		row(left+avatar(m.chatName(chat))+blank(1, bg)+name, right, w, bg),
 		fitLine(blank(indent, bg)+status, w, bg),
 		seg(strings.Repeat("─", w), p.line, bg),
 	}
@@ -616,6 +652,10 @@ func (m model) composerView(chat Chat, w int) []string {
 	composer := zone.Mark("chat:composer", strings.Join(box, "\n"))
 
 	hints := "Enter Send  ↑ Messages  Ctrl+A Attach  Ctrl+O Menu  Ctrl+F Search  Ctrl+K Safety code  Alt+Enter New line  Esc Back"
+
+	if chat, _ := m.chatByID(c.id); chat.Type == "group" {
+		hints = "Enter Send  ↑ Messages  Ctrl+A Attach  Ctrl+G Group  Ctrl+O Menu  Ctrl+F Search  Alt+Enter New line  Esc Back"
+	}
 
 	switch {
 	case c.attaching:

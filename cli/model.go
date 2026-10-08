@@ -83,8 +83,18 @@ type model struct {
 	connStatus connStatus
 	connGen    int
 
-	presence    map[string]presence
+	presence map[string]presence
+	// "typing…" until, by chat and user ("<chat>|<user>").
 	typingUntil map[string]time.Time
+
+	// Groups' keys by chat and epoch, those being fetched, and groups with
+	// a key from someone whose account key has changed (groups.go).
+	groupKeys        map[string]map[int][]byte
+	groupKeysLoading map[string]bool
+	groupDistrusted  map[string]bool
+
+	// The open group's members (nil while loading, or not a group).
+	members []groupMember
 
 	// Contacts' keys as first seen here, and users whose key has changed
 	// since (knownkeys.go).
@@ -113,9 +123,13 @@ type model struct {
 	cache        *cacheFile
 	cacheWritten []byte
 
-	// Overlays over the screen: an actions menu, the safety code.
+	// Overlays over the screen: an actions menu, the safety code (with
+	// the open chat's other member, or safetyPeer: a group's member), a
+	// one-line prompt.
 	menu       *menuState
 	safetyOpen bool
+	safetyPeer *foundUser
+	prompt     *promptState
 
 	// A short message instead of the key hints, e.g. an error.
 	toast    string
@@ -134,6 +148,8 @@ func newModel(systemDark bool, saved *LoginResponse) model {
 		presence:    map[string]presence{},
 		typingUntil: map[string]time.Time{},
 	}
+
+	m.resetGroups()
 
 	m.applyTheme()
 	m.auth = newAuthState(m.pal)
@@ -356,6 +372,10 @@ func (m *model) updateKey(msg tea.KeyMsg) tea.Cmd {
 		return m.updateOstrichIDKey(msg)
 	}
 
+	if m.prompt != nil {
+		return m.updatePromptKey(msg)
+	}
+
 	if m.menu != nil {
 		return m.updateMenuKey(msg)
 	}
@@ -384,6 +404,10 @@ func (m *model) updateMouse(msg tea.MouseMsg) tea.Cmd {
 		return m.updateAuthMouse(msg)
 	case stageOstrichID:
 		return m.updateOstrichIDMouse(msg)
+	}
+
+	if m.prompt != nil {
+		return m.updatePromptMouse(msg)
 	}
 
 	if m.menu != nil {
@@ -495,6 +519,7 @@ func (m *model) startSession(result *LoginResponse) tea.Cmd {
 	m.user = result
 	m.presence = map[string]presence{}
 	m.typingUntil = map[string]time.Time{}
+	m.resetGroups()
 	m.knownKeys = loadKnownKeys(result.User.ID)
 	m.keyChanged = map[string]bool{}
 	m.chats = nil
@@ -528,6 +553,7 @@ func (m *model) startSession(result *LoginResponse) tea.Cmd {
 func (m *model) signOut(notice string) tea.Cmd {
 	m.closeConnection()
 	clearChatKeys()
+	m.resetGroups()
 
 	remembered := m.remembered
 	m.remembered = false
@@ -549,7 +575,9 @@ func (m *model) signOut(notice string) tea.Cmd {
 	m.drafts = nil
 	m.settings = nil
 	m.menu = nil
+	m.prompt = nil
 	m.safetyOpen = false
+	m.safetyPeer = nil
 	m.knownKeys = nil
 	m.keyChanged = nil
 	m.presence = map[string]presence{}
@@ -673,9 +701,12 @@ func (m model) mainView() string {
 		view = m.listView(m.width, m.height)
 	}
 
-	if m.menu != nil {
+	switch {
+	case m.prompt != nil:
+		view = overlay(view, m.promptView(), m.width, m.height)
+	case m.menu != nil:
 		view = overlay(view, m.menuView(), m.width, m.height)
-	} else if m.safetyOpen && m.chat != nil {
+	case m.safetyOpen && (m.chat != nil || m.safetyPeer != nil):
 		view = overlay(view, m.safetyView(), m.width, m.height)
 	}
 

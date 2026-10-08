@@ -12,6 +12,7 @@ import messagesRoutes from "./routes/messages.js";
 import avatarsRoutes from "./routes/avatars.js";
 import pushRoutes from "./routes/push.js";
 import attachmentsRoutes from "./routes/attachments.js";
+import groupsRoutes from "./routes/groups.js";
 import { cleanupAttachments, ensureAttachmentsDir } from "./attachments.js";
 import websocketRoutes from "./routes/websocket.js";
 
@@ -152,6 +153,7 @@ const start = async () => {
     await server.register(avatarsRoutes);
     await server.register(pushRoutes);
     await server.register(attachmentsRoutes);
+    await server.register(groupsRoutes);
 
     await ensureAttachmentsDir();
 

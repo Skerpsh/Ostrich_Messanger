@@ -33,6 +33,23 @@
 // uploaded under an id the client chooses; the key travels inside the
 // message (payload.ts), so the server stores only ciphertext.
 //
+// Groups: messages are encrypted with a group key; a new key ("epoch")
+// is made when a member leaves or is removed. Whoever makes a key wraps it
+// for every member:
+//   wrap key = HKDF(X25519(own private, member's public), salt chat id,
+//                   info "ostrich/v1 group key-wrap", 32)
+//   wrapped  = base64(nonce(24) ‖ XChaCha20-Poly1305(wrap key, nonce,
+//              group key, aad "ostrich/v1 group key" 0 chat 0 epoch 0 member))
+//   messages = "e3:" epoch ":" base64(nonce(24) ‖ XChaCha20-Poly1305(group
+//              key, nonce, text, aad "ostrich/v3 group message" 0 chat 0
+//              sender 0 message 0 epoch))
+//   info     = "i1:" epoch ":" … the group's name and photo (JSON), aad
+//              "ostrich/v1 group info" 0 chat 0 epoch
+// The server keeps the wrapped keys and never has a group key. Members
+// share the key, so within a group a member (with the server's help)
+// could pass a message off as another member's; outsiders and the server
+// cannot read or forge anything.
+//
 // Safety code: both members compute the same 40 digits from the two
 // public keys; if they match on both devices, the server has not swapped
 // the keys (see safetyCode()).
@@ -52,6 +69,9 @@ const PRIVATE_KEY_AAD = utf8("ostrich/v1 private-key");
 const CHAT_INFO = utf8("ostrich/v1 chat");
 const SAFETY_INFO = utf8("ostrich/v1 safety");
 const ATTACHMENT_AAD = utf8("ostrich/v1 attachment");
+const GROUP_WRAP_INFO = utf8("ostrich/v1 group key-wrap");
+const PREFIX_GROUP = "e3:";
+const PREFIX_INFO = "i1:";
 const MESSAGE_AAD = "ostrich/v2 message";
 const PREFIX_V1 = "e1:";
 const PREFIX_V2 = "e2:";
@@ -344,6 +364,180 @@ export function decryptAttachment(sealed: Uint8Array, key: string): Uint8Array {
   return xchacha20poly1305(fromBase64(key), sealed.subarray(0, 24), ATTACHMENT_AAD).decrypt(
     sealed.subarray(24),
   );
+}
+
+// --- groups ---
+
+export function newGroupKey() {
+  return randomBytes(32);
+}
+
+function groupWrapKey(privateKey: Uint8Array, otherPublicKey: string, chatId: string) {
+  const shared = x25519.getSharedSecret(privateKey, fromBase64(otherPublicKey));
+  return hkdf(sha256, shared, utf8(chatId), GROUP_WRAP_INFO, 32);
+}
+
+function groupKeyAad(chatId: string, epoch: number, memberId: string) {
+  return utf8(`ostrich/v1 group key\0${chatId}\0${epoch}\0${memberId}`);
+}
+
+// Wraps a group key for a member (with their public key).
+export function wrapGroupKey(
+  groupKey: Uint8Array,
+  epoch: number,
+  chatId: string,
+  privateKey: Uint8Array,
+  memberId: string,
+  memberPublicKey: string,
+): string {
+  const nonce = randomBytes(24);
+  const sealed = xchacha20poly1305(
+    groupWrapKey(privateKey, memberPublicKey, chatId),
+    nonce,
+    groupKeyAad(chatId, epoch, memberId),
+  ).encrypt(groupKey);
+
+  return toBase64(concat(nonce, sealed));
+}
+
+// Unwraps the group key wrapped for this user by `wrapperPublicKey`'s
+// owner; throws if it is not.
+export function unwrapGroupKey(
+  wrapped: string,
+  epoch: number,
+  chatId: string,
+  privateKey: Uint8Array,
+  ownId: string,
+  wrapperPublicKey: string,
+): Uint8Array {
+  const data = fromBase64(wrapped);
+
+  return xchacha20poly1305(
+    groupWrapKey(privateKey, wrapperPublicKey, chatId),
+    data.subarray(0, 24),
+    groupKeyAad(chatId, epoch, ownId),
+  ).decrypt(data.subarray(24));
+}
+
+function groupMessageAad(chatId: string, message: MessageRef, epoch: number) {
+  return utf8(
+    `ostrich/v3 group message\0${chatId}\0${message.sender_id}\0${message.id}\0${epoch}`,
+  );
+}
+
+export function encryptGroupMessage(
+  text: string,
+  message: MessageRef,
+  groupKey: Uint8Array,
+  epoch: number,
+  chatId: string,
+): string {
+  const nonce = randomBytes(24);
+  const sealed = xchacha20poly1305(groupKey, nonce, groupMessageAad(chatId, message, epoch)).encrypt(
+    utf8(text),
+  );
+
+  return `${PREFIX_GROUP}${epoch}:${toBase64(concat(nonce, sealed))}`;
+}
+
+// "e3:<epoch>:…" / "i1:<epoch>:…" → the epoch and the sealed bytes.
+function splitEpoch(content: string, prefix: string) {
+  const match = new RegExp(`^${prefix}(\\d{1,9}):([A-Za-z0-9+/]+={0,2})$`).exec(content);
+
+  return match ? { epoch: Number(match[1]), data: fromBase64(match[2]) } : null;
+}
+
+// The epoch of a group message, or null for other messages.
+export function groupMessageEpoch(content: string) {
+  return splitEpoch(content, PREFIX_GROUP)?.epoch ?? null;
+}
+
+export function isGroupMessage(content: string) {
+  return content.startsWith(PREFIX_GROUP);
+}
+
+export function decryptGroupMessage(
+  message: MessageRef & { content: string },
+  keyOf: (epoch: number) => Uint8Array | undefined,
+  chatId: string,
+): Decrypted {
+  const parts = splitEpoch(message.content, PREFIX_GROUP);
+  const key = parts && keyOf(parts.epoch);
+
+  if (!parts || !key) {
+    return { status: "error", text: UNREADABLE };
+  }
+
+  try {
+    const plain = xchacha20poly1305(
+      key,
+      parts.data.subarray(0, 24),
+      groupMessageAad(chatId, message, parts.epoch),
+    ).decrypt(parts.data.subarray(24));
+
+    return { status: "ok", text: new TextDecoder().decode(plain) };
+  } catch {
+    return { status: "error", text: UNREADABLE };
+  }
+}
+
+// What a group's members see of it; the server never does.
+export type GroupInfo = {
+  name: string;
+  // An encrypted picture (an attachment of the chat).
+  photo?: { id: string; key: string; mime: string };
+};
+
+const groupInfoAad = (chatId: string, epoch: number) =>
+  utf8(`ostrich/v1 group info\0${chatId}\0${epoch}`);
+
+export function encryptGroupInfo(info: GroupInfo, groupKey: Uint8Array, epoch: number, chatId: string) {
+  const nonce = randomBytes(24);
+  const sealed = xchacha20poly1305(groupKey, nonce, groupInfoAad(chatId, epoch)).encrypt(
+    utf8(JSON.stringify(info)),
+  );
+
+  return `${PREFIX_INFO}${epoch}:${toBase64(concat(nonce, sealed))}`;
+}
+
+export function groupInfoEpoch(encrypted: string) {
+  return splitEpoch(encrypted, PREFIX_INFO)?.epoch ?? null;
+}
+
+// The group's info, or null if it cannot be read (yet).
+export function decryptGroupInfo(
+  encrypted: string,
+  keyOf: (epoch: number) => Uint8Array | undefined,
+  chatId: string,
+): GroupInfo | null {
+  const parts = splitEpoch(encrypted, PREFIX_INFO);
+  const key = parts && keyOf(parts.epoch);
+
+  if (!parts || !key) {
+    return null;
+  }
+
+  try {
+    const plain = xchacha20poly1305(key, parts.data.subarray(0, 24), groupInfoAad(chatId, parts.epoch)).decrypt(
+      parts.data.subarray(24),
+    );
+    const info = JSON.parse(new TextDecoder().decode(plain)) as Partial<GroupInfo>;
+
+    if (typeof info.name !== "string") {
+      return null;
+    }
+
+    const photo = info.photo;
+
+    return {
+      name: info.name,
+      ...(photo && typeof photo.id === "string" && typeof photo.key === "string" && typeof photo.mime === "string"
+        ? { photo: { id: photo.id, key: photo.key, mime: photo.mime } }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function concat(a: Uint8Array, b: Uint8Array) {

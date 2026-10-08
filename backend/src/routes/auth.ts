@@ -27,6 +27,7 @@ import {
   hashToken,
   SESSION_TTL_DAYS,
 } from "../middleware/auth.js";
+import { leaveAllGroups } from "../groups.js";
 import {
   closeSessionSockets,
   closeUserSockets,
@@ -855,25 +856,39 @@ export default async function authRoutes(server: FastifyInstance) {
       }
 
       const chats = await db.query(
-        "SELECT chat_id FROM chat_members WHERE user_id = $1",
+        `
+        SELECT chat_id FROM chat_members
+        JOIN chats ON chats.id = chat_members.chat_id AND chats.type = 'direct'
+        WHERE user_id = $1
+        `,
         [request.user.id],
       );
 
-      // Tell the other members while the chats still exist.
+      // Tell the other members while the direct chats still exist.
       for (const { chat_id } of chats.rows) {
         await sendToChatMembers(chat_id, { type: "chat_deleted", chatId: chat_id });
       }
 
-      await withTransaction(async (client) => {
+      // Direct chats go for both; groups stay for the others.
+      const groups = await withTransaction(async (client) => {
+        const remaining = await leaveAllGroups(client, request.user.id);
+
         await client.query(
           `
           DELETE FROM chats
-          WHERE id IN (SELECT chat_id FROM chat_members WHERE user_id = $1)
+          WHERE type = 'direct'
+            AND id IN (SELECT chat_id FROM chat_members WHERE user_id = $1)
           `,
           [request.user.id],
         );
         await client.query("DELETE FROM users WHERE id = $1", [request.user.id]);
+
+        return remaining;
       });
+
+      for (const chatId of groups) {
+        await sendToChatMembers(chatId, { type: "chats_changed" });
+      }
 
       closeUserSockets(request.user.id);
 

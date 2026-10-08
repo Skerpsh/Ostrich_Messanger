@@ -317,7 +317,8 @@ const (
 
 const unreadableMessage = "[can't decrypt this message]"
 
-// decrypt decrypts a message of the chat with the signed-in user's key.
+// decrypt decrypts a message of the chat with the signed-in user's key
+// (or the group's).
 func (m model) decrypt(chat Chat, messageID, senderID, content string) (string, decryptStatus) {
 	var privateKey []byte
 
@@ -325,7 +326,31 @@ func (m model) decrypt(chat Chat, messageID, senderID, content string) (string, 
 		privateKey = m.user.PrivateKey
 	}
 
+	if chat.Type == "group" {
+		if strings.HasPrefix(content, prefixGroup) {
+			return decryptGroupMessage(content, messageID, senderID,
+				func(epoch int) []byte { return m.groupKeyOf(chat.ID, epoch) }, chat.ID)
+		}
+
+		return decryptMessage(content, messageID, senderID, nil, "", chat.ID)
+	}
+
 	return decryptMessage(content, messageID, senderID, privateKey, chat.PublicKey, chat.ID)
+}
+
+// encryptFor encrypts a message for a chat: with the group's current key,
+// or for the other member.
+func (m model) encryptFor(chat Chat, text, messageID string) (string, error) {
+	if chat.Type == "group" {
+		key := m.groupKeyOf(chat.ID, chat.KeyEpoch)
+		if key == nil {
+			return "", errGroupKeyMissing
+		}
+
+		return encryptGroupMessage(text, messageID, m.user.User.ID, key, chat.KeyEpoch, chat.ID), nil
+	}
+
+	return encryptMessage(text, messageID, m.user.User.ID, m.user.PrivateKey, chat.PublicKey, chat.ID)
 }
 
 // textOf is the decrypted text for previews and quotes; text that is not

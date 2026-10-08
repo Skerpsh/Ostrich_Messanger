@@ -19,10 +19,11 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import ActionMenu, { type ActionMenuItem } from "@/components/action-menu";
 import AppHeader from "@/components/app-header";
-import Avatar from "@/components/avatar";
 import Button from "@/components/button";
+import ChatAvatar from "@/components/chat-avatar";
 import DevBadge from "@/components/dev-badge";
 import ForwardPicker from "@/components/forward-picker";
+import GroupInfo from "@/components/group-info";
 import IconButton from "@/components/icon-button";
 import MessageBubble from "@/components/message-bubble";
 import SafetyCode from "@/components/safety-code";
@@ -35,7 +36,9 @@ import { useAppTheme } from "@/context/theme";
 import {
   deleteMessage,
   editMessage,
+  getGroupMembers,
   getMessages,
+  type GroupMember,
   REACTIONS,
   type Chat,
   type ChatHistory,
@@ -52,7 +55,7 @@ import {
   time,
   type Row,
 } from "@/lib/chat-rows";
-import { encryptMessage, newMessageId, type MessageRef } from "@/lib/crypto";
+import { newMessageId, type MessageRef } from "@/lib/crypto";
 import {
   copyAttachments,
   formatSize,
@@ -64,6 +67,7 @@ import {
 } from "@/lib/attachments";
 import { saveFile } from "@/lib/files";
 import { formatPresence, previewText } from "@/lib/format";
+import { chatTitle, isGroupDistrusted } from "@/lib/groups";
 import { loadCachedMessages, saveCachedMessages } from "@/lib/local-cache";
 import { plainText } from "@/lib/markup";
 import { encodePayload, type Attachment } from "@/lib/payload";
@@ -71,7 +75,8 @@ import { pickDocument, pickPhoto } from "@/lib/pick-attachment";
 import { messagePreview } from "@/lib/preview";
 import { acceptPeerKey, checkPeerKey } from "@/lib/known-keys";
 import { useIsWide } from "@/lib/layout";
-import { useChatCrypto, type Shown } from "@/lib/use-chat-crypto";
+import { encryptForChat, useChatCrypto, type Shown } from "@/lib/use-chat-crypto";
+import { useStartChat } from "@/lib/use-start-chat";
 import { useMinuteTick } from "@/lib/use-minute-tick";
 import { radius } from "@/theme/colors";
 
@@ -95,7 +100,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
   const wide = useIsWide();
   const { withToken } = useAuth();
   const user = useCurrentUser();
-  const { status, subscribeChat, subscribeEvents, sendTyping } = useRealtime();
+  const { status, presence, subscribeChat, subscribeEvents, sendTyping } = useRealtime();
   const {
     chats,
     synced,
@@ -103,8 +108,10 @@ function ChatScreen({ chatId }: { chatId: string }) {
     markChatRead,
     setPeerReadAt,
     typing,
+    typingUsers,
     updateChatSettings,
     removeChat,
+    leaveGroup,
     reload: reloadChats,
     drafts,
     setDraft: storeDraft,
@@ -117,8 +124,12 @@ function ChatScreen({ chatId }: { chatId: string }) {
   // Who the chat is with comes from the server's chats list, never from the
   // URL: anyone can craft a link with a misleading name.
   const chat = chats?.find((c) => c.id === chatId) ?? null;
-  const peerPresence = usePresence(chat?.user_id);
+  const group = chat?.type === "group";
+  // Groups: admins pin and delete others' messages.
+  const groupAdmin = group && (chat?.role === "owner" || chat?.role === "admin");
+  const peerPresence = usePresence(chat?.user_id ?? undefined);
   const crypto = useChatCrypto(chat);
+  const startChat = useStartChat();
 
   const [messages, setMessages] = useState<Message[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -143,6 +154,9 @@ function ChatScreen({ chatId }: { chatId: string }) {
   // The chat's menu (search, safety code, pin, mute, block, delete).
   const [chatMenu, setChatMenu] = useState(false);
   const [showSafetyCode, setShowSafetyCode] = useState(false);
+  // Groups: the members (for names, presence and the group's screen).
+  const [members, setMembers] = useState<GroupMember[] | null>(null);
+  const [showGroupInfo, setShowGroupInfo] = useState(false);
   // The message being forwarded (choosing the chat).
   const [forwarding, setForwarding] = useState<Message | null>(null);
   // Files chosen for the next message, and the menu to choose them.
@@ -209,6 +223,25 @@ function ChatScreen({ chatId }: { chatId: string }) {
     setKeyChanged(false);
     setShowSafetyCode(false);
   };
+
+  // A group's members, again whenever the group changes.
+  const memberCount = chat?.member_count;
+  const groupUpdated = group ? chat?.updated_at : undefined;
+
+  const loadMembers = useCallback(() => {
+    withToken((t) => getGroupMembers(t, chatId)).then(setMembers, () => {});
+  }, [withToken, chatId]);
+
+  useEffect(() => {
+    if (group) {
+      loadMembers();
+    }
+  }, [group, memberCount, groupUpdated, loadMembers]);
+
+  const memberNames = useMemo(
+    () => new Map((members ?? []).map((m) => [m.id, m.username])),
+    [members],
+  );
 
   // The newest history; after a reconnect it also drops what was deleted
   // meanwhile.
@@ -435,7 +468,12 @@ function ChatScreen({ chatId }: { chatId: string }) {
     }
 
     if (!user || !crypto.canEncrypt) {
-      showError(null, `@${chat?.username ?? "…"} has not set up end-to-end encryption yet`);
+      showError(
+        null,
+        group
+          ? "The group's key has not loaded yet"
+          : `@${chat?.username ?? "…"} has not set up end-to-end encryption yet`,
+      );
       return;
     }
 
@@ -536,7 +574,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
   const forward = async (message: Message, target: Chat) => {
     setForwarding(null);
 
-    if (!user || !privateKey || !target.public_key) {
+    if (!user || !privateKey) {
       return;
     }
 
@@ -555,18 +593,25 @@ function ChatScreen({ chatId }: { chatId: string }) {
     }
 
     const id = newMessageId();
+    let content: string;
+
+    try {
+      content = encryptForChat(
+        target,
+        encodePayload({ text: shown.text, forwardedFrom: from, attachments }),
+        { id, sender_id: user.id },
+        privateKey,
+      );
+    } catch (e) {
+      showError(e, "Failed to forward the message");
+      return;
+    }
 
     outbox.send({
       id,
       chatId: target.id,
       senderId: user.id,
-      content: encryptMessage(
-        encodePayload({ text: shown.text, forwardedFrom: from, attachments }),
-        { id, sender_id: user.id },
-        privateKey,
-        target.public_key,
-        target.id,
-      ),
+      content,
       replyTo: null,
       attachments: attachments.map((a) => a.id),
     });
@@ -658,14 +703,16 @@ function ChatScreen({ chatId }: { chatId: string }) {
   };
 
   const toggleBlocked = async () => {
-    if (!chat) {
+    if (!chat?.user_id) {
       return;
     }
+
+    const peer = chat.user_id;
 
     setChatMenu(false);
 
     try {
-      await withToken((t) => setBlocked(t, chat.user_id, !chat.blocked_by_me));
+      await withToken((t) => setBlocked(t, peer, !chat.blocked_by_me));
       await reloadChats();
     } catch (e) {
       showError(e, "Something went wrong");
@@ -679,6 +726,28 @@ function ChatScreen({ chatId }: { chatId: string }) {
       await updateChatSettings(chatId, settings);
     } catch (e) {
       showError(e, "Failed to change the chat");
+    }
+  };
+
+  const leave = async () => {
+    setChatMenu(false);
+    setShowGroupInfo(false);
+
+    try {
+      await leaveGroup(chatId);
+      router.replace("/chats");
+    } catch (e) {
+      showError(e, "Failed to leave the group");
+    }
+  };
+
+  // The direct chat with a group's member.
+  const messageMember = async (username: string) => {
+    try {
+      const direct = await startChat(username);
+      router.navigate({ pathname: "/chats/[chatId]", params: { chatId: direct.id } });
+    } catch (e) {
+      showError(e, "Failed to open the chat");
     }
   };
 
@@ -745,6 +814,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
     }
 
     const pinned = chat?.pinned_message?.id === message.id;
+    const canPin = !group || groupAdmin;
 
     return [
       { icon: "arrow-undo-outline", label: "Reply", onPress: () => startReply(message) },
@@ -766,15 +836,17 @@ function ChatScreen({ chatId }: { chatId: string }) {
             },
           }]
         : []),
-      {
-        icon: pinned ? "pin" : "pin-outline",
-        label: pinned ? "Unpin" : "Pin",
-        onPress: () => togglePin(pinned ? null : message),
-      },
+      ...(canPin
+        ? [{
+            icon: pinned ? ("pin" as const) : ("pin-outline" as const),
+            label: pinned ? "Unpin" : "Pin",
+            onPress: () => togglePin(pinned ? null : message),
+          }]
+        : []),
       ...(own && !shown.forwardedFrom && shown.status === "ok"
         ? [{ icon: "create-outline" as const, label: "Edit", onPress: () => startEdit(message) }]
         : []),
-      ...(own
+      ...(own || groupAdmin
         ? [{
             icon: "trash-outline" as const,
             label: "Delete",
@@ -856,13 +928,28 @@ function ChatScreen({ chatId }: { chatId: string }) {
   }
 
   // The peer's presence is only known while we are connected ourselves.
-  const peerOnline = status === "online" && Boolean(peerPresence?.online);
+  const peerOnline = !group && status === "online" && Boolean(peerPresence?.online);
+  const onlineMembers = (members ?? []).filter(
+    (m) => m.id !== user?.id && presence[m.id]?.online,
+  ).length;
   const statusText =
-    status === "online"
-      ? formatPresence(peerPresence)
-      : status === "connecting"
+    status !== "online"
+      ? status === "connecting"
         ? "connecting…"
-        : "waiting for network…";
+        : "waiting for network…"
+      : group
+        ? `${chat?.member_count ?? 0} members${onlineMembers ? `, ${onlineMembers} online` : ""}`
+        : formatPresence(peerPresence);
+
+  // Who is typing: in a group by name.
+  const typingNames = (typingUsers[chatId] ?? []).map((id) => memberNames.get(id)).filter(Boolean);
+  const typingText = !typing.has(chatId)
+    ? null
+    : group && typingNames.length
+      ? typingNames.length === 1
+        ? `@${typingNames[0]} is typing…`
+        : `${typingNames.length} people are typing…`
+      : "typing…";
 
   const peerReadAt = chat?.peer_last_read_at ?? null;
   const canSend =
@@ -881,19 +968,21 @@ function ChatScreen({ chatId }: { chatId: string }) {
         onBack={wide ? undefined : goBack}
         left={
           chat ? (
-            <Avatar
-              name={chat.username}
-              avatarId={chat.avatar_id}
-              size={38}
-              online={peerOnline}
-            />
+            <Pressable
+              onPress={() => (group ? setShowGroupInfo(true) : undefined)}
+              disabled={!group}
+              accessibilityRole={group ? "button" : undefined}
+              accessibilityLabel={group ? "Group info" : undefined}
+            >
+              <ChatAvatar chat={chat} size={38} online={peerOnline} />
+            </Pressable>
           ) : null
         }
-        title={chat?.username ?? "…"}
+        title={chat ? (group ? chatTitle(chat) : (chat.username ?? "…")) : "…"}
         titleBadge={chat?.is_developer ? <DevBadge size="md" /> : null}
         subtitle={
-          typing.has(chatId) ? (
-            <Text style={{ color: colors.accent }}>typing…</Text>
+          typingText ? (
+            <Text style={{ color: colors.accent }}>{typingText}</Text>
           ) : peerOnline ? (
             <Text style={{ color: colors.online }}>online</Text>
           ) : (
@@ -936,13 +1025,15 @@ function ChatScreen({ chatId }: { chatId: string }) {
               {previewText(messagePreview(crypto.decrypt(chat.pinned_message)))}
             </Text>
           </Pressable>
-          <IconButton
-            icon="close"
-            label="Unpin"
-            size={18}
-            color={colors.muted}
-            onPress={() => togglePin(null)}
-          />
+          {!group || groupAdmin ? (
+            <IconButton
+              icon="close"
+              label="Unpin"
+              size={18}
+              color={colors.muted}
+              onPress={() => togglePin(null)}
+            />
+          ) : null}
         </View>
       ) : null}
 
@@ -1061,7 +1152,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
                       No messages yet
                     </Text>
                     <Text style={[styles.emptyText, { color: colors.muted }]}>
-                      Say hi to @{chat?.username ?? "…"}!
+                      {group ? "Say hi to the group!" : `Say hi to @${chat?.username ?? "…"}!`}
                     </Text>
                   </View>
                 </View>
@@ -1094,9 +1185,29 @@ function ChatScreen({ chatId }: { chatId: string }) {
                   );
                 }
 
+                if (item.message.kind === "system") {
+                  return (
+                    <View style={styles.separator}>
+                      <Text
+                        style={[
+                          styles.systemLabel,
+                          { color: colors.muted, backgroundColor: colors.panel },
+                        ]}
+                      >
+                        {textOf(item.message).text}
+                      </Text>
+                    </View>
+                  );
+                }
+
                 return (
                   <MessageBubble
                     row={item}
+                    senderName={
+                      group
+                        ? (memberNames.get(item.message.sender_id) ?? item.message.sender_username)
+                        : undefined
+                    }
                     read={
                       item.own &&
                       peerReadAt !== null &&
@@ -1140,9 +1251,12 @@ function ChatScreen({ chatId }: { chatId: string }) {
         )}
 
         {chat && !crypto.canEncrypt && !composerBlocked ? (
-          <Text style={[styles.notice, { color: colors.muted }]}>
-            @{chat.username} has not set up end-to-end encryption yet. You can
-            write once they open the updated Ostrich.
+          <Text style={[styles.notice, { color: group && isGroupDistrusted(chat.id) ? colors.danger : colors.muted }]}>
+            {group
+              ? isGroupDistrusted(chat.id)
+                ? "The group's key came from someone whose security key has changed. Compare safety codes in the group's info."
+                : "Loading the group's key…"
+              : `@${chat.username} has not set up end-to-end encryption yet. You can write once they open the updated Ostrich.`}
           </Text>
         ) : null}
 
@@ -1389,7 +1503,82 @@ function ChatScreen({ chatId }: { chatId: string }) {
         <ForwardPicker onPick={(target) => forward(forwarding, target)} onClose={() => setForwarding(null)} />
       ) : null}
 
-      {chatMenu && chat ? (
+      {chatMenu && chat && group ? (
+        <ActionMenu
+          title={chatTitle(chat)}
+          onClose={() => setChatMenu(false)}
+          items={[
+            {
+              icon: "people-outline",
+              label: "Group info",
+              onPress: () => {
+                setChatMenu(false);
+                setShowGroupInfo(true);
+              },
+            },
+            { icon: "search", label: "Search in chat", onPress: openSearch },
+            ...(chat.pinned_message && groupAdmin
+              ? [{ icon: "pin-outline" as const, label: "Unpin message", onPress: () => togglePin(null) }]
+              : []),
+            {
+              icon: chat.pinned ? "pin" : "pin-outline",
+              label: chat.pinned ? "Unpin" : "Pin to top",
+              onPress: () => changeSettings({ pinned: !chat.pinned }),
+            },
+            {
+              icon: chat.muted ? "notifications-outline" : "notifications-off-outline",
+              label: chat.muted ? "Unmute" : "Mute",
+              onPress: () => changeSettings({ muted: !chat.muted }),
+            },
+            {
+              icon: "eye-off-outline",
+              label: "Clear history for me",
+              confirmLabel: "Clear? The others keep the messages",
+              danger: true,
+              onPress: () => deleteChat("me"),
+            },
+            {
+              icon: "exit-outline",
+              label: "Leave group",
+              confirmLabel: "Leave the group?",
+              danger: true,
+              onPress: leave,
+            },
+            ...(chat.role === "owner"
+              ? [{
+                  icon: "trash-outline" as const,
+                  label: "Delete group",
+                  confirmLabel: "Delete the group for everyone?",
+                  danger: true,
+                  onPress: () => deleteChat("everyone"),
+                }]
+              : []),
+          ]}
+        />
+      ) : null}
+
+      {showGroupInfo && chat && group ? (
+        <GroupInfo
+          chat={chat}
+          members={members}
+          onChanged={() => {
+            loadMembers();
+            reloadChats();
+          }}
+          onLeave={leave}
+          onDelete={() => {
+            setShowGroupInfo(false);
+            deleteChat("everyone");
+          }}
+          onMessage={(username) => {
+            setShowGroupInfo(false);
+            messageMember(username);
+          }}
+          onClose={() => setShowGroupInfo(false)}
+        />
+      ) : null}
+
+      {chatMenu && chat && !group ? (
         <ActionMenu
           title={`@${chat.username}`}
           onClose={() => setChatMenu(false)}
@@ -1447,7 +1636,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
 
       {showSafetyCode && chat && crypto.safetyCode ? (
         <SafetyCode
-          username={chat.username}
+          username={chat.username ?? ""}
           code={crypto.safetyCode}
           keyChanged={keyChanged}
           onConfirm={confirmPeerKey}
@@ -1529,6 +1718,16 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: radius.pill,
     overflow: "hidden",
+  },
+
+  systemLabel: {
+    fontSize: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: radius.pill,
+    overflow: "hidden",
+    textAlign: "center",
+    maxWidth: "90%",
   },
 
   unreadLine: {

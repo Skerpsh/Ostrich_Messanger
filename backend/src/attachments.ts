@@ -53,6 +53,7 @@ export async function cleanupAttachments() {
     `
     DELETE FROM attachments
     WHERE message_id IS NULL
+      AND chat_id IS NULL
       AND created_at < NOW() - INTERVAL '${UNLINKED_TTL}'
     RETURNING id
     `,

@@ -6,8 +6,16 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   decryptAttachment,
+  decryptGroupInfo,
+  decryptGroupMessage,
   decryptMessage,
   encryptAttachment,
+  encryptGroupInfo,
+  encryptGroupMessage,
+  groupMessageEpoch,
+  newGroupKey,
+  unwrapGroupKey,
+  wrapGroupKey,
   deriveFromOstrichId,
   encryptMessage,
   fromBase64,
@@ -121,4 +129,39 @@ test("attachments: shared vector and round trip", () => {
 
   // Another key does not open it.
   assert.throws(() => decryptAttachment(sealed, encryptAttachment(data).key));
+});
+
+test("groups: shared vectors", () => {
+  // B unwraps the key A wrapped for them, then reads the message and info.
+  const key = unwrapGroupKey(v.group_key_wrapped_for_b, v.group_epoch, v.group_id, privateB, v.member_id_b, v.public_key_a);
+  assert.equal(toBase64(key), v.group_key);
+
+  const keyOf = (epoch: number) => (epoch === v.group_epoch ? key : undefined);
+  const message = { id: v.message_id, sender_id: v.sender_id, content: v.group_message };
+
+  assert.equal(groupMessageEpoch(v.group_message), v.group_epoch);
+  assert.deepEqual(decryptGroupMessage(message, keyOf, v.group_id), { status: "ok", text: v.group_text });
+  assert.deepEqual(decryptGroupInfo(v.group_info, keyOf, v.group_id), { name: "Ostrich team 🦤" });
+
+  // Bound to the sender, the message, the chat and the epoch.
+  assert.equal(decryptGroupMessage({ ...message, sender_id: v.member_id_b }, keyOf, v.group_id).status, "error");
+  assert.equal(decryptGroupMessage(message, keyOf, v.chat_id).status, "error");
+  assert.equal(decryptGroupMessage(message, () => undefined, v.group_id).status, "error");
+});
+
+test("groups: a wrapped key is only for its member and epoch", () => {
+  const key = newGroupKey();
+  const wrapped = wrapGroupKey(key, 1, v.group_id, privateA, v.member_id_b, v.public_key_b);
+
+  assert.deepEqual(unwrapGroupKey(wrapped, 1, v.group_id, privateB, v.member_id_b, v.public_key_a), key);
+  assert.throws(() => unwrapGroupKey(wrapped, 2, v.group_id, privateB, v.member_id_b, v.public_key_a));
+  assert.throws(() => unwrapGroupKey(wrapped, 1, v.group_id, privateB, v.sender_id, v.public_key_a));
+
+  const content = encryptGroupMessage("round trip", { id: v.message_id, sender_id: v.sender_id }, key, 1, v.group_id);
+  const keyOf = (epoch: number) => (epoch === 1 ? key : undefined);
+  assert.equal(decryptGroupMessage({ id: v.message_id, sender_id: v.sender_id, content }, keyOf, v.group_id).text, "round trip");
+  assert.deepEqual(decryptGroupInfo(encryptGroupInfo({ name: "x", photo: { id: v.message_id, key: "k", mime: "image/jpeg" } }, key, 1, v.group_id), keyOf, v.group_id), {
+    name: "x",
+    photo: { id: v.message_id, key: "k", mime: "image/jpeg" },
+  });
 });

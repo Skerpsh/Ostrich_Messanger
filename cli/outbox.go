@@ -23,7 +23,13 @@ type outgoing struct {
 	state    string
 	err      string
 	inFlight bool
+	// Times encrypted again for a changed group key.
+	reencrypted int
 }
+
+// reencryptTries: how often a group message is encrypted again before
+// giving up (members changing the key at the same moment).
+const reencryptTries = 3
 
 // queueMessage adds an encrypted message to the outbox and sends it.
 func (m *model) queueMessage(chatID, id, content string, replyTo *ReplyPreview, attachments []string) tea.Cmd {
@@ -103,6 +109,8 @@ func (m *model) attemptSend(id string) tea.Cmd {
 				}
 			case errors.Is(err, errSessionExpired):
 				return m.fail(err)
+			case errors.As(err, &apiErr) && (apiErr.code == "group_key_changed" || apiErr.code == "group_key_rotation_needed"):
+				return m.reencryptOutgoing(id)
 			case errors.As(err, &apiErr) && apiErr.status == http.StatusConflict:
 				// Sent before; the answer got lost. The history has it.
 				m.dropOutgoing(id)
@@ -114,6 +122,76 @@ func (m *model) attemptSend(id string) tea.Cmd {
 			}
 
 			return nil
+		}
+	})
+}
+
+// reencryptOutgoing encrypts a refused group message again with the
+// group's new key (making it first if someone left), then sends it.
+func (m *model) reencryptOutgoing(id string) tea.Cmd {
+	i := m.findOutgoing(id)
+
+	if i < 0 {
+		return nil
+	}
+
+	if m.outgoing[i].reencrypted >= reencryptTries {
+		m.outgoing[i].state = "failed"
+		m.outgoing[i].err = "the group's key keeps changing"
+
+		return nil
+	}
+
+	m.outgoing[i].reencrypted++
+	m.outgoing[i].inFlight = true
+	message := m.outgoing[i].message
+	token := m.user.Token
+	me := m.user.User
+	privateKey := m.user.PrivateKey
+	keys := map[int][]byte{}
+
+	for epoch, key := range m.groupKeys[message.ChatID] {
+		keys[epoch] = key
+	}
+
+	known := map[string]string{}
+
+	for userID, key := range m.knownKeys {
+		known[userID] = key
+	}
+
+	return task(func() func(*model) tea.Cmd {
+		content, fresh, err := reencryptForGroup(token, me, privateKey, keys, known, message)
+
+		return func(m *model) tea.Cmd {
+			i := m.findOutgoing(id)
+
+			if i < 0 || m.user == nil || m.user.Token != token {
+				return nil
+			}
+
+			m.outgoing[i].inFlight = false
+
+			if err != nil {
+				if errors.Is(err, errSessionExpired) {
+					return m.fail(err)
+				}
+
+				m.outgoing[i].state = "failed"
+				m.outgoing[i].err = err.Error()
+
+				return nil
+			}
+
+			for epoch, key := range fresh {
+				if m.groupKeyOf(message.ChatID, epoch) == nil {
+					m.addGroupKey(message.ChatID, epoch, key)
+				}
+			}
+
+			m.outgoing[i].message.Content = content
+
+			return tea.Batch(m.attemptSend(id), m.loadChats())
 		}
 	})
 }

@@ -35,8 +35,9 @@ const idParams = {
   properties: { id: { type: "string", format: "uuid" } },
 } as const;
 
-// SQL: whether user $2 may read attachment $1: they uploaded it, or it is
-// in a message of a chat they are in (and have not cleared).
+// SQL: whether user $2 may read attachment $1: they uploaded it, it is in
+// a message of a chat they are in (and have not cleared), or it is the
+// photo of a group they are in.
 const CAN_READ = `
   SELECT a.size
   FROM attachments a
@@ -49,6 +50,11 @@ const CAN_READ = `
         WHERE cm.chat_id = m.chat_id
           AND cm.user_id = $2
           AND (cm.cleared_at IS NULL OR m.created_at > cm.cleared_at)
+      )
+      OR EXISTS (
+        SELECT 1 FROM chat_members cm
+        WHERE cm.chat_id = a.chat_id
+          AND cm.user_id = $2
       )
     )
 `;

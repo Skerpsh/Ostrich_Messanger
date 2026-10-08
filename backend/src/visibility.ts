@@ -13,7 +13,7 @@ export function blockedEitherWay(a: string, b: string) {
 // Whether `viewer` may see the presence (online, last seen) of the user
 // row `target` (an alias of "users") through the chat `chatId`: the target
 // shows their presence, neither blocked the other, and the target has
-// written in the chat. The last condition means that starting a chat with
+// written in the chat (not counting group events). The last condition means that starting a chat with
 // someone does not reveal when they are online: they have to answer first.
 export function presenceVisible(target: string, viewer: string, chatId: string) {
   return `(
@@ -23,6 +23,7 @@ export function presenceVisible(target: string, viewer: string, chatId: string) 
       SELECT 1 FROM messages presence_message
       WHERE presence_message.chat_id = ${chatId}
         AND presence_message.sender_id = ${target}.id
+        AND presence_message.kind = 'text'
     )
   )`;
 }

@@ -30,6 +30,8 @@ type menuState struct {
 	// Position in the reactions row.
 	reaction   int
 	confirming int
+	// A group's info (its chat id): redrawn when the members load.
+	groupInfo string
 }
 
 func (m *model) openMenu(menu *menuState) {
@@ -114,7 +116,10 @@ func (m *model) messageMenu(chat Chat, message Message) *menuState {
 		pinLabel, pinID = "Unpin", ""
 	}
 
-	items = append(items, menuItem{icon: "📌", label: pinLabel, action: func(m *model) tea.Cmd { return m.pinMessage(chat, pinID) }})
+	// In a group, admins pin.
+	if chat.Type != "group" || chat.isAdmin() {
+		items = append(items, menuItem{icon: "📌", label: pinLabel, action: func(m *model) tea.Cmd { return m.pinMessage(chat, pinID) }})
+	}
 
 	if message.ReplyTo != nil {
 		reply := message.ReplyTo.ID
@@ -127,7 +132,8 @@ func (m *model) messageMenu(chat Chat, message Message) *menuState {
 		items = append(items, menuItem{icon: "✎", label: "Edit", action: func(m *model) tea.Cmd { return m.startEdit(chat, message) }})
 	}
 
-	if own {
+	// In a group, admins delete any message.
+	if own || chat.isAdmin() {
 		items = append(items, menuItem{icon: "🗑", label: "Delete", danger: true, confirm: "Delete for everyone?", action: func(m *model) tea.Cmd {
 			m.chat.resetSelection()
 			return tea.Batch(m.deleteMessage(message), m.chat.composer.Focus())
@@ -147,12 +153,18 @@ func (m *model) forwardMenu(from Chat, message Message) *menuState {
 	var items []menuItem
 
 	for _, target := range m.chats {
-		if target.Blocked || target.PublicKey == "" {
+		writable := target.PublicKey != ""
+
+		if target.Type == "group" {
+			writable = m.groupKeyOf(target.ID, target.KeyEpoch) != nil
+		}
+
+		if target.Blocked || !writable {
 			continue
 		}
 
 		target := target
-		items = append(items, menuItem{icon: "→", label: "@" + target.Username, action: func(m *model) tea.Cmd {
+		items = append(items, menuItem{icon: "→", label: m.chatTitle(target), action: func(m *model) tea.Cmd {
 			return m.forward(from, message, target)
 		}})
 	}
@@ -172,6 +184,10 @@ func (m *model) forward(from Chat, message Message, target Chat) tea.Cmd {
 
 	if origin == "" {
 		origin = from.Username
+
+		if from.Type == "group" {
+			origin = message.SenderUsername
+		}
 
 		if message.SenderID == m.user.User.ID {
 			origin = m.user.User.Username
@@ -198,8 +214,7 @@ func (m *model) forward(from Chat, message Message, target Chat) tea.Cmd {
 			}
 
 			id := newMessageID()
-			content, err := encryptMessage(encodePayload(payload{text: shown.text, forwardedFrom: origin, attachments: attachments}),
-				id, m.user.User.ID, m.user.PrivateKey, target.PublicKey, target.ID)
+			content, err := m.encryptFor(target, encodePayload(payload{text: shown.text, forwardedFrom: origin, attachments: attachments}), id)
 			if err != nil {
 				return m.showToast(err.Error(), true)
 			}
@@ -228,6 +243,10 @@ func (m *model) pinMessage(chat Chat, messageID string) tea.Cmd {
 // chatMenu: the chat's actions; from the chat screen with search, safety
 // code and blocking.
 func (m *model) chatMenu(chat Chat, inChat bool) *menuState {
+	if chat.Type == "group" {
+		return m.groupMenu(chat, inChat)
+	}
+
 	var items []menuItem
 
 	if inChat {
@@ -473,12 +492,37 @@ func (m *model) openSafety(chat Chat) {
 	m.safetyOpen = true
 }
 
-func (m *model) confirmSafety() {
-	if chat, ok := m.chatByID(m.chat.id); ok && m.keyChanged[chat.UserID] {
-		m.acceptPeerKey(chat)
+// safetyWith: whose safety code is shown (id, username, public key).
+func (m model) safetyWith() foundUser {
+	if m.safetyPeer != nil {
+		return *m.safetyPeer
 	}
 
+	chat, _ := m.chatByID(m.chat.id)
+
+	return foundUser{ID: chat.UserID, Username: chat.Username, PublicKey: chat.PublicKey}
+}
+
+// safetyChanged: the user's key differs from the one this computer knows.
+func (m model) safetyChanged(peer foundUser) bool {
+	known, ok := m.knownKeys[peer.ID]
+
+	return ok && known != peer.PublicKey
+}
+
+func (m *model) closeSafety() {
 	m.safetyOpen = false
+	m.safetyPeer = nil
+}
+
+func (m *model) confirmSafety() {
+	if peer := m.safetyWith(); m.safetyChanged(peer) {
+		m.knownKeys[peer.ID] = peer.PublicKey
+		delete(m.keyChanged, peer.ID)
+		saveKnownKeys(m.user.User.ID, m.knownKeys)
+	}
+
+	m.closeSafety()
 }
 
 func (m *model) updateSafetyKey(msg tea.KeyMsg) tea.Cmd {
@@ -486,7 +530,7 @@ func (m *model) updateSafetyKey(msg tea.KeyMsg) tea.Cmd {
 	case "y", "Y":
 		m.confirmSafety()
 	case "esc", "enter", "q", "ctrl+k":
-		m.safetyOpen = false
+		m.closeSafety()
 	}
 
 	return nil
@@ -497,9 +541,9 @@ func (m *model) updateSafetyMouse(msg tea.MouseMsg) tea.Cmd {
 	case clicked(msg, "safety:confirm"):
 		m.confirmSafety()
 	case clicked(msg, "safety:close"):
-		m.safetyOpen = false
+		m.closeSafety()
 	case msg.Action == tea.MouseActionPress && !zone.Get("safety").InBounds(msg):
-		m.safetyOpen = false
+		m.closeSafety()
 	}
 
 	return nil
@@ -508,17 +552,17 @@ func (m *model) updateSafetyMouse(msg tea.MouseMsg) tea.Cmd {
 func (m model) safetyView() string {
 	p := m.pal
 	bg := p.panel
-	chat, _ := m.chatByID(m.chat.id)
-	name := sanitize(chat.Username)
+	peer := m.safetyWith()
+	name := sanitize(peer.Username)
 	w := min(60, m.width-4)
 	inner := w - 4
-	changed := m.keyChanged[chat.UserID]
+	changed := m.safetyChanged(peer)
 
 	own, err := publicKeyOf(m.user.PrivateKey)
 	var code []string
 
 	if err == nil {
-		code, err = safetyCode(own, chat.PublicKey)
+		code, err = safetyCode(own, peer.PublicKey)
 	}
 
 	icon, iconColor := "🛡", p.accent

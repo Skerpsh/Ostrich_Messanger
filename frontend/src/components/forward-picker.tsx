@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import Avatar from "@/components/avatar";
+import ChatAvatar from "@/components/chat-avatar";
 import DevBadge from "@/components/dev-badge";
 import { noWebOutline } from "@/components/text-field";
 import { useChats } from "@/context/chats";
 import { useAppTheme } from "@/context/theme";
 import type { Chat } from "@/lib/api";
+import { chatTitle, groupKeyOf } from "@/lib/groups";
 import { radius } from "@/theme/colors";
 
 // "Forward to…": a chat to forward a message to, over a dimmed background
@@ -24,8 +25,13 @@ export default function ForwardPicker({
   const shown = useMemo(() => {
     const needle = query.trim().replace(/^@/, "").toLowerCase();
 
+    // Chats that can be written to from here: not blocked, with the other
+    // member's key (or the group's).
     return (chats ?? []).filter(
-      (chat) => !chat.blocked && chat.public_key && chat.username.toLowerCase().includes(needle),
+      (chat) =>
+        !chat.blocked &&
+        (chat.type === "group" ? groupKeyOf(chat.id, chat.key_epoch) : chat.public_key) &&
+        chatTitle(chat).toLowerCase().includes(needle),
     );
   }, [chats, query]);
 
@@ -55,15 +61,15 @@ export default function ForwardPicker({
             <Pressable
               onPress={() => onPick(item)}
               accessibilityRole="button"
-              accessibilityLabel={`Forward to ${item.username}`}
+              accessibilityLabel={`Forward to ${chatTitle(item)}`}
               style={({ hovered, pressed }) => [
                 styles.row,
                 (hovered || pressed) && { backgroundColor: colors.hover },
               ]}
             >
-              <Avatar name={item.username} avatarId={item.avatar_id} size={34} />
+              <ChatAvatar chat={item} size={34} />
               <Text numberOfLines={1} style={[styles.name, { color: colors.text }]}>
-                {item.username}
+                {item.type === "group" ? chatTitle(item) : item.username}
               </Text>
               {item.is_developer ? <DevBadge /> : null}
             </Pressable>

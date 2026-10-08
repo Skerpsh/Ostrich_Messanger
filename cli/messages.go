@@ -10,8 +10,10 @@ type Message struct {
 	ChatID         string `json:"chat_id"`
 	SenderID       string `json:"sender_id"`
 	SenderUsername string `json:"sender_username"`
-	Content        string `json:"content"`
-	CreatedAt      string `json:"created_at"`
+	// "system": written by the server about a group (content plain JSON).
+	Kind      string `json:"kind"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
 
 	// The message this one replies to, if any.
 	ReplyTo *ReplyPreview `json:"reply_to"`

@@ -268,6 +268,7 @@ func (m *model) openChat(chat Chat) tea.Cmd {
 		m.saveDraft()
 		m.snapshotCache()
 		m.chat = newChatState(chat.ID, m.pal, m.paneWidth())
+		m.members = nil
 
 		// The saved history shows until the server answers.
 		if m.cache != nil {
@@ -285,7 +286,7 @@ func (m *model) openChat(chat Chat) tea.Cmd {
 	m.focus = paneChat
 	m.list.selectChat(*m, chat.ID)
 
-	return tea.Batch(m.chat.composer.Focus(), m.loadHistory(chat.ID, ""))
+	return tea.Batch(m.chat.composer.Focus(), m.loadHistory(chat.ID, ""), m.loadMembers())
 }
 
 // saveDraft keeps the open chat's unsent text for when it is opened
@@ -313,6 +314,7 @@ func (m *model) closeChat() {
 	}
 
 	m.chat = nil
+	m.members = nil
 	m.safetyOpen = false
 	m.focus = paneList
 }
@@ -456,7 +458,11 @@ func (m *model) updateChatKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case "ctrl+f":
 		return m.openChatSearch()
-	case "ctrl+k":
+	case "ctrl+k", "ctrl+g":
+		if chat.Type == "group" {
+			return m.openGroupInfo(chat)
+		}
+
 		m.openSafety(chat)
 		return nil
 	case "ctrl+o":
@@ -510,6 +516,15 @@ func (m *model) updateSelectingKey(msg tea.KeyMsg, chat Chat) tea.Cmd {
 	message := shown[index]
 	own := message.SenderID == m.user.User.ID
 
+	// A group event can only be passed by.
+	if message.Kind == "system" {
+		switch msg.String() {
+		case "up", "k", "down", "j", "esc", "i":
+		default:
+			return nil
+		}
+	}
+
 	// A message still on its way has only its menu.
 	if m.outgoingState(message.ID) != "" {
 		switch msg.String() {
@@ -547,7 +562,7 @@ func (m *model) updateSelectingKey(msg tea.KeyMsg, chat Chat) tea.Cmd {
 			return m.startEdit(chat, message)
 		}
 	case "d":
-		if own {
+		if own || chat.isAdmin() {
 			menu := m.messageMenu(chat, message)
 			menu.focusLabel("Delete")
 			m.openMenu(menu)
@@ -628,6 +643,11 @@ func (m model) matches() []string {
 
 	for i := len(shown) - 1; i >= 0; i-- {
 		message := shown[i]
+
+		if message.Kind == "system" {
+			continue
+		}
+
 		text := plainText(m.show(chat, message.ID, message.SenderID, message.Content).text)
 
 		if strings.Contains(strings.ToLower(text), query) {
@@ -700,6 +720,11 @@ func (m *model) sendComposer(chat Chat) tea.Cmd {
 	}
 
 	switch {
+	case chat.Type == "group":
+		if m.groupKeyOf(chat.ID, chat.KeyEpoch) == nil {
+			c.err = errGroupKeyMissing.Error()
+			return m.loadGroupKeys()
+		}
 	case chat.Blocked:
 		c.err = "You can't message @" + chat.Username
 		return nil
@@ -801,7 +826,7 @@ func (m *model) queueText(chat Chat, text string, attachments []attachment, repl
 	id := newMessageID()
 	content := encodePayload(payload{text: text, attachments: attachments})
 
-	encrypted, err := encryptMessage(content, id, m.user.User.ID, m.user.PrivateKey, chat.PublicKey, chat.ID)
+	encrypted, err := m.encryptFor(chat, content, id)
 	if err != nil {
 		return nil, err
 	}
@@ -835,7 +860,7 @@ func (m *model) sendEdit(chat Chat, text string) tea.Cmd {
 	shown := m.show(chat, editing.ID, editing.SenderID, editing.Content)
 	content := encodePayload(payload{text: text, attachments: shown.attachments})
 
-	encrypted, err := encryptMessage(content, editing.ID, m.user.User.ID, m.user.PrivateKey, chat.PublicKey, chat.ID)
+	encrypted, err := m.encryptFor(chat, content, editing.ID)
 	if err != nil {
 		c.err = err.Error()
 		return nil
@@ -957,6 +982,11 @@ func (m model) replyPreview(chat Chat, message Message) *ReplyPreview {
 		SenderUsername:    chat.Username,
 		SenderIsDeveloper: chat.IsDeveloper,
 		Content:           message.Content,
+	}
+
+	if chat.Type == "group" {
+		reply.SenderUsername = message.SenderUsername
+		reply.SenderIsDeveloper = false
 	}
 
 	if message.SenderID == m.user.User.ID {
@@ -1218,6 +1248,8 @@ func (m *model) updateChatMouse(msg tea.MouseMsg) tea.Cmd {
 	case clicked(msg, "chat:search"):
 		m.focus = paneChat
 		return m.openChatSearch()
+	case clicked(msg, "chat:groupinfo"):
+		return m.openGroupInfo(chat)
 	case clicked(msg, "chat:safety"), clicked(msg, "chat:keywarning"):
 		m.openSafety(chat)
 		return nil

@@ -63,7 +63,7 @@ func (m model) listRows() []listRow {
 	}
 
 	for i := range m.chats {
-		if query == "" || strings.Contains(strings.ToLower(m.chats[i].Username), query) {
+		if query == "" || strings.Contains(strings.ToLower(m.chatName(m.chats[i])), query) {
 			rows = append(rows, listRow{chat: &m.chats[i]})
 		}
 	}
@@ -78,7 +78,7 @@ func (m model) canStartChat(query string) bool {
 	}
 
 	for _, chat := range m.chats {
-		if strings.EqualFold(chat.Username, query) {
+		if chat.Type != "group" && strings.EqualFold(chat.Username, query) {
 			return false
 		}
 	}
@@ -201,6 +201,8 @@ func (m *model) updateListKey(msg tea.KeyMsg) tea.Cmd {
 		return m.startSearch("")
 	case "n":
 		return m.startSearch("@")
+	case "N":
+		return m.newGroup()
 	case "m", ".":
 		rows := m.listRows()
 
@@ -435,7 +437,7 @@ func (m model) listView(w, h int) string {
 	rowsBlock := zone.Mark("list:rows", fitBlock(strings.Join(rowLines, "\n"), w, area, bg))
 	lines = append(lines, rowsBlock)
 
-	hints := "↑↓ Move  Enter Open  / Search  n New chat  m Menu  s Settings  t Theme  q Quit"
+	hints := "↑↓ Move  Enter Open  / Search  n New chat  N New group  m Menu  s Settings  t Theme  q Quit"
 
 	switch {
 	case m.list.searching && w < 60:
@@ -485,7 +487,12 @@ func (m model) listRowView(r listRow, cursor bool, w int) string {
 	}
 
 	chat := *r.chat
-	name := bold(sanitize(chat.Username), p.text, bg)
+	group := chat.Type == "group"
+	name := bold(sanitize(m.chatName(chat)), p.text, bg)
+
+	if group {
+		name = seg("👥 ", p.muted, bg) + name
+	}
 
 	if chat.IsDeveloper {
 		name += blank(1, bg) + devBadge()
@@ -495,7 +502,7 @@ func (m model) listRowView(r listRow, cursor bool, w int) string {
 		name += seg(" 🔕", p.muted, bg)
 	}
 
-	if m.keyChanged[chat.UserID] {
+	if !group && m.keyChanged[chat.UserID] || group && m.groupDistrusted[chat.ID] {
 		name += seg(" ⚠", p.danger, bg)
 	}
 
@@ -520,12 +527,12 @@ func (m model) listRowView(r listRow, cursor bool, w int) string {
 		right = m.ticks(chat, last.CreatedAt, bg) + blank(1, bg) + right
 	}
 
-	line1 := row(blank(1, bg)+avatar(chat.Username)+blank(1, bg)+name, right, w, bg)
+	line1 := row(blank(1, bg)+avatar(m.chatName(chat))+blank(1, bg)+name, right, w, bg)
 
 	// Presence dot under the avatar; preview; pin or unread count.
 	dot := blank(3, bg)
 
-	if m.connStatus == connOnline && m.presence[chat.UserID].online {
+	if !group && m.connStatus == connOnline && m.presence[chat.UserID].online {
 		dot = seg(" ● ", p.online, bg)
 	}
 
@@ -535,6 +542,8 @@ func (m model) listRowView(r listRow, cursor bool, w int) string {
 	switch {
 	case m.isTyping(chat.ID):
 		preview = seg("typing…", p.accent, bg)
+	case last != nil && last.Kind == "system":
+		preview = italic(oneLine(sanitize(systemText(last.SenderID, last.SenderUsername, last.Content, m.user.User.ID))), p.muted, bg)
 	case draft != "" && (m.chat == nil || m.chat.id != chat.ID):
 		preview = seg("Draft: ", p.danger, bg) + seg(oneLine(sanitize(draft)), p.muted, bg)
 	case last == nil:
@@ -542,8 +551,11 @@ func (m model) listRowView(r listRow, cursor bool, w int) string {
 	default:
 		text := oneLine(sanitize(plainText(m.textOf(chat, last.ID, last.SenderID, last.Content))))
 
-		if own {
+		switch {
+		case own:
 			preview = seg("You: ", p.textSoft, bg)
+		case group:
+			preview = seg("@"+sanitize(last.SenderUsername)+": ", p.textSoft, bg)
 		}
 
 		preview += seg(text, p.muted, bg)

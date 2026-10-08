@@ -27,5 +27,13 @@
   "attachment_key": "gyniWIOAD0EF64MYjNzYlamC0bJZ8+RlmfWvYKc0Atc=",
   "attachment_plain": "YXR0YWNobWVudCBieXRlcyDwn5OOIGF0dGFjaG1lbnQgYnl0ZXMg8J+TjiBhdHRhY2htZW50IGJ5dGVzIPCfk44gYXR0YWNobWVudCBieXRlcyDwn5OOIGF0dGFjaG1lbnQgYnl0ZXMg8J+TjiA=",
   "attachment_sealed": "RztROuiUjOl2rvWvsiLV83zNqaEoxY81KAwL4eDFUcwI3efN7Lja/JAmIOr8tArs5yNxii5a9mAOJ8+5Xn4eLua/MzRLaGWRYtMl6745/XwLMQ2O0lRQb1HfAEwJToVknswoVHlZ3XZhiZgIMdKVNnkMJtXd6UeP1hF/fIGnGzu8+ZvHmj7e+5HCerVGOfPxsEcKFPGE",
-  "payload_with_attachments": "\u001eostrich1:{\"t\":\"caption\",\"f\":\"carol\",\"a\":[{\"i\":\"6f2b4ad0-8a3e-4c51-9d7b-1e2f3a4b5c6d\",\"k\":\"gyniWIOAD0EF64MYjNzYlamC0bJZ8+RlmfWvYKc0Atc=\",\"n\":\"photo.jpg\",\"m\":\"image/jpeg\",\"s\":110,\"w\":640,\"h\":480}]}"
+  "payload_with_attachments": "\u001eostrich1:{\"t\":\"caption\",\"f\":\"carol\",\"a\":[{\"i\":\"6f2b4ad0-8a3e-4c51-9d7b-1e2f3a4b5c6d\",\"k\":\"gyniWIOAD0EF64MYjNzYlamC0bJZ8+RlmfWvYKc0Atc=\",\"n\":\"photo.jpg\",\"m\":\"image/jpeg\",\"s\":110,\"w\":640,\"h\":480}]}",
+  "group_id": "9d8e7f60-5a4b-4c3d-9e2f-1a0b9c8d7e6f",
+  "group_epoch": 3,
+  "group_key": "Y5VunWIN1DUzKlinvkvdJCFmymJgGNXKFveTR4slLBI=",
+  "member_id_b": "7a1c3e5f-2b4d-4e6f-8a0b-1c2d3e4f5a6b",
+  "group_key_wrapped_for_b": "G3EdtKQiYUr4+0h6nEI8/hq0fq8XE9SJxKbk+zWTu3ugUKty162i6OkDyuUOvdhZm1FNXrF7GPcIc7kUlU/mttBk65cnQPPs",
+  "group_text": "Hello group 👋",
+  "group_message": "e3:3:BQrbRWSMQgOde0Mx7IRSa4lrwoOHE4ku1zgl9xcvfoN3NZdmX2DRXjlGwGU0vUBAjaSL4mL+aeI=",
+  "group_info": "i1:3:omaqRvbD3uLfMceCneLhBko8UEDJoxxkIj6glb+sOyP2cXre+egO6gKUZuBoBtYAaI51wxzooRy8Th7Yv5zRdEbhmgM="
 }

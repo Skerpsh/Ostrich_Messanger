@@ -8,6 +8,7 @@ import {
 } from "react";
 import * as api from "@/lib/api";
 import { forgetLoadedAttachments } from "@/lib/attachments";
+import { clearGroupKeys } from "@/lib/groups";
 import {
   clearChatKeys,
   createAccountKeys,
@@ -97,6 +98,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       removeItem(PRIVATE_KEY_KEY),
     ]);
     clearChatKeys();
+    clearGroupKeys();
     forgetLoadedAttachments();
     setState({ status: "signedOut" });
   }, []);

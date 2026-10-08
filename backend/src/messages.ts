@@ -4,11 +4,12 @@ import { blockedEitherWay } from "./visibility.js";
 // Messages are end-to-end encrypted, see frontend/src/lib/crypto.ts:
 //   "e2:" + base64(nonce + ciphertext), bound to the chat, the sender and
 //         the message id, which the client chooses for that reason;
-//   "e1:" the same bound to the chat only (older clients).
+//   "e1:" the same bound to the chat only (older clients);
+//   "e3:<epoch>:" + base64(…) in groups, with the group key of that epoch.
 // The server cannot read or shorten them; clients limit the text to 4096
 // characters before encrypting, which is at most ~22 000 characters of
 // base64.
-export const MESSAGE_PATTERN = "^e[12]:[A-Za-z0-9+/]+={0,2}$";
+export const MESSAGE_PATTERN = "^(e[12]:|e3:[0-9]{1,9}:)[A-Za-z0-9+/]+={0,2}$";
 export const MAX_MESSAGE_LENGTH = 22_000;
 
 const MESSAGE_RE = new RegExp(MESSAGE_PATTERN);
@@ -17,9 +18,16 @@ export function isEncryptedMessage(content: string) {
   return content.length <= MAX_MESSAGE_LENGTH && MESSAGE_RE.test(content);
 }
 
-// "e2" messages are bound to their id, so the client must choose it.
+// "e2" and "e3" messages are bound to their id, so the client must
+// choose it.
 export function needsClientId(content: string) {
-  return content.startsWith("e2:");
+  return content.startsWith("e2:") || content.startsWith("e3:");
+}
+
+// The group key epoch of an "e3" message; null for direct messages.
+export function groupEpochOf(content: string): number | null {
+  const match = /^e3:([0-9]{1,9}):/.exec(content);
+  return match ? Number(match[1]) : null;
 }
 
 export type ReplyPreview = {
@@ -37,6 +45,8 @@ export type ChatMessage = {
   chat_id: string;
   sender_id: string;
   sender_username: string;
+  // "system": written by the server about a group, content plain JSON.
+  kind: "text" | "system";
   content: string;
   created_at: Date;
   edited_at: Date | null;
@@ -70,6 +80,7 @@ export const MESSAGE_SELECT = `
     m.chat_id,
     m.sender_id,
     sender.username AS sender_username,
+    m.kind,
     m.content,
     m.created_at,
     m.edited_at,
@@ -132,7 +143,11 @@ export type CreateMessageError =
   | "reply_not_found"
   | "blocked"
   | "duplicate_id"
-  | "attachment_invalid";
+  | "attachment_invalid"
+  // Groups: the message is not encrypted with the current group key, or
+  // the group needs a new key first (someone left).
+  | "group_key_changed"
+  | "group_key_rotation_needed";
 
 export type CreateMessageResult =
   | {
@@ -152,14 +167,28 @@ const attachmentsFree = (ids: string) => `(
     AND message_id IS NULL
 ) = cardinality(${ids}::uuid[])`;
 
-// SQL: whether $2 (a member of chat $1) and the chat's other member have
-// blocked each other, in either direction.
+// SQL: whether $2 (a member of direct chat $1) and the chat's other
+// member have blocked each other, in either direction. Blocks do not apply
+// in groups.
 const BLOCKED_IN_CHAT = `EXISTS (
   SELECT 1
   FROM chat_members other
+  JOIN chats ON chats.id = other.chat_id AND chats.type = 'direct'
   WHERE other.chat_id = $1
     AND other.user_id <> $2
     AND ${blockedEitherWay("$2::uuid", "other.user_id")}
+)`;
+
+// SQL: whether the message's encryption fits the chat: in a group, the
+// current key epoch ($7) and no new key pending; in a direct chat, no
+// epoch.
+const ENCRYPTION_FITS = `(
+  SELECT CASE
+    WHEN c.type = 'group' THEN $7::int = c.key_epoch AND NOT c.rotation_needed
+    ELSE $7::int IS NULL
+  END
+  FROM chats c
+  WHERE c.id = $1
 )`;
 
 // Saves a message, bumps the chat's updated_at and the sender's read
@@ -205,6 +234,7 @@ export async function createMessage(
         )
         AND NOT ${BLOCKED_IN_CHAT}
         AND ${attachmentsFree("$6")}
+        AND ${ENCRYPTION_FITS}
         RETURNING id, chat_id, sender_id, content, created_at, reply_to_id
       ),
       linked AS (
@@ -250,7 +280,7 @@ export async function createMessage(
       JOIN users ON users.id = inserted.sender_id
       ${REPLY_JOINS("inserted")}
       `,
-      [chatId, senderId, content, replyToId, messageId, attachmentIds],
+      [chatId, senderId, content, replyToId, messageId, attachmentIds, groupEpochOf(content)],
     );
   } catch (error) {
     if (isPgError(error, PG_UNIQUE_VIOLATION)) {
@@ -265,7 +295,8 @@ export async function createMessage(
 
     return {
       message: {
-        ...(withReply(row) as Omit<ChatMessage, "edited_at" | "reactions">),
+        ...(withReply(row) as Omit<ChatMessage, "edited_at" | "reactions" | "kind">),
+        kind: "text",
         edited_at: null,
         reactions: [],
       },
@@ -281,12 +312,25 @@ export async function createMessage(
         SELECT 1 FROM chat_members WHERE chat_id = $1 AND user_id = $2
       ) AS member,
       ${BLOCKED_IN_CHAT} AS blocked,
-      ${attachmentsFree("$3")} AS attachments_free
+      ${attachmentsFree("$3")} AS attachments_free,
+      chats.type = 'group' AND chats.rotation_needed AS rotation_needed,
+      CASE WHEN chats.type = 'group'
+        THEN $4::int IS DISTINCT FROM chats.key_epoch
+        ELSE $4::int IS NOT NULL
+      END AS wrong_epoch
+    FROM chats
+    WHERE chats.id = $1
     `,
-    [chatId, senderId, attachmentIds],
+    [chatId, senderId, attachmentIds, groupEpochOf(content)],
   );
 
-  const { member, blocked, attachments_free } = why.rows[0];
+  const row = why.rows[0];
+
+  if (!row) {
+    return { error: "not_member" };
+  }
+
+  const { member, blocked, attachments_free, rotation_needed, wrong_epoch } = row;
 
   return {
     error: !member
@@ -295,7 +339,11 @@ export async function createMessage(
         ? "blocked"
         : !attachments_free
           ? "attachment_invalid"
-          : "reply_not_found",
+          : rotation_needed
+            ? "group_key_rotation_needed"
+            : wrong_epoch
+              ? "group_key_changed"
+              : "reply_not_found",
   };
 }
 
@@ -315,6 +363,8 @@ export const CREATE_MESSAGE_ERRORS: Record<CreateMessageError, string> = {
   blocked: "You can't message this user",
   duplicate_id: "A message with this id already exists",
   attachment_invalid: "An attachment is missing or was already sent",
+  group_key_changed: "The group key has changed: load it and try again",
+  group_key_rotation_needed: "The group needs a new key first (someone left)",
 };
 
 export const CREATE_MESSAGE_STATUS: Record<CreateMessageError, number> = {
@@ -323,4 +373,6 @@ export const CREATE_MESSAGE_STATUS: Record<CreateMessageError, number> = {
   blocked: 403,
   duplicate_id: 409,
   attachment_invalid: 400,
+  group_key_changed: 409,
+  group_key_rotation_needed: 409,
 };

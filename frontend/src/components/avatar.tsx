@@ -1,3 +1,4 @@
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { Image } from "expo-image";
 import { StyleSheet, Text, View } from "react-native";
 import { useAppTheme } from "@/context/theme";
@@ -6,6 +7,8 @@ import { avatarUrl } from "@/lib/api";
 export default function Avatar({
   name,
   avatarId,
+  uri,
+  group = false,
   size = 48,
   online = false,
   // Background behind the online dot's ring (the surface the avatar is on).
@@ -14,6 +17,10 @@ export default function Avatar({
   name: string;
   // The profile picture; the first letter of the name without one.
   avatarId?: string | null;
+  // A picture already on the device (a group's decrypted photo).
+  uri?: string | null;
+  // A group without a photo shows a people icon.
+  group?: boolean;
   size?: number;
   // Shows the green "online" dot.
   online?: boolean;
@@ -34,7 +41,16 @@ export default function Avatar({
         },
       ]}
     >
-      {avatarId ? (
+      {uri ? (
+        <Image
+          source={{ uri }}
+          style={{ width: size, height: size, borderRadius: size / 2 }}
+          contentFit="cover"
+          accessibilityIgnoresInvertColors
+        />
+      ) : group ? (
+        <Ionicons name="people" size={size * 0.48} color={colors.textSoft} />
+      ) : avatarId ? (
         <Image
           source={{ uri: avatarUrl(avatarId) }}
           style={{ width: size, height: size, borderRadius: size / 2 }}

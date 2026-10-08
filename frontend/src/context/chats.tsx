@@ -20,6 +20,7 @@ import {
   loadCachedChats,
   saveCachedChats,
 } from "@/lib/local-cache";
+import { chatTitle, useAllGroupKeys } from "@/lib/groups";
 import { messagePreview } from "@/lib/preview";
 import { getItem, removeItem, setItem } from "@/lib/storage";
 import { showMessage } from "@/lib/use-chat-crypto";
@@ -50,8 +51,9 @@ type ChatsContextValue = {
   markChatRead: (chatId: string, message: Message) => void;
   // The other user's read position, from a history load.
   setPeerReadAt: (chatId: string, lastReadAt: string | null) => void;
-  // Chats where the other member is typing.
+  // Chats where someone else is typing, and who (user ids).
   typing: Set<string>;
+  typingUsers: Record<string, string[]>;
   // Pin / mute (for this user). Shown right away; undone if it fails.
   updateChatSettings: (
     chatId: string,
@@ -63,6 +65,8 @@ type ChatsContextValue = {
   // Unsent text per chat, kept on this device.
   drafts: Record<string, string>;
   setDraft: (chatId: string, text: string) => void;
+  // Leaves a group (it goes from the list).
+  leaveGroup: (chatId: string) => Promise<void>;
   // Pins a message for both members (null unpins).
   pinMessage: (chatId: string, messageId: string | null) => Promise<void>;
 };
@@ -77,6 +81,9 @@ const draftKey = (userId: string, chatId: string) => `ostrich-draft-${userId}-${
 const DRAFT_SAVE_DELAY_MS = 500;
 
 const ChatsContext = createContext<ChatsContextValue | null>(null);
+
+// "typing…" is kept per chat and user.
+const typingKey = (chatId: string, userId: string) => `${chatId}|${userId}`;
 
 const later = (a: string | null, b: string | null) =>
   !a ? b : !b ? a : new Date(a) >= new Date(b) ? a : b;
@@ -157,10 +164,11 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
       const loaded = await withToken(api.getChats);
 
       seedPresence(
-        loaded.map((chat) => ({
-          userId: chat.user_id,
-          presence: { online: chat.online, lastSeenAt: chat.last_seen_at },
-        })),
+        loaded.flatMap((chat) =>
+          chat.user_id
+            ? [{ userId: chat.user_id, presence: { online: chat.online, lastSeenAt: chat.last_seen_at } }]
+            : [],
+        ),
       );
       setChats(loaded);
       setSynced(true);
@@ -381,6 +389,8 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
               last_message: {
                 id: message.id,
                 sender_id: message.sender_id,
+                sender_username: message.sender_username,
+                kind: message.kind,
                 // Whole: encrypted text cannot be shortened.
                 content: message.content,
                 created_at: message.created_at,
@@ -398,18 +408,21 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
           }
 
           if (incoming) {
-            // The message ends "typing…".
-            setTypingUntil(({ [message.chat_id]: _, ...rest }) => rest);
+            // The message ends the sender's "typing…".
+            setTypingUntil(({ [typingKey(message.chat_id, message.sender_id)]: _, ...rest }) => rest);
 
             const chat = chatsRef.current?.find((c) => c.id === message.chat_id);
 
-            // Web: a browser notification unless the chat is on screen or muted.
-            if (chat && !chat.muted && !viewing) {
+            // Web: a browser notification unless the chat is on screen or
+            // muted (none for group events).
+            if (chat && !chat.muted && !viewing && message.kind !== "system") {
+              const preview = messagePreview(
+                showMessage(message, privateKeyRef.current, chat, userId),
+              );
+
               showMessageNotification(
-                `@${chat.username}`,
-                messagePreview(
-                  showMessage(message, privateKeyRef.current, chat.public_key, chat.id),
-                ),
+                chatTitle(chat),
+                chat.type === "group" ? `@${message.sender_username}: ${preview}` : preview,
                 chat.id,
                 openChat,
               );
@@ -454,7 +467,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
             case "typing":
               setTypingUntil((current) => ({
                 ...current,
-                [event.chatId]: Date.now() + TYPING_MS,
+                [typingKey(event.chatId, event.userId)]: Date.now() + TYPING_MS,
               }));
               break;
 
@@ -573,7 +586,21 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
     return () => clearTimeout(timer);
   }, [typingUntil]);
 
-  const typing = useMemo(() => new Set(Object.keys(typingUntil)), [typingUntil]);
+  const typingUsers = useMemo(() => {
+    const users: Record<string, string[]> = {};
+
+    for (const key of Object.keys(typingUntil)) {
+      const [chatId, typingId] = key.split("|");
+      (users[chatId] ??= []).push(typingId);
+    }
+
+    return users;
+  }, [typingUntil]);
+
+  const typing = useMemo(() => new Set(Object.keys(typingUsers)), [typingUsers]);
+
+  // Groups' names are encrypted: their keys load with the list.
+  useAllGroupKeys(chats);
 
   const updateChatSettings = useCallback(
     async (chatId: string, settings: { pinned?: boolean; muted?: boolean }) => {
@@ -601,6 +628,19 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
       if (userId) {
         forgetCachedChat(userId, chatId);
       }
+    },
+    [withToken, userId],
+  );
+
+  const leaveGroup = useCallback(
+    async (chatId: string) => {
+      if (!userId) {
+        return;
+      }
+
+      await withToken((token) => api.removeGroupMember(token, chatId, userId));
+      setChats((current) => current?.filter((chat) => chat.id !== chatId) ?? current);
+      forgetCachedChat(userId, chatId);
     },
     [withToken, userId],
   );
@@ -680,8 +720,10 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
         markChatRead,
         setPeerReadAt,
         typing,
+        typingUsers,
         updateChatSettings,
         removeChat,
+        leaveGroup,
         drafts,
         setDraft,
         pinMessage,

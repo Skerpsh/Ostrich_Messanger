@@ -100,9 +100,12 @@ export function buildRows(
       separated = true;
     }
 
+    // Group events stand alone.
     const joinedAbove =
       !separated &&
       prev !== undefined &&
+      prev.kind !== "system" &&
+      message.kind !== "system" &&
       prev.sender_id === message.sender_id &&
       time(message.created_at) - time(prev.created_at) < GROUP_GAP_MS;
 

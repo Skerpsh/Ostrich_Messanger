@@ -220,3 +220,97 @@ func TestAttachments(t *testing.T) {
 		t.Fatalf("written back differently:\n%s\n%s", got, v.Payload)
 	}
 }
+
+func TestGroupCrypto(t *testing.T) {
+	data, err := os.ReadFile("../testdata/crypto-vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var v struct {
+		GroupID     string `json:"group_id"`
+		Epoch       int    `json:"group_epoch"`
+		GroupKey    string `json:"group_key"`
+		MemberB     string `json:"member_id_b"`
+		WrappedForB string `json:"group_key_wrapped_for_b"`
+		Text        string `json:"group_text"`
+		Message     string `json:"group_message"`
+		Info        string `json:"group_info"`
+		MessageID   string `json:"message_id"`
+		SenderID    string `json:"sender_id"`
+		PublicKeyA  string `json:"public_key_a"`
+		PublicKeyB  string `json:"public_key_b"`
+		PrivateKeyA string `json:"private_key_a"`
+		PrivateKeyB string `json:"private_key_b"`
+	}
+
+	if err := json.Unmarshal(data, &v); err != nil {
+		t.Fatal(err)
+	}
+
+	privateA, _ := base64.StdEncoding.DecodeString(v.PrivateKeyA)
+	privateB, _ := base64.StdEncoding.DecodeString(v.PrivateKeyB)
+
+	// B unwraps the key the app wrapped for them, then reads the app's
+	// message and info.
+	key, err := unwrapGroupKey(v.WrappedForB, v.Epoch, v.GroupID, privateB, v.MemberB, v.PublicKeyA)
+	if err != nil || base64.StdEncoding.EncodeToString(key) != v.GroupKey {
+		t.Fatalf("unwrap: %v", err)
+	}
+
+	keyOf := func(epoch int) []byte {
+		if epoch == v.Epoch {
+			return key
+		}
+
+		return nil
+	}
+
+	if text, status := decryptGroupMessage(v.Message, v.MessageID, v.SenderID, keyOf, v.GroupID); status != decryptOK || text != v.Text {
+		t.Fatalf("message: %q %d", text, status)
+	}
+
+	if epoch, ok := groupMessageEpoch(v.Message); !ok || epoch != v.Epoch {
+		t.Fatalf("epoch %d", epoch)
+	}
+
+	if info, ok := decryptGroupInfo(v.Info, keyOf, v.GroupID); !ok || info.Name != "Ostrich team 🦤" {
+		t.Fatalf("info: %+v", info)
+	}
+
+	// Bound to sender, chat, member and epoch.
+	if _, status := decryptGroupMessage(v.Message, v.MessageID, v.MemberB, keyOf, v.GroupID); status != decryptFailed {
+		t.Fatal("another sender accepted")
+	}
+
+	wrapped, err := wrapGroupKey(key, 1, v.GroupID, privateA, v.MemberB, v.PublicKeyB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := unwrapGroupKey(wrapped, 2, v.GroupID, privateB, v.MemberB, v.PublicKeyA); err == nil {
+		t.Fatal("another epoch accepted")
+	}
+
+	if _, err := unwrapGroupKey(wrapped, 1, v.GroupID, privateB, v.SenderID, v.PublicKeyA); err == nil {
+		t.Fatal("another member accepted")
+	}
+
+	// Round trip, readable by the app's code the same way.
+	content := encryptGroupMessage("from the CLI", "m1", v.SenderID, key, 1, v.GroupID)
+	one := func(epoch int) []byte {
+		if epoch == 1 {
+			return key
+		}
+
+		return nil
+	}
+
+	if text, _ := decryptGroupMessage(content, "m1", v.SenderID, one, v.GroupID); text != "from the CLI" {
+		t.Fatalf("round trip: %q", text)
+	}
+
+	if info, ok := decryptGroupInfo(encryptGroupInfo(groupInfo{Name: "x", Photo: &groupPhoto{ID: "i", Key: "k", Mime: "image/png"}}, key, 1, v.GroupID), one, v.GroupID); !ok || info.Photo == nil || info.Photo.Mime != "image/png" {
+		t.Fatalf("info round trip: %+v", info)
+	}
+}

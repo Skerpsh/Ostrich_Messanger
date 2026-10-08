@@ -97,10 +97,3 @@ func (m *model) checkPeerKeys() {
 		saveKnownKeys(m.user.User.ID, m.knownKeys)
 	}
 }
-
-// acceptPeerKey: the user has compared the safety code of the new key.
-func (m *model) acceptPeerKey(chat Chat) {
-	m.knownKeys[chat.UserID] = chat.PublicKey
-	delete(m.keyChanged, chat.UserID)
-	saveKnownKeys(m.user.User.ID, m.knownKeys)
-}

@@ -254,7 +254,7 @@ export default async function websocketRoutes(server: FastifyInstance) {
           );
 
           if ("error" in result) {
-            sendError(CREATE_MESSAGE_ERRORS[result.error]);
+            send({ type: "error", error: CREATE_MESSAGE_ERRORS[result.error], code: result.error });
             return;
           }
 

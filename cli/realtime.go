@@ -1,6 +1,8 @@
 package main
 
 import (
+	"sort"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -95,7 +97,7 @@ func (m *model) loadChats() tea.Cmd {
 
 			m.setChats(chats)
 
-			return nil
+			return tea.Batch(m.loadGroupKeys(), m.loadMembers())
 		}
 	})
 }
@@ -109,7 +111,9 @@ func (m *model) setChats(chats []Chat) {
 	m.chatsLoaded = true
 
 	for _, chat := range chats {
-		m.setPresence(chat.UserID, chat.Online, chat.LastSeenAt)
+		if chat.UserID != "" {
+			m.setPresence(chat.UserID, chat.Online, chat.LastSeenAt)
+		}
 	}
 
 	m.checkPeerKeys()
@@ -145,9 +149,23 @@ func (m *model) setPresence(userID string, online bool, lastSeenAt *string) {
 }
 
 func (m model) isTyping(chatID string) bool {
-	until, ok := m.typingUntil[chatID]
+	return len(m.typingIn(chatID)) > 0
+}
 
-	return ok && time.Now().Before(until)
+// typingIn: who is typing in the chat (user ids).
+func (m model) typingIn(chatID string) []string {
+	var users []string
+	now := time.Now()
+
+	for key, until := range m.typingUntil {
+		if chat, user, ok := strings.Cut(key, "|"); ok && chat == chatID && now.Before(until) {
+			users = append(users, user)
+		}
+	}
+
+	sort.Strings(users)
+
+	return users
 }
 
 func (m *model) updateRealtime(msg tea.Msg) tea.Cmd {
@@ -246,7 +264,7 @@ func (m *model) handleEvent(event WSMessage) tea.Cmd {
 		}
 
 	case "typing":
-		m.typingUntil[event.ChatID] = time.Now().Add(typingDuration)
+		m.typingUntil[event.ChatID+"|"+event.UserID] = time.Now().Add(typingDuration)
 
 	case "read":
 		m.readEvent(event)
@@ -301,17 +319,19 @@ func (m *model) messageArrived(message Message) tea.Cmd {
 	viewing := m.viewing(message.ChatID)
 	chat := m.chats[i]
 
-	// The message ends "typing…".
+	// The message ends the sender's "typing…".
 	if !own {
-		delete(m.typingUntil, message.ChatID)
+		delete(m.typingUntil, message.ChatID+"|"+message.SenderID)
 	}
 
 	if chat.LastMessage == nil || chat.LastMessage.ID != message.ID {
 		chat.LastMessage = &LastMessage{
-			ID:        message.ID,
-			SenderID:  message.SenderID,
-			Content:   message.Content,
-			CreatedAt: message.CreatedAt,
+			ID:             message.ID,
+			SenderID:       message.SenderID,
+			SenderUsername: message.SenderUsername,
+			Kind:           message.Kind,
+			Content:        message.Content,
+			CreatedAt:      message.CreatedAt,
 		}
 		chat.Updated = message.CreatedAt
 
@@ -321,7 +341,7 @@ func (m *model) messageArrived(message Message) tea.Cmd {
 		default:
 			chat.UnreadCount++
 
-			if !chat.Muted {
+			if !chat.Muted && message.Kind != "system" {
 				m.bell()
 			}
 		}

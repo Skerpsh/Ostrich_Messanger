@@ -1,6 +1,7 @@
 import { FastifyInstance } from "fastify";
-import { PROFILE_COLUMNS, usernameSchema } from "../accounts.js";
+import { AVATAR_ID_COLUMN, PROFILE_COLUMNS, usernameSchema } from "../accounts.js";
 import { db, isChatMember, withTransaction } from "../database.js";
+import { groupMembership, isAdmin } from "../groups.js";
 import { isBlockedInChat } from "../messages.js";
 import { authenticate } from "../middleware/auth.js";
 import { isOnline, sendToChatMembers, sendToUserSockets } from "../realtime.js";
@@ -24,12 +25,12 @@ const chatParamsSchema = {
 
 // What the signed-in user may see of the other member's presence.
 function presenceView(row: {
-  user_id: string;
+  user_id: string | null;
   last_seen_at: Date | null;
   presence_visible: boolean;
 }) {
   return {
-    online: row.presence_visible && isOnline(row.user_id),
+    online: row.presence_visible && row.user_id !== null && isOnline(row.user_id),
     last_seen_at: row.presence_visible ? row.last_seen_at : null,
   };
 }
@@ -188,8 +189,9 @@ export default async function chatsRoutes(server: FastifyInstance) {
   );
 
   // LIST the user's chats: pinned first, then most recently active, with
-  // the other user's presence, the last message and the unread count.
-  // Hidden chats (see migrations/002) are left out.
+  // the last message and the unread count; for direct chats the other
+  // user and their presence, for groups the encrypted name, the key epoch
+  // and the user's role. Hidden chats (see migrations/002) are left out.
   server.get(
     "/api/chats",
     {
@@ -203,23 +205,39 @@ export default async function chatsRoutes(server: FastifyInstance) {
           chats.type,
           chats.created_at,
           chats.updated_at,
-          users.id AS user_id,
-          users.username,
-          users.last_seen_at,
+          chats.encrypted_info,
+          chats.key_epoch,
+          chats.rotation_needed,
+          chat_members.role,
+          (SELECT COUNT(*)::int FROM chat_members cm WHERE cm.chat_id = chats.id) AS member_count,
+          peer.id AS user_id,
+          peer.username,
+          peer.last_seen_at,
           -- The other member's key, to encrypt for them.
-          users.public_key,
-          ${PROFILE_COLUMNS},
+          peer.public_key,
+          peer.avatar_id,
+          COALESCE(peer.is_developer, FALSE) AS is_developer,
           chat_members.pinned_at IS NOT NULL AS pinned,
           chat_members.muted,
-          ${presenceVisible("users", "$1::uuid", "chats.id")} AS presence_visible,
+          COALESCE(peer.presence_visible, FALSE) AS presence_visible,
           -- Either has blocked the other: no messages either way.
-          ${blockedEitherWay("$1::uuid", "users.id")} AS blocked,
-          EXISTS (
-            SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = users.id
-          ) AS blocked_by_me,
-          -- Read receipts are exchanged only if both have them on.
-          CASE WHEN me.read_receipts AND users.read_receipts
-            THEN other_member.last_read_at
+          COALESCE(peer.blocked, FALSE) AS blocked,
+          COALESCE(peer.blocked_by_me, FALSE) AS blocked_by_me,
+          -- Read receipts: only if the user has them on; in a direct chat
+          -- if the other member has too, in a group up to where any member
+          -- with them on has read (as Telegram shows it).
+          CASE WHEN me.read_receipts THEN
+            CASE WHEN chats.type = 'direct'
+              THEN CASE WHEN peer.read_receipts THEN peer.last_read_at END
+              ELSE (
+                SELECT MAX(cm.last_read_at)
+                FROM chat_members cm
+                JOIN users u ON u.id = cm.user_id
+                WHERE cm.chat_id = chats.id
+                  AND cm.user_id <> $1
+                  AND u.read_receipts
+              )
+            END
           END AS peer_last_read_at,
           pinned.id AS pinned_message_id,
           pinned.sender_id AS pinned_message_sender_id,
@@ -227,6 +245,8 @@ export default async function chatsRoutes(server: FastifyInstance) {
           pinned.created_at AS pinned_message_created_at,
           last_message.id AS last_message_id,
           last_message.sender_id AS last_message_sender_id,
+          last_message.sender_username AS last_message_sender_username,
+          last_message.kind AS last_message_kind,
           last_message.content AS last_message_content,
           last_message.created_at AS last_message_created_at,
           (
@@ -234,27 +254,49 @@ export default async function chatsRoutes(server: FastifyInstance) {
             FROM messages
             WHERE messages.chat_id = chats.id
               AND messages.sender_id <> $1
+              AND messages.kind = 'text'
               AND messages.created_at > chat_members.last_read_at
           ) AS unread_count
         FROM chats
         JOIN chat_members
           ON chat_members.chat_id = chats.id
+         AND chat_members.user_id = $1
         JOIN users me
           ON me.id = $1
-        JOIN chat_members other_member
-          ON other_member.chat_id = chats.id
-         AND other_member.user_id <> $1
-        JOIN users
-          ON users.id = other_member.user_id
+        -- Direct chats: the other member.
+        LEFT JOIN LATERAL (
+          SELECT
+            users.id,
+            users.username,
+            users.last_seen_at,
+            users.public_key,
+            users.is_developer,
+            users.read_receipts,
+            other.last_read_at,
+            ${AVATAR_ID_COLUMN},
+            ${presenceVisible("users", "$1::uuid", "chats.id")} AS presence_visible,
+            ${blockedEitherWay("$1::uuid", "users.id")} AS blocked,
+            EXISTS (
+              SELECT 1 FROM blocks WHERE blocker_id = $1 AND blocked_id = users.id
+            ) AS blocked_by_me
+          FROM chat_members other
+          JOIN users ON users.id = other.user_id
+          WHERE other.chat_id = chats.id
+            AND other.user_id <> $1
+            AND chats.type = 'direct'
+          LIMIT 1
+        ) peer ON TRUE
         LEFT JOIN LATERAL (
           -- Whole: encrypted text cannot be shortened.
-          SELECT id, sender_id, content, created_at
+          SELECT id, sender_id, kind, content, created_at,
+                 (SELECT username FROM users WHERE users.id = messages.sender_id) AS sender_username
           FROM messages
           WHERE messages.chat_id = chats.id
             AND (
               chat_members.cleared_at IS NULL
               OR messages.created_at > chat_members.cleared_at
             )
+            AND (chats.type = 'direct' OR messages.created_at >= chat_members.joined_at)
           ORDER BY created_at DESC, id DESC
           LIMIT 1
         ) last_message ON TRUE
@@ -262,8 +304,7 @@ export default async function chatsRoutes(server: FastifyInstance) {
         LEFT JOIN messages pinned
           ON pinned.id = chats.pinned_message_id
          AND (chat_members.cleared_at IS NULL OR pinned.created_at > chat_members.cleared_at)
-        WHERE chat_members.user_id = $1
-          AND NOT chat_members.hidden
+        WHERE NOT chat_members.hidden
         ORDER BY chat_members.pinned_at DESC NULLS LAST,
                  chats.updated_at DESC,
                  chats.id
@@ -280,6 +321,8 @@ export default async function chatsRoutes(server: FastifyInstance) {
             pinned_message_created_at,
             last_message_id,
             last_message_sender_id,
+            last_message_sender_username,
+            last_message_kind,
             last_message_content,
             last_message_created_at,
             presence_visible,
@@ -303,6 +346,8 @@ export default async function chatsRoutes(server: FastifyInstance) {
               ? {
                   id: last_message_id,
                   sender_id: last_message_sender_id,
+                  sender_username: last_message_sender_username,
+                  kind: last_message_kind,
                   content: last_message_content,
                   created_at: last_message_created_at,
                 }
@@ -395,6 +440,13 @@ export default async function chatsRoutes(server: FastifyInstance) {
         return reply.status(403).send({ error: "You can't change this chat" });
       }
 
+      // In a group, only admins pin.
+      const group = await groupMembership(chatId, request.user.id);
+
+      if (group && !isAdmin(group.role)) {
+        return reply.status(403).send({ error: "Only the group's admins can pin messages" });
+      }
+
       const result = await db.query(
         `
         UPDATE chats
@@ -479,6 +531,14 @@ export default async function chatsRoutes(server: FastifyInstance) {
         return reply.status(404).send({
           error: "Chat not found",
         });
+      }
+
+      // A group is deleted for everyone only by its owner (the others
+      // leave it).
+      const group = await groupMembership(chatId, request.user.id);
+
+      if (group && group.role !== "owner") {
+        return reply.status(403).send({ error: "Only the group's owner can delete it" });
       }
 
       // Tell the members while they are still members.

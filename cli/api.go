@@ -123,14 +123,32 @@ type Chat struct {
 
 	// The message pinned at the top of the chat (for both members).
 	PinnedMessage *LastMessage `json:"pinned_message"`
+
+	// Groups (Type "group"; UserID, Username and PublicKey are ""): the
+	// name and photo encrypted with the group key (groups.go), the epoch
+	// of the current key, whether it needs a new one (someone left), the
+	// user's role and how many members there are.
+	EncryptedInfo  string `json:"encrypted_info"`
+	KeyEpoch       int    `json:"key_epoch"`
+	RotationNeeded bool   `json:"rotation_needed"`
+	Role           string `json:"role"`
+	MemberCount    int    `json:"member_count"`
+}
+
+// isAdmin: the user may change the group (owner or admin).
+func (c Chat) isAdmin() bool {
+	return c.Type == "group" && (c.Role == "owner" || c.Role == "admin")
 }
 
 // LastMessage is a chat's newest message (encrypted), for previews.
 type LastMessage struct {
-	ID        string `json:"id"`
-	SenderID  string `json:"sender_id"`
-	Content   string `json:"content"`
-	CreatedAt string `json:"created_at"`
+	ID       string `json:"id"`
+	SenderID string `json:"sender_id"`
+	// In the chats list: who wrote it, and "system" for group events.
+	SenderUsername string `json:"sender_username"`
+	Kind           string `json:"kind"`
+	Content        string `json:"content"`
+	CreatedAt      string `json:"created_at"`
 }
 
 type ChatsResponse struct {

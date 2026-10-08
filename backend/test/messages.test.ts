@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  groupEpochOf,
   isEncryptedMessage,
   MAX_MESSAGE_LENGTH,
   needsClientId,
@@ -52,4 +53,13 @@ test("reply columns become reply_to", () => {
       },
     },
   );
+});
+
+test("group messages carry their key epoch", () => {
+  assert.ok(isEncryptedMessage("e3:12:AAAA"));
+  assert.ok(!isEncryptedMessage("e3:AAAA"));
+  assert.ok(!isEncryptedMessage("e3:x:AAAA"));
+  assert.ok(needsClientId("e3:1:AAAA"));
+  assert.equal(groupEpochOf("e3:12:AAAA"), 12);
+  assert.equal(groupEpochOf("e2:AAAA"), null);
 });

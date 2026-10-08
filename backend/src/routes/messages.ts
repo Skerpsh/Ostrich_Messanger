@@ -2,11 +2,13 @@ import { FastifyInstance } from "fastify";
 import { MAX_ATTACHMENTS_PER_MESSAGE } from "../attachments.js";
 import { db } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
+import { groupMembership, isAdmin } from "../groups.js";
 import {
   CREATE_MESSAGE_ERRORS,
   CREATE_MESSAGE_STATUS,
   createMessage,
   getMessage,
+  groupEpochOf,
   isBlockedInChat,
   MAX_MESSAGE_LENGTH,
   MESSAGE_PATTERN,
@@ -119,7 +121,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
       if ("error" in result) {
         return reply
           .status(CREATE_MESSAGE_STATUS[result.error])
-          .send({ error: CREATE_MESSAGE_ERRORS[result.error] });
+          .send({ error: CREATE_MESSAGE_ERRORS[result.error], code: result.error });
       }
 
       const { message } = result;
@@ -170,8 +172,15 @@ export default async function messagesRoutes(server: FastifyInstance) {
       const { chatId } = request.params;
       const { limit, before } = request.query;
 
+      // In a group, members see the messages since they joined.
       const member = await db.query(
-        "SELECT cleared_at FROM chat_members WHERE chat_id = $1 AND user_id = $2",
+        `
+        SELECT chat_members.cleared_at,
+               CASE WHEN chats.type = 'group' THEN chat_members.joined_at END AS joined_at
+        FROM chat_members
+        JOIN chats ON chats.id = chat_members.chat_id
+        WHERE chat_members.chat_id = $1 AND chat_members.user_id = $2
+        `,
         [chatId, request.user.id],
       );
 
@@ -190,6 +199,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
           ${MESSAGE_SELECT}
           WHERE m.chat_id = $1
             AND ($4::timestamptz IS NULL OR m.created_at > $4)
+            AND ($5::timestamptz IS NULL OR m.created_at >= $5)
             AND (
               $3::uuid IS NULL
               OR (m.created_at, m.id) < (
@@ -201,21 +211,22 @@ export default async function messagesRoutes(server: FastifyInstance) {
         ) latest
         ORDER BY created_at ASC, id ASC
         `,
-        [chatId, limit, before ?? null, member.rows[0].cleared_at],
+        [chatId, limit, before ?? null, member.rows[0].cleared_at, member.rows[0].joined_at],
       );
 
       const hasMore = result.rows.length > limit;
       const rows = hasMore ? result.rows.slice(1) : result.rows;
 
       // Read positions: the user's own (where unread messages start) and
-      // the other member's (which of the user's messages have been read),
-      // unless either has turned read receipts off.
+      // the others' (which of the user's messages have been read: in a
+      // group, by anyone who has read receipts on), only if the user has
+      // read receipts on.
       const reads = await db.query(
         `
         SELECT
           MAX(cm.last_read_at) FILTER (WHERE cm.user_id = $2) AS last_read_at,
-          MAX(cm.last_read_at) FILTER (WHERE cm.user_id <> $2) AS peer_last_read_at,
-          BOOL_AND(u.read_receipts) AS receipts
+          MAX(cm.last_read_at) FILTER (WHERE cm.user_id <> $2 AND u.read_receipts) AS peer_last_read_at,
+          BOOL_OR(u.read_receipts) FILTER (WHERE cm.user_id = $2) AS receipts
         FROM chat_members cm
         JOIN users u ON u.id = cm.user_id
         WHERE cm.chat_id = $1
@@ -262,6 +273,17 @@ export default async function messagesRoutes(server: FastifyInstance) {
         return reply.status(403).send({ error: CREATE_MESSAGE_ERRORS.blocked });
       }
 
+      // In a group the new text is encrypted with the current key.
+      const group = await groupMembership(chatId, request.user.id);
+      const epoch = groupEpochOf(request.body.content);
+
+      if (group ? epoch !== group.key_epoch || group.rotation_needed : epoch !== null) {
+        return reply.status(409).send({
+          error: CREATE_MESSAGE_ERRORS.group_key_changed,
+          code: "group_key_changed",
+        });
+      }
+
       const result = await db.query(
         `
         UPDATE messages
@@ -269,6 +291,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
         WHERE id = $1
           AND chat_id = $2
           AND sender_id = $3
+          AND kind = 'text'
         RETURNING id
         `,
         [messageId, chatId, request.user.id, request.body.content],
@@ -298,15 +321,18 @@ export default async function messagesRoutes(server: FastifyInstance) {
     async (request, reply) => {
       const { chatId, messageId } = request.params;
 
+      // In a group, admins delete any message.
+      const group = await groupMembership(chatId, request.user.id);
+
       const result = await db.query(
         `
         DELETE FROM messages
         WHERE id = $1
           AND chat_id = $2
-          AND sender_id = $3
+          AND (sender_id = $3 OR $4::boolean)
         RETURNING id
         `,
-        [messageId, chatId, request.user.id],
+        [messageId, chatId, request.user.id, Boolean(group && isAdmin(group.role))],
       );
 
       if (result.rows.length === 0) {
@@ -444,17 +470,24 @@ export default async function messagesRoutes(server: FastifyInstance) {
       // Other devices of the user clear their unread count; the other
       // member sees their messages as read, unless either has turned read
       // receipts off.
+      // Shared if the reader has read receipts on (in a direct chat, the
+      // other member too); members with them off do not show them.
       const receipts = await db.query(
         `
-        SELECT BOOL_AND(users.read_receipts) AS on
-        FROM chat_members
+        SELECT CASE WHEN chats.type = 'group'
+          THEN (SELECT read_receipts FROM users WHERE id = $2)
+          ELSE BOOL_AND(users.read_receipts)
+        END AS on
+        FROM chats
+        JOIN chat_members ON chat_members.chat_id = chats.id
         JOIN users ON users.id = chat_members.user_id
-        WHERE chat_members.chat_id = $1
+        WHERE chats.id = $1
+        GROUP BY chats.type
         `,
-        [chatId],
+        [chatId, request.user.id],
       );
 
-      if (receipts.rows[0].on) {
+      if (receipts.rows[0]?.on) {
         await sendToChatMembers(chatId, event);
       } else {
         sendToUserSockets(request.user.id, event);

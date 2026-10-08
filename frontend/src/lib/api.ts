@@ -25,6 +25,10 @@ export function avatarUrl(avatarId: string) {
 export type LastMessage = {
   id: string;
   sender_id: string;
+  // In the chats list (not for pinned messages).
+  sender_username?: string;
+  // "system": written by the server about a group (content plain JSON).
+  kind?: "text" | "system";
   // Encrypted, whole; clients shorten the decrypted text for previews.
   content: string;
   created_at: string;
@@ -32,16 +36,26 @@ export type LastMessage = {
 
 export type Chat = {
   id: string;
-  type: string;
+  type: "direct" | "group";
   created_at: string;
   updated_at: string;
-  user_id: string;
-  username: string;
+  // Direct chats: the other user (null in groups).
+  user_id: string | null;
+  username: string | null;
   avatar_id: string | null;
   is_developer: boolean;
   // The other member's public key, to encrypt for them; null until they
-  // have set up end-to-end encryption.
+  // have set up end-to-end encryption (and in groups).
   public_key: string | null;
+  // Groups: the name and photo encrypted with the group key
+  // (lib/crypto.ts), the epoch of the current key (0 in direct chats),
+  // whether it needs a new key (someone left), the user's role, how many
+  // members.
+  encrypted_info: string | null;
+  key_epoch: number;
+  rotation_needed: boolean;
+  role: "owner" | "admin" | "member";
+  member_count: number;
   // Presence of the other user.
   online: boolean;
   last_seen_at: string | null;
@@ -89,6 +103,8 @@ export type Message = {
   chat_id: string;
   sender_id: string;
   sender_username: string;
+  // "system": written by the server about a group (content plain JSON).
+  kind?: "text" | "system";
   content: string;
   created_at: string;
   edited_at: string | null;
@@ -329,7 +345,7 @@ export async function getChats(token: string) {
 // exactly this username.
 export async function createChat(token: string, username: string) {
   const { chat, user } = await request<{
-    chat: { id: string; type: string; created_at: string };
+    chat: { id: string; created_at: string };
     user: {
       id: string;
       username: string;
@@ -344,7 +360,13 @@ export async function createChat(token: string, username: string) {
 
   return {
     ...chat,
+    type: "direct",
     updated_at: chat.created_at,
+    encrypted_info: null,
+    key_epoch: 0,
+    rotation_needed: false,
+    role: "member",
+    member_count: 2,
     user_id: user.id,
     username: user.username,
     avatar_id: user.avatar_id ?? null,
@@ -543,6 +565,127 @@ export async function sendMessage(
   );
 
   return sent;
+}
+
+// --- groups (encrypted on the client, see lib/crypto.ts and
+// context/groups.tsx) ---
+
+// A user found by @username, with their public key (to wrap a group key
+// for them).
+export type FoundUser = {
+  id: string;
+  username: string;
+  public_key: string | null;
+  avatar_id: string | null;
+  is_developer: boolean;
+};
+
+export async function findUser(token: string, username: string) {
+  const { user } = await request<{ user: FoundUser }>(
+    "GET",
+    `/api/users/by-username/${encodeURIComponent(username)}`,
+    { token },
+  );
+
+  return user;
+}
+
+export type MemberKey = { user_id: string; wrapped_key: string };
+
+export function createGroup(
+  token: string,
+  group: { id: string; encrypted_info: string; keys: MemberKey[] },
+) {
+  return request<unknown>("POST", "/api/groups", { token, body: group });
+}
+
+export type GroupMember = FoundUser & {
+  role: "owner" | "admin" | "member";
+  joined_at: string;
+};
+
+export async function getGroupMembers(token: string, chatId: string) {
+  const { members } = await request<{ members: GroupMember[] }>(
+    "GET",
+    `/api/chats/${encodeURIComponent(chatId)}/members`,
+    { token },
+  );
+
+  return members;
+}
+
+// The group's keys wrapped for this user, every epoch since they joined.
+export type WrappedGroupKey = {
+  epoch: number;
+  wrapped_key: string;
+  // Who wrapped it (null once their account is gone) and their key.
+  wrapper_id: string | null;
+  wrapper_public_key: string;
+};
+
+export async function getGroupKeys(token: string, chatId: string) {
+  const { keys } = await request<{ keys: WrappedGroupKey[] }>(
+    "GET",
+    `/api/chats/${encodeURIComponent(chatId)}/keys`,
+    { token },
+  );
+
+  return keys;
+}
+
+export function addGroupMember(
+  token: string,
+  chatId: string,
+  member: { user_id: string; wrapped_key: string; epoch: number },
+) {
+  return request<unknown>("POST", `/api/chats/${encodeURIComponent(chatId)}/members`, {
+    token,
+    body: member,
+  });
+}
+
+// The next key comes with removing someone else; leaving needs none.
+export type GroupRotation = { epoch: number; keys: MemberKey[]; encrypted_info: string };
+
+export function removeGroupMember(
+  token: string,
+  chatId: string,
+  userId: string,
+  rotation?: GroupRotation,
+) {
+  return request<unknown>(
+    "DELETE",
+    `/api/chats/${encodeURIComponent(chatId)}/members/${encodeURIComponent(userId)}`,
+    { token, ...(rotation ? { body: rotation } : {}) },
+  );
+}
+
+export function setGroupRole(token: string, chatId: string, userId: string, role: "admin" | "member") {
+  return request<unknown>(
+    "PUT",
+    `/api/chats/${encodeURIComponent(chatId)}/members/${encodeURIComponent(userId)}/role`,
+    { token, body: { role } },
+  );
+}
+
+// photo_id: a new photo (uploaded as an attachment), null to remove it,
+// left out to keep it.
+export function setGroupInfo(
+  token: string,
+  chatId: string,
+  info: { encrypted_info: string; photo_id?: string | null },
+) {
+  return request<unknown>("PUT", `/api/chats/${encodeURIComponent(chatId)}/info`, {
+    token,
+    body: info,
+  });
+}
+
+export function rotateGroupKey(token: string, chatId: string, rotation: GroupRotation) {
+  return request<unknown>("POST", `/api/chats/${encodeURIComponent(chatId)}/keys`, {
+    token,
+    body: rotation,
+  });
 }
 
 // --- attachments (encrypted on the client, see lib/attachments.ts) ---

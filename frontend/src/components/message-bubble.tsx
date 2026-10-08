@@ -29,6 +29,7 @@ export default function MessageBubble({
   row,
   read,
   ownId,
+  senderName,
   text,
   quoteText,
   sending,
@@ -42,6 +43,8 @@ export default function MessageBubble({
   row: MessageRow;
   read: boolean;
   ownId: string | undefined;
+  // Groups: who wrote it, over the first of their bubbles in a row.
+  senderName?: string;
   // The decrypted message and the message it replies to.
   text: Shown;
   quoteText: Shown | null;
@@ -123,6 +126,11 @@ export default function MessageBubble({
             { backgroundColor: own ? colors.accent : colors.panel },
           ]}
         >
+          {senderName && !own && !joinedAbove ? (
+            <Text numberOfLines={1} style={[styles.sender, { color: colors.accent }]}>
+              @{senderName}
+            </Text>
+          ) : null}
           {quote && quoteText ? (
             <Pressable
               onPress={() => onQuotePress(quote.id)}
@@ -426,6 +434,12 @@ const styles = StyleSheet.create({
   content: {
     fontSize: 16,
     lineHeight: 22,
+  },
+
+  sender: {
+    fontSize: 13,
+    fontWeight: "700",
+    marginBottom: 2,
   },
 
   forwarded: {

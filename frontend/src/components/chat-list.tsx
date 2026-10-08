@@ -18,6 +18,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AppHeader from "@/components/app-header";
 import ActionMenu from "@/components/action-menu";
 import Avatar from "@/components/avatar";
+import ChatAvatar from "@/components/chat-avatar";
 import DevBadge from "@/components/dev-badge";
 import IconButton from "@/components/icon-button";
 import { noWebOutline } from "@/components/text-field";
@@ -27,6 +28,7 @@ import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
 import type { Chat } from "@/lib/api";
 import { formatChatDate, previewText } from "@/lib/format";
+import { chatTitle } from "@/lib/groups";
 import { messagePreview } from "@/lib/preview";
 import { useIsWide } from "@/lib/layout";
 import { useChatCrypto } from "@/lib/use-chat-crypto";
@@ -43,7 +45,8 @@ export default function ChatList() {
   const insets = useSafeAreaInsets();
   const wide = useIsWide();
   const user = useCurrentUser();
-  const { chats, error, reload, typing, updateChatSettings, removeChat, drafts } = useChats();
+  const { chats, error, reload, typing, updateChatSettings, removeChat, leaveGroup, drafts } =
+    useChats();
   const startChatWith = useStartChat();
   // The chat whose actions are shown (long press / right click).
   const [menuFor, setMenuFor] = useState<Chat | null>(null);
@@ -67,7 +70,7 @@ export default function ChatList() {
   const shown = useMemo(
     () =>
       (chats ?? []).filter((chat) =>
-        chat.username.toLowerCase().includes(search),
+        chatTitle(chat).toLowerCase().includes(search),
       ),
     [chats, search],
   );
@@ -76,7 +79,7 @@ export default function ChatList() {
   const canStart =
     USERNAME_RE.test(search) &&
     search !== user?.username.toLowerCase() &&
-    !(chats ?? []).some((chat) => chat.username.toLowerCase() === search);
+    !(chats ?? []).some((chat) => chat.username?.toLowerCase() === search);
 
   const go = (path: Parameters<typeof router.push>[0]) =>
     wide ? router.replace(path) : router.push(path);
@@ -303,7 +306,9 @@ export default function ChatList() {
           <ChatRow
             chat={item}
             ownId={user.id}
-            online={status === "online" && Boolean(presence[item.user_id]?.online)}
+            online={
+              status === "online" && item.user_id !== null && Boolean(presence[item.user_id]?.online)
+            }
             typing={typing.has(item.id)}
             // Not for the chat on screen: its draft is in the input.
             draft={item.id === selectedId ? undefined : drafts[item.id]}
@@ -322,7 +327,7 @@ export default function ChatList() {
       >
         {menuFor ? (
           <ActionMenu
-            title={`@${menuFor.username}`}
+            title={chatTitle(menuFor)}
             onClose={() => setMenuFor(null)}
             items={[
               {
@@ -342,17 +347,50 @@ export default function ChatList() {
               {
                 icon: "eye-off-outline",
                 label: "Clear history for me",
-                confirmLabel: `Clear? @${menuFor.username} keeps the messages`,
+                confirmLabel:
+                  menuFor.type === "group"
+                    ? "Clear? The others keep the messages"
+                    : `Clear? @${menuFor.username} keeps the messages`,
                 danger: true,
                 onPress: () => deleteChat(menuFor.id, "me"),
               },
-              {
-                icon: "trash-outline",
-                label: "Delete for both",
-                confirmLabel: "Delete the chat for both of you?",
-                danger: true,
-                onPress: () => deleteChat(menuFor.id, "everyone"),
-              },
+              ...(menuFor.type === "group"
+                ? [
+                    {
+                      icon: "exit-outline" as const,
+                      label: "Leave group",
+                      confirmLabel: "Leave the group?",
+                      danger: true,
+                      onPress: () =>
+                        runAction(async () => {
+                          await leaveGroup(menuFor.id);
+
+                          if (selectedId === menuFor.id) {
+                            router.replace("/chats");
+                          }
+                        }),
+                    },
+                    ...(menuFor.role === "owner"
+                      ? [
+                          {
+                            icon: "trash-outline" as const,
+                            label: "Delete group",
+                            confirmLabel: "Delete the group for everyone?",
+                            danger: true,
+                            onPress: () => deleteChat(menuFor.id, "everyone"),
+                          },
+                        ]
+                      : []),
+                  ]
+                : [
+                    {
+                      icon: "trash-outline" as const,
+                      label: "Delete for both",
+                      confirmLabel: "Delete the chat for both of you?",
+                      danger: true,
+                      onPress: () => deleteChat(menuFor.id, "everyone"),
+                    },
+                  ]),
             ]}
           />
         ) : null}
@@ -386,6 +424,9 @@ function ChatRow({
   const { decrypt } = useChatCrypto(chat);
   const last = chat.last_message;
   const own = last?.sender_id === ownId;
+  const group = chat.type === "group";
+  const title = chatTitle(chat);
+  const shownLast = last ? decrypt(last) : null;
   const read =
     own &&
     chat.peer_last_read_at !== null &&
@@ -403,7 +444,7 @@ function ChatRow({
         },
       } as object)}
       accessibilityRole="button"
-      accessibilityLabel={`Chat with ${chat.username}${chat.unread_count ? `, ${chat.unread_count} unread` : ""}`}
+      accessibilityLabel={`${group ? title : `Chat with ${chat.username}`}${chat.unread_count ? `, ${chat.unread_count} unread` : ""}`}
       style={({ hovered, pressed }) => [
         styles.row,
         selected
@@ -411,17 +452,12 @@ function ChatRow({
           : (hovered || pressed) && { backgroundColor: colors.hover },
       ]}
     >
-      <Avatar
-        name={chat.username}
-        avatarId={chat.avatar_id}
-        online={online}
-        ringColor={selected ? colors.surface : undefined}
-      />
+      <ChatAvatar chat={chat} online={online} ringColor={selected ? colors.surface : undefined} />
       <View style={styles.rowText}>
         <View style={styles.rowLine}>
           <View style={styles.nameWrap}>
             <Text numberOfLines={1} style={[styles.name, { color: colors.text }]}>
-              {chat.username}
+              {group ? title : chat.username}
             </Text>
             {chat.is_developer ? <DevBadge /> : null}
             {chat.muted ? (
@@ -455,10 +491,14 @@ function ChatRow({
                 <Text style={{ color: colors.danger }}>Draft: </Text>
                 {previewText(draft)}
               </>
-            ) : last ? (
+            ) : last && shownLast ? (
               <>
-                {own ? <Text style={{ color: colors.textSoft }}>You: </Text> : null}
-                {previewText(messagePreview(decrypt(last)))}
+                {shownLast.status === "system" ? null : own ? (
+                  <Text style={{ color: colors.textSoft }}>You: </Text>
+                ) : group ? (
+                  <Text style={{ color: colors.textSoft }}>@{last.sender_username}: </Text>
+                ) : null}
+                {previewText(messagePreview(shownLast))}
               </>
             ) : (
               <Text style={styles.italic}>No messages yet</Text>
