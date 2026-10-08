@@ -4,9 +4,9 @@
 import { getItem, setItem } from "./storage";
 
 const PREF_KEY = "ostrich-notifications";
-// Whether notifications show the message text. Off by default: the text
-// would otherwise be readable in the system's notification list and on a
-// locked screen.
+// Whether notifications show the message text (on unless turned off in
+// Settings: the text is then readable in the system's notification list
+// and on a locked screen).
 const PREVIEW_KEY = "ostrich-notification-previews";
 
 type WithToken = <T>(fn: (token: string) => Promise<T>) => Promise<T>;
@@ -44,7 +44,7 @@ export function notificationPreviewsSupported() {
 }
 
 export async function notificationPreviewsEnabled() {
-  return (await getItem(PREVIEW_KEY)) === "on";
+  return (await getItem(PREVIEW_KEY)) !== "off";
 }
 
 export async function setNotificationPreviews(enabled: boolean) {
