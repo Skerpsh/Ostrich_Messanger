@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import * as api from "@/lib/api";
+import { forgetLoadedAttachments } from "@/lib/attachments";
 import {
   clearChatKeys,
   createAccountKeys,
@@ -96,6 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       removeItem(PRIVATE_KEY_KEY),
     ]);
     clearChatKeys();
+    forgetLoadedAttachments();
     setState({ status: "signedOut" });
   }, []);
 

@@ -20,7 +20,7 @@ import {
   loadCachedChats,
   saveCachedChats,
 } from "@/lib/local-cache";
-import { plainText } from "@/lib/markup";
+import { messagePreview } from "@/lib/preview";
 import { getItem, removeItem, setItem } from "@/lib/storage";
 import { showMessage } from "@/lib/use-chat-crypto";
 import {
@@ -407,8 +407,8 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
             if (chat && !chat.muted && !viewing) {
               showMessageNotification(
                 `@${chat.username}`,
-                plainText(
-                  showMessage(message, privateKeyRef.current, chat.public_key, chat.id).text,
+                messagePreview(
+                  showMessage(message, privateKeyRef.current, chat.public_key, chat.id),
                 ),
                 chat.id,
                 openChat,

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import * as Clipboard from "expo-clipboard";
+import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
   ActivityIndicator,
@@ -52,10 +53,22 @@ import {
   type Row,
 } from "@/lib/chat-rows";
 import { encryptMessage, newMessageId, type MessageRef } from "@/lib/crypto";
+import {
+  copyAttachments,
+  formatSize,
+  isImage,
+  loadAttachment,
+  MAX_ATTACHMENTS,
+  uploadAttachment,
+  type PickedFile,
+} from "@/lib/attachments";
+import { saveFile } from "@/lib/files";
 import { formatPresence, previewText } from "@/lib/format";
 import { loadCachedMessages, saveCachedMessages } from "@/lib/local-cache";
 import { plainText } from "@/lib/markup";
-import { encodePayload } from "@/lib/payload";
+import { encodePayload, type Attachment } from "@/lib/payload";
+import { pickDocument, pickPhoto } from "@/lib/pick-attachment";
+import { messagePreview } from "@/lib/preview";
 import { acceptPeerKey, checkPeerKey } from "@/lib/known-keys";
 import { useIsWide } from "@/lib/layout";
 import { useChatCrypto, type Shown } from "@/lib/use-chat-crypto";
@@ -132,6 +145,11 @@ function ChatScreen({ chatId }: { chatId: string }) {
   const [showSafetyCode, setShowSafetyCode] = useState(false);
   // The message being forwarded (choosing the chat).
   const [forwarding, setForwarding] = useState<Message | null>(null);
+  // Files chosen for the next message, and the menu to choose them.
+  const [picked, setPicked] = useState<PickedFile[]>([]);
+  const [attachMenu, setAttachMenu] = useState(false);
+  // Uploading the chosen files.
+  const [uploading, setUploading] = useState(false);
   // The other member's key differs from the one this device saw before.
   const [keyChanged, setKeyChanged] = useState(false);
   // Search in the loaded messages.
@@ -379,27 +397,33 @@ function ChatScreen({ chatId }: { chatId: string }) {
   const send = async () => {
     const content = draft.trim();
 
-    if (!content || sending || keyChanged) {
+    if ((!content && picked.length === 0) || sending || uploading || keyChanged) {
       return;
     }
 
     if (editing) {
+      if (!content) {
+        return;
+      }
+
       const target = editing;
       setSending(true);
-      setDraft("");
+      setDraft(drafts[chatId] ?? "");
       setEditing(null);
       setInputHeight(INPUT_MIN_HEIGHT);
 
       try {
+        // The files stay; only the text changes.
+        const payload = encodePayload({ text: content, attachments: textOf(target).attachments });
         const updated = await withToken((t) =>
-          editMessage(t, chatId, target.id, crypto.encrypt(encodePayload({ text: content }), target.id)),
+          editMessage(t, chatId, target.id, crypto.encrypt(payload, target.id)),
         );
         setMessages((current) =>
           current?.map((m) => (m.id === updated.id ? updated : m)) ?? current,
         );
         setError(null);
       } catch (e) {
-        setDraft((current) => current || content);
+        setDraft(content);
         setEditing((current) => current ?? target);
         showError(e, "Failed to edit the message");
       } finally {
@@ -410,15 +434,36 @@ function ChatScreen({ chatId }: { chatId: string }) {
       return;
     }
 
-    if (!user) {
+    if (!user || !crypto.canEncrypt) {
+      showError(null, `@${chat?.username ?? "…"} has not set up end-to-end encryption yet`);
       return;
+    }
+
+    // Files are encrypted and uploaded first (that needs the network);
+    // the message then goes through the outbox like any other.
+    let attachments: Attachment[] = [];
+
+    if (picked.length > 0) {
+      setUploading(true);
+
+      try {
+        for (const file of picked) {
+          attachments.push(await withToken((t) => uploadAttachment(t, file)));
+        }
+      } catch (e) {
+        showError(e, "Failed to upload the file");
+        attachments = [];
+        return;
+      } finally {
+        setUploading(false);
+      }
     }
 
     const id = newMessageId();
     let encrypted: string;
 
     try {
-      encrypted = crypto.encrypt(encodePayload({ text: content }), id);
+      encrypted = crypto.encrypt(encodePayload({ text: content, attachments }), id);
     } catch (e) {
       showError(e, "Failed to send message");
       return;
@@ -431,10 +476,12 @@ function ChatScreen({ chatId }: { chatId: string }) {
       senderId: user.id,
       content: encrypted,
       replyTo: replyTo ? replyPreview(replyTo) : null,
+      attachments: attachments.map((a) => a.id),
     });
 
     setDraft("");
     storeDraft(chatId, "");
+    setPicked([]);
     setInputHeight(INPUT_MIN_HEIGHT);
     // Own messages end the "unread" section.
     setUnreadAfter(null);
@@ -442,6 +489,35 @@ function ChatScreen({ chatId }: { chatId: string }) {
     setError(null);
     listRef.current?.scrollToOffset({ offset: 0, animated: true });
     inputRef.current?.focus();
+  };
+
+  // Adds a photo or a file to the next message.
+  const attach = async (kind: "photo" | "file") => {
+    setAttachMenu(false);
+
+    try {
+      const file = await (kind === "photo" ? pickPhoto() : pickDocument());
+
+      if (file) {
+        setPicked((current) => [...current, file].slice(0, MAX_ATTACHMENTS));
+      }
+    } catch (e) {
+      showError(e, "Failed to open the file");
+    }
+  };
+
+  // Saves the files of a message.
+  const saveAttachments = async (message: Message) => {
+    setMenuFor(null);
+
+    try {
+      for (const attachment of textOf(message).attachments ?? []) {
+        const bytes = await withToken((t) => loadAttachment(t, attachment));
+        await saveFile(bytes, attachment.name, attachment.mime);
+      }
+    } catch (e) {
+      showError(e, "Failed to save the file");
+    }
   };
 
   // The quote of a reply, as the server would show it.
@@ -455,9 +531,9 @@ function ChatScreen({ chatId }: { chatId: string }) {
     content: message.content,
   });
 
-  // Forwards a message: its text, encrypted for the other chat, with whom
-  // it comes from.
-  const forward = (message: Message, target: Chat) => {
+  // Forwards a message: its text and files, encrypted for the other chat,
+  // with whom it comes from. Files are copied on the server (same keys).
+  const forward = async (message: Message, target: Chat) => {
     setForwarding(null);
 
     if (!user || !privateKey || !target.public_key) {
@@ -468,6 +544,16 @@ function ChatScreen({ chatId }: { chatId: string }) {
     const from =
       shown.forwardedFrom ??
       (message.sender_id === user.id ? user.username : (chat?.username ?? message.sender_username));
+
+    let attachments: Attachment[] = [];
+
+    try {
+      attachments = await withToken((t) => copyAttachments(t, shown.attachments ?? []));
+    } catch (e) {
+      showError(e, "Failed to forward the files");
+      return;
+    }
+
     const id = newMessageId();
 
     outbox.send({
@@ -475,13 +561,14 @@ function ChatScreen({ chatId }: { chatId: string }) {
       chatId: target.id,
       senderId: user.id,
       content: encryptMessage(
-        encodePayload({ text: shown.text, forwardedFrom: from }),
+        encodePayload({ text: shown.text, forwardedFrom: from, attachments }),
         { id, sender_id: user.id },
         privateKey,
         target.public_key,
         target.id,
       ),
       replyTo: null,
+      attachments: attachments.map((a) => a.id),
     });
 
     router.navigate({ pathname: "/chats/[chatId]", params: { chatId: target.id } });
@@ -661,6 +748,13 @@ function ChatScreen({ chatId }: { chatId: string }) {
 
     return [
       { icon: "arrow-undo-outline", label: "Reply", onPress: () => startReply(message) },
+      ...(shown.attachments?.length
+        ? [{
+            icon: "download-outline" as const,
+            label: shown.attachments.length > 1 ? "Save files" : isImage(shown.attachments[0].mime) ? "Save photo" : "Save file",
+            onPress: () => saveAttachments(message),
+          }]
+        : []),
       copy,
       ...(shown.status === "ok"
         ? [{
@@ -771,7 +865,8 @@ function ChatScreen({ chatId }: { chatId: string }) {
         : "waiting for network…";
 
   const peerReadAt = chat?.peer_last_read_at ?? null;
-  const canSend = Boolean(draft.trim()) && !sending && !keyChanged;
+  const canSend =
+    (Boolean(draft.trim()) || (picked.length > 0 && !editing)) && !sending && !uploading && !keyChanged;
 
   // Why the composer is replaced, if it is.
   const composerBlocked = chat?.blocked_by_me
@@ -838,7 +933,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
           >
             <Text style={[styles.pinnedLabel, { color: colors.accent }]}>Pinned message</Text>
             <Text numberOfLines={1} style={[styles.pinnedPreview, { color: colors.textSoft }]}>
-              {previewText(plainText(crypto.decrypt(chat.pinned_message).text))}
+              {previewText(messagePreview(crypto.decrypt(chat.pinned_message)))}
             </Text>
           </Pressable>
           <IconButton
@@ -1018,6 +1113,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
                     onMenu={() => setMenuFor(item.message)}
                     onQuotePress={showMessage}
                     onReact={(emoji) => react(item.message, emoji)}
+                    onError={setError}
                   />
                 );
               }}
@@ -1116,7 +1212,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
                     Edit message
                   </Text>
                   <Text numberOfLines={1} style={[styles.replyBarContent, { color: colors.muted }]}>
-                    {previewText(plainText(textOf(editing).text))}
+                    {previewText(messagePreview(textOf(editing)))}
                   </Text>
                 </View>
                 <IconButton
@@ -1143,7 +1239,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
                       : chat?.is_developer) ? <DevBadge /> : null}
                   </View>
                   <Text numberOfLines={1} style={[styles.replyBarContent, { color: colors.muted }]}>
-                    {previewText(plainText(textOf(replyTo).text))}
+                    {previewText(messagePreview(textOf(replyTo)))}
                   </Text>
                 </View>
                 <IconButton
@@ -1156,7 +1252,47 @@ function ChatScreen({ chatId }: { chatId: string }) {
               </View>
             ) : null}
 
+            {picked.length > 0 ? (
+              <View style={styles.pickedBar}>
+                {picked.map((file, i) => (
+                  <View key={i} style={[styles.picked, { backgroundColor: colors.panelAlt }]}>
+                    {file.previewUri ? (
+                      <Image source={{ uri: file.previewUri }} style={styles.pickedThumb} contentFit="cover" />
+                    ) : (
+                      <Ionicons name="document-outline" size={20} color={colors.muted} />
+                    )}
+                    <View style={styles.pickedText}>
+                      <Text numberOfLines={1} style={[styles.pickedName, { color: colors.text }]}>
+                        {file.name}
+                      </Text>
+                      <Text style={[styles.pickedSize, { color: colors.muted }]}>
+                        {uploading ? "Uploading…" : formatSize(file.bytes.length)}
+                      </Text>
+                    </View>
+                    <IconButton
+                      icon="close"
+                      label={`Remove ${file.name}`}
+                      size={16}
+                      color={colors.muted}
+                      disabled={uploading}
+                      onPress={() => setPicked((current) => current.filter((_, j) => j !== i))}
+                    />
+                  </View>
+                ))}
+              </View>
+            ) : null}
+
             <View style={styles.composerRow}>
+              {editing ? null : (
+                <IconButton
+                  icon="attach"
+                  label="Attach a photo or file"
+                  size={22}
+                  color={colors.muted}
+                  disabled={uploading || picked.length >= MAX_ATTACHMENTS}
+                  onPress={() => setAttachMenu(true)}
+                />
+              )}
               <View style={[styles.inputBox, { backgroundColor: colors.panelAlt }]}>
                 <TextInput
                   ref={inputRef}
@@ -1206,7 +1342,7 @@ function ChatScreen({ chatId }: { chatId: string }) {
           back to the message when it closes, away from the input. */}
       {menuFor ? (
         <ActionMenu
-          title={previewText(plainText(textOf(menuFor).text))}
+          title={previewText(messagePreview(textOf(menuFor)))}
           onClose={() => setMenuFor(null)}
           header={
             outgoingOf(menuFor) ? undefined : (
@@ -1235,6 +1371,17 @@ function ChatScreen({ chatId }: { chatId: string }) {
             )
           }
           items={messageMenuItems(menuFor)}
+        />
+      ) : null}
+
+      {attachMenu ? (
+        <ActionMenu
+          title="Attach"
+          onClose={() => setAttachMenu(false)}
+          items={[
+            { icon: "image-outline", label: "Photo", onPress: () => attach("photo") },
+            { icon: "document-outline", label: "File (up to 25 MB)", onPress: () => attach("file") },
+          ]}
         />
       ) : null}
 
@@ -1393,6 +1540,45 @@ const styles = StyleSheet.create({
   unreadLabel: {
     fontSize: 12,
     fontWeight: "700",
+  },
+
+  pickedBar: {
+    width: "100%",
+    maxWidth: 820,
+    alignSelf: "center",
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+    paddingBottom: 8,
+  },
+
+  picked: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingLeft: 6,
+    borderRadius: 12,
+    maxWidth: 240,
+  },
+
+  pickedThumb: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+  },
+
+  pickedText: {
+    flexShrink: 1,
+    paddingVertical: 4,
+  },
+
+  pickedName: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+
+  pickedSize: {
+    fontSize: 11,
   },
 
   pinnedBar: {

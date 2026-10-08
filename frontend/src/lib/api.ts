@@ -524,6 +524,8 @@ export async function sendMessage(
     content: string;
     // Id of the message this one replies to.
     replyTo: string | null;
+    // Ids of the encrypted files uploaded for it.
+    attachments?: string[];
   },
 ) {
   const { message: sent } = await request<{ message: Message }>(
@@ -535,11 +537,55 @@ export async function sendMessage(
         id: message.id,
         content: message.content,
         ...(message.replyTo ? { reply_to: message.replyTo } : {}),
+        ...(message.attachments?.length ? { attachments: message.attachments } : {}),
       },
     },
   );
 
   return sent;
+}
+
+// --- attachments (encrypted on the client, see lib/attachments.ts) ---
+
+const attachmentPath = (id: string) => `/api/attachments/${encodeURIComponent(id)}`;
+
+// Uploads an encrypted file under the id the client chose (web; the apps
+// upload from a file, see lib/files.ts).
+export function putAttachment(token: string, id: string, data: Blob) {
+  return request<unknown>("PUT", attachmentPath(id), {
+    token,
+    file: { data, type: "application/octet-stream" },
+    timeoutMs: 300_000,
+  });
+}
+
+// Copies an attachment the user can read under a new id (forwarding).
+export function copyAttachment(token: string, id: string, newId: string) {
+  return request<unknown>("POST", `${attachmentPath(id)}/copy`, { token, body: { id: newId } });
+}
+
+// Downloads an encrypted file (web).
+export async function getAttachmentBytes(token: string, id: string): Promise<Uint8Array> {
+  let response: Response;
+
+  try {
+    response = await fetch(API_URL + attachmentPath(id), {
+      headers: { Authorization: `Bearer ${token}`, "X-Ostrich-Client": Platform.OS },
+    });
+  } catch {
+    throw new ApiError("Can't reach the server. Check your connection.", 0);
+  }
+
+  if (response.status === 401) {
+    throw new SessionExpiredError();
+  }
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+    throw new ApiError(data?.error || `Request failed (HTTP ${response.status})`, response.status);
+  }
+
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 // Sets the profile picture (the server re-encodes it to a square WebP).

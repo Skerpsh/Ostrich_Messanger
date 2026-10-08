@@ -166,3 +166,57 @@ func TestSanitize(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestAttachments(t *testing.T) {
+	data, err := os.ReadFile("../testdata/crypto-vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var v struct {
+		Key     string `json:"attachment_key"`
+		Plain   string `json:"attachment_plain"`
+		Sealed  string `json:"attachment_sealed"`
+		Payload string `json:"payload_with_attachments"`
+	}
+
+	if err := json.Unmarshal(data, &v); err != nil {
+		t.Fatal(err)
+	}
+
+	sealed, _ := base64.StdEncoding.DecodeString(v.Sealed)
+	plain, _ := base64.StdEncoding.DecodeString(v.Plain)
+
+	// A file encrypted by the app.
+	if got, err := decryptAttachment(sealed, v.Key); err != nil || !bytes.Equal(got, plain) {
+		t.Fatalf("app's attachment: %v", err)
+	}
+
+	// Round trip, and another key does not open it.
+	key, sealedHere := encryptAttachment(plain)
+
+	if got, err := decryptAttachment(sealedHere, key); err != nil || !bytes.Equal(got, plain) {
+		t.Fatalf("round trip: %v", err)
+	}
+
+	if other, _ := encryptAttachment(plain); other != key {
+		if _, err := decryptAttachment(sealedHere, other); err == nil {
+			t.Fatal("another key opened the file")
+		}
+	}
+
+	// The app's payload, read and written back the same.
+	p := decodePayload(v.Payload)
+
+	if p.text != "caption" || p.forwardedFrom != "carol" || len(p.attachments) != 1 {
+		t.Fatalf("payload: %+v", p)
+	}
+
+	if a := p.attachments[0]; a.Name != "photo.jpg" || a.Mime != "image/jpeg" || a.Size != 110 || a.Width != 640 || a.Height != 480 || a.Key != v.Key {
+		t.Fatalf("attachment: %+v", a)
+	}
+
+	if got := encodePayload(p); got != v.Payload {
+		t.Fatalf("written back differently:\n%s\n%s", got, v.Payload)
+	}
+}

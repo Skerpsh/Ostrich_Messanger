@@ -11,6 +11,8 @@ import chatsRoutes from "./routes/chats.js";
 import messagesRoutes from "./routes/messages.js";
 import avatarsRoutes from "./routes/avatars.js";
 import pushRoutes from "./routes/push.js";
+import attachmentsRoutes from "./routes/attachments.js";
+import { cleanupAttachments, ensureAttachmentsDir } from "./attachments.js";
 import websocketRoutes from "./routes/websocket.js";
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -104,11 +106,13 @@ async function healthRoutes(instance: FastifyInstance) {
   );
 }
 
-// Expired sessions and username reservations.
+// Expired sessions and username reservations; attachments never sent or
+// whose message is gone.
 async function deleteExpired() {
   try {
     await db.query("DELETE FROM sessions WHERE expires_at <= NOW()");
     await db.query("DELETE FROM username_reservations WHERE reserved_until <= NOW()");
+    await cleanupAttachments();
   } catch (error) {
     server.log.error(error, "failed to delete expired rows");
   }
@@ -147,6 +151,9 @@ const start = async () => {
     await server.register(messagesRoutes);
     await server.register(avatarsRoutes);
     await server.register(pushRoutes);
+    await server.register(attachmentsRoutes);
+
+    await ensureAttachmentsDir();
 
     await server.listen({
       port: PORT,

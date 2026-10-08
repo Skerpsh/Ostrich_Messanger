@@ -84,8 +84,21 @@ func (m *model) messageMenu(chat Chat, message Message) *menuState {
 
 	items := []menuItem{
 		{icon: "↪", label: "Reply", action: func(m *model) tea.Cmd { return m.startReply(message) }},
-		copyItem,
 	}
+
+	if n := len(shown.attachments); n > 0 {
+		label := "Save file to " + downloadsDir()
+
+		if n > 1 {
+			label = fmt.Sprintf("Save %d files to %s", n, downloadsDir())
+		}
+
+		items = append(items, menuItem{icon: "⇩", label: label, action: func(m *model) tea.Cmd {
+			return m.saveFiles(chat, message)
+		}})
+	}
+
+	items = append(items, copyItem)
 
 	if shown.status == decryptOK {
 		items = append(items, menuItem{icon: "↷", label: "Forward", action: func(m *model) tea.Cmd {
@@ -165,18 +178,41 @@ func (m *model) forward(from Chat, message Message, target Chat) tea.Cmd {
 		}
 	}
 
-	id := newMessageID()
-	content, err := encryptMessage(encodePayload(payload{text: shown.text, forwardedFrom: origin}),
-		id, m.user.User.ID, m.user.PrivateKey, target.PublicKey, target.ID)
-	if err != nil {
-		return m.showToast(err.Error(), true)
-	}
-
 	if m.chat != nil {
 		m.chat.resetSelection()
 	}
 
-	return tea.Batch(m.queueMessage(target.ID, id, content, nil), m.openChat(target))
+	// Files are copied on the server first (same keys, new ids).
+	token := m.user.Token
+
+	return task(func() func(*model) tea.Cmd {
+		attachments, err := copyAttachments(token, shown.attachments)
+
+		return func(m *model) tea.Cmd {
+			if err != nil {
+				return m.fail(err)
+			}
+
+			if m.user == nil || m.user.Token != token {
+				return nil
+			}
+
+			id := newMessageID()
+			content, err := encryptMessage(encodePayload(payload{text: shown.text, forwardedFrom: origin, attachments: attachments}),
+				id, m.user.User.ID, m.user.PrivateKey, target.PublicKey, target.ID)
+			if err != nil {
+				return m.showToast(err.Error(), true)
+			}
+
+			var ids []string
+
+			for _, a := range attachments {
+				ids = append(ids, a.ID)
+			}
+
+			return tea.Batch(m.queueMessage(target.ID, id, content, nil, ids), m.openChat(target))
+		}
+	})
 }
 
 func (m *model) pinMessage(chat Chat, messageID string) tea.Cmd {

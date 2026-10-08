@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -58,6 +59,13 @@ type chatState struct {
 	err        string
 	lastTyping time.Time
 
+	// Files chosen for the next message (Ctrl+A asks for a path), and
+	// their upload.
+	picked    []pickedFile
+	attaching bool
+	attach    textinput.Model
+	uploading bool
+
 	// Drawn bubbles, by message and everything that changes them.
 	cache map[string][]string
 }
@@ -68,6 +76,7 @@ func newChatState(chatID string, p palette, w int) *chatState {
 		firstLoad: true,
 		cache:     map[string][]string{},
 		search:    newInput("Search messages", 100, false, p),
+		attach:    newInput("Path of a file to send (~/… works), Enter to add", 1024, false, p),
 	}
 
 	c.composer = textarea.New()
@@ -108,6 +117,7 @@ func (c *chatState) restyle(p palette) {
 	c.composer.Cursor.Style = lipgloss.NewStyle().Foreground(p.accent).Background(p.panelAlt)
 	c.composer.Cursor.TextStyle = style.Text
 	styleInput(&c.search, p)
+	styleInput(&c.attach, p)
 	c.cache = map[string][]string{}
 }
 
@@ -115,6 +125,7 @@ func (c *chatState) restyle(p palette) {
 func (c *chatState) resize(w int) {
 	c.composer.SetWidth(max(w-10, 10))
 	c.search.Width = max(w-30, 10)
+	c.attach.Width = max(w-12, 10)
 	c.fitComposer()
 }
 
@@ -392,6 +403,10 @@ func (m *model) updateChatKey(msg tea.KeyMsg) tea.Cmd {
 		return m.updateChatSearchKey(msg)
 	}
 
+	if c.attaching {
+		return m.updateAttachKey(msg)
+	}
+
 	if c.selecting {
 		return m.updateSelectingKey(msg, chat)
 	}
@@ -446,6 +461,23 @@ func (m *model) updateChatKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case "ctrl+o":
 		m.openMenu(m.chatMenu(chat, true))
+		return nil
+	case "ctrl+a":
+		if c.editing == nil && len(c.picked) < maxAttachments && !c.uploading {
+			c.attaching = true
+			c.attach.SetValue("")
+			c.composer.Blur()
+
+			return c.attach.Focus()
+		}
+
+		return nil
+	case "ctrl+x":
+		// Drops the files chosen last first.
+		if n := len(c.picked); n > 0 && !c.uploading {
+			c.picked = c.picked[:n-1]
+		}
+
 		return nil
 	}
 
@@ -663,7 +695,7 @@ func (m *model) sendComposer(chat Chat) tea.Cmd {
 	c := m.chat
 	text := strings.TrimSpace(c.composer.Value())
 
-	if text == "" || c.sending {
+	if (text == "" && (len(c.picked) == 0 || c.editing != nil)) || c.sending || c.uploading {
 		return nil
 	}
 
@@ -674,54 +706,151 @@ func (m *model) sendComposer(chat Chat) tea.Cmd {
 	case m.keyChanged[chat.UserID]:
 		c.err = "The security key of @" + chat.Username + " has changed: compare the safety code first (Ctrl+K)"
 		return nil
+	case chat.PublicKey == "":
+		c.err = errNoPeerKey.Error()
+		return nil
 	}
 
-	me := m.user.User.ID
-	editing := c.editing
-
-	messageID := newMessageID()
-
-	if editing != nil {
-		messageID = editing.ID
+	if c.editing != nil {
+		return m.sendEdit(chat, text)
 	}
 
-	encrypted, err := encryptMessage(encodePayload(payload{text: text}), messageID, me, m.user.PrivateKey, chat.PublicKey, chat.ID)
+	var replyTo *ReplyPreview
+
+	if c.replyTo != nil {
+		replyTo = m.replyPreview(chat, *c.replyTo)
+	}
+
+	// Without files: shown at once and sent in the background (again later
+	// if offline).
+	if len(c.picked) == 0 {
+		cmd, err := m.queueText(chat, text, nil, replyTo)
+		if err != nil {
+			c.err = err.Error()
+			return nil
+		}
+
+		m.messageSent()
+
+		return cmd
+	}
+
+	// Files are encrypted and uploaded first (that needs the network).
+	files := c.picked
+	token := m.user.Token
+	c.uploading = true
+	c.err = ""
+
+	return task(func() func(*model) tea.Cmd {
+		var attachments []attachment
+		var err error
+
+		for _, file := range files {
+			var a attachment
+
+			if a, err = uploadFile(token, file); err != nil {
+				break
+			}
+
+			attachments = append(attachments, a)
+		}
+
+		return func(m *model) tea.Cmd {
+			c := m.chat
+
+			if c == nil || c.id != chat.ID {
+				return nil
+			}
+
+			c.uploading = false
+
+			if err != nil {
+				if err == errSessionExpired {
+					return m.fail(err)
+				}
+
+				c.err = "Upload failed: " + err.Error()
+
+				return nil
+			}
+
+			cmd, err := m.queueText(chat, text, attachments, replyTo)
+			if err != nil {
+				c.err = err.Error()
+				return nil
+			}
+
+			c.picked = nil
+
+			// Text typed during the upload stays for the next message.
+			if strings.TrimSpace(c.composer.Value()) == text {
+				m.messageSent()
+			} else {
+				c.replyTo = nil
+				c.unreadAfter = nil
+				c.scroll = 0
+			}
+
+			return cmd
+		}
+	})
+}
+
+// queueText encrypts a new message and puts it into the outbox.
+func (m *model) queueText(chat Chat, text string, attachments []attachment, replyTo *ReplyPreview) (tea.Cmd, error) {
+	id := newMessageID()
+	content := encodePayload(payload{text: text, attachments: attachments})
+
+	encrypted, err := encryptMessage(content, id, m.user.User.ID, m.user.PrivateKey, chat.PublicKey, chat.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	var ids []string
+
+	for _, a := range attachments {
+		ids = append(ids, a.ID)
+	}
+
+	return m.queueMessage(chat.ID, id, encrypted, replyTo, ids), nil
+}
+
+// messageSent clears the composer after sending.
+func (m *model) messageSent() {
+	c := m.chat
+	c.err = ""
+	c.composer.SetValue("")
+	c.fitComposer()
+	c.replyTo = nil
+	// Own messages end the "unread" part.
+	c.unreadAfter = nil
+	c.scroll = 0
+	delete(m.drafts, c.id)
+}
+
+// sendEdit saves the new text of an own message; its files stay.
+func (m *model) sendEdit(chat Chat, text string) tea.Cmd {
+	c := m.chat
+	editing := *c.editing
+	shown := m.show(chat, editing.ID, editing.SenderID, editing.Content)
+	content := encodePayload(payload{text: text, attachments: shown.attachments})
+
+	encrypted, err := encryptMessage(content, editing.ID, m.user.User.ID, m.user.PrivateKey, chat.PublicKey, chat.ID)
 	if err != nil {
 		c.err = err.Error()
 		return nil
 	}
 
-	c.err = ""
-	c.composer.SetValue("")
-	c.fitComposer()
-	c.editing = nil
-
-	if editing == nil {
-		// Shown at once and sent in the background (again later if
-		// offline).
-		var replyTo *ReplyPreview
-
-		if c.replyTo != nil {
-			replyTo = m.replyPreview(chat, *c.replyTo)
-		}
-
-		c.replyTo = nil
-		// Own messages end the "unread" part.
-		c.unreadAfter = nil
-		c.scroll = 0
-		delete(m.drafts, chat.ID)
-
-		return m.queueMessage(chat.ID, messageID, encrypted, replyTo)
-	}
-
 	token := m.user.Token
+	c.err = ""
+	c.editing = nil
 	c.sending = true
 	// The draft comes back after editing.
 	c.composer.SetValue(m.drafts[chat.ID])
 	c.fitComposer()
 
 	return task(func() func(*model) tea.Cmd {
-		message, err := editMessage(token, chat.ID, messageID, encrypted)
+		message, err := editMessage(token, chat.ID, editing.ID, encrypted)
 
 		return func(m *model) tea.Cmd {
 			c := m.chat
@@ -747,6 +876,77 @@ func (m *model) sendComposer(chat Chat) tea.Cmd {
 			return nil
 		}
 	})
+}
+
+// updateAttachKey: typing the path of a file to send.
+func (m *model) updateAttachKey(msg tea.KeyMsg) tea.Cmd {
+	c := m.chat
+
+	switch msg.String() {
+	case "esc":
+		c.attaching = false
+		c.attach.Blur()
+
+		return c.composer.Focus()
+	case "enter":
+		file, err := pickFile(c.attach.Value())
+		if err != nil {
+			c.err = err.Error()
+			return nil
+		}
+
+		c.picked = append(c.picked, file)
+		c.attaching = false
+		c.attach.Blur()
+		c.err = ""
+
+		return c.composer.Focus()
+	}
+
+	var cmd tea.Cmd
+	c.attach, cmd = c.attach.Update(msg)
+
+	return cmd
+}
+
+// saveFiles downloads, decrypts and saves the files of a message.
+func (m *model) saveFiles(chat Chat, message Message) tea.Cmd {
+	files := m.show(chat, message.ID, message.SenderID, message.Content).attachments
+	token := m.user.Token
+	dir := downloadsDir()
+
+	return tea.Batch(m.showToast("Downloading…", false), task(func() func(*model) tea.Cmd {
+		var saved []string
+		var err error
+
+		for _, a := range files {
+			var data []byte
+
+			if data, err = downloadFile(token, a); err != nil {
+				break
+			}
+
+			var path string
+
+			if path, err = saveAttachment(dir, a, data); err != nil {
+				break
+			}
+
+			saved = append(saved, path)
+		}
+
+		return func(m *model) tea.Cmd {
+			if err != nil {
+				return m.fail(err)
+			}
+
+			if len(saved) == 1 {
+				return m.showToast("Saved to "+saved[0], false)
+			}
+
+			return m.showToast(fmt.Sprintf("Saved %d files to %s", len(saved), dir), false)
+		}
+	}))
 }
 
 // replyPreview is the quote of a reply, as the server would send it.
@@ -991,6 +1191,15 @@ func (m *model) updateChatMouse(msg tea.MouseMsg) tea.Cmd {
 	c := m.chat
 	chat, _ := m.chatByID(c.id)
 
+	// A chosen file's ✕ (they stay while uploading).
+	if i := unpickClicked(msg, len(c.picked)); i >= 0 {
+		if !c.uploading {
+			c.picked = append(c.picked[:i], c.picked[i+1:]...)
+		}
+
+		return nil
+	}
+
 	if d := wheel(msg, "chat:messages"); d != 0 {
 		if d < 0 {
 			c.scroll = min(c.scroll+wheelLines, m.maxChatScroll())
@@ -1092,6 +1301,17 @@ func (m *model) updateChatMouse(msg tea.MouseMsg) tea.Cmd {
 	}
 
 	return nil
+}
+
+// unpickClicked: which chosen file's ✕ was clicked, or -1.
+func unpickClicked(msg tea.MouseMsg, n int) int {
+	for i := 0; i < n; i++ {
+		if clicked(msg, fmt.Sprintf("chat:unpick:%d", i)) {
+			return i
+		}
+	}
+
+	return -1
 }
 
 // --- scrolling ---

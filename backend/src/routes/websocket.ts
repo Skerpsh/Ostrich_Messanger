@@ -1,5 +1,6 @@
 import { FastifyInstance } from "fastify";
 import type { WebSocket } from "ws";
+import { MAX_ATTACHMENTS_PER_MESSAGE } from "../attachments.js";
 import { isChatMember } from "../database.js";
 import {
   findSessionByHash,
@@ -56,11 +57,13 @@ type ClientMessage = {
   id?: unknown;
   content?: unknown;
   replyTo?: unknown;
+  attachments?: unknown;
 };
 
 // Protocol (JSON messages):
 //   client -> server: join {chatId}, leave {chatId},
-//                     message {chatId, id?, content, replyTo?}, typing {chatId}
+//                     message {chatId, id?, content, replyTo?, attachments?},
+//                     typing {chatId}
 //   server -> client: connected, joined {chatId}, left {chatId},
 //                     message {message}, read {chatId, userId, lastReadAt},
 //                     profile {userId, username, avatarId, isDeveloper},
@@ -229,12 +232,25 @@ export default async function websocketRoutes(server: FastifyInstance) {
             return;
           }
 
+          const { attachments = [] } = data;
+
+          if (
+            !Array.isArray(attachments) ||
+            attachments.length > MAX_ATTACHMENTS_PER_MESSAGE ||
+            !attachments.every(validId) ||
+            new Set(attachments).size !== attachments.length
+          ) {
+            sendError("attachments must be up to 10 attachment ids");
+            return;
+          }
+
           const result = await createMessage(
             chatId,
             user.id,
             content,
             replyTo ?? null,
             messageId,
+            attachments,
           );
 
           if ("error" in result) {

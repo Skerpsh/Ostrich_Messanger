@@ -27,6 +27,12 @@
 // message to another sender or message nor send it again as a new one.
 // "e1:" messages (older clients) use aad = chat id only.
 //
+// Attachments: each file is encrypted with its own random key,
+//   base64(nonce(24) ‖ XChaCha20-Poly1305(file key, nonce, file,
+//   aad "ostrich/v1 attachment")),
+// uploaded under an id the client chooses; the key travels inside the
+// message (payload.ts), so the server stores only ciphertext.
+//
 // Safety code: both members compute the same 40 digits from the two
 // public keys; if they match on both devices, the server has not swapped
 // the keys (see safetyCode()).
@@ -45,6 +51,7 @@ const SALT = utf8("ostrich/v1");
 const PRIVATE_KEY_AAD = utf8("ostrich/v1 private-key");
 const CHAT_INFO = utf8("ostrich/v1 chat");
 const SAFETY_INFO = utf8("ostrich/v1 safety");
+const ATTACHMENT_AAD = utf8("ostrich/v1 attachment");
 const MESSAGE_AAD = "ostrich/v2 message";
 const PREFIX_V1 = "e1:";
 const PREFIX_V2 = "e2:";
@@ -318,6 +325,25 @@ export function decryptMessage(
   } catch {
     return { status: "error", text: UNREADABLE };
   }
+}
+
+// --- attachments ---
+
+// Encrypts a file with a new key: the sealed bytes to upload and the key
+// (base64) for the message.
+export function encryptAttachment(data: Uint8Array): { key: string; sealed: Uint8Array } {
+  const key = randomBytes(32);
+  const nonce = randomBytes(24);
+  const sealed = xchacha20poly1305(key, nonce, ATTACHMENT_AAD).encrypt(data);
+
+  return { key: toBase64(key), sealed: concat(nonce, sealed) };
+}
+
+// Decrypts a downloaded file; throws if it is not the file of that key.
+export function decryptAttachment(sealed: Uint8Array, key: string): Uint8Array {
+  return xchacha20poly1305(fromBase64(key), sealed.subarray(0, 24), ATTACHMENT_AAD).decrypt(
+    sealed.subarray(24),
+  );
 }
 
 function concat(a: Uint8Array, b: Uint8Array) {

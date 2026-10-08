@@ -27,7 +27,7 @@ import { useRealtime } from "@/context/realtime";
 import { useAppTheme } from "@/context/theme";
 import type { Chat } from "@/lib/api";
 import { formatChatDate, previewText } from "@/lib/format";
-import { plainText } from "@/lib/markup";
+import { messagePreview } from "@/lib/preview";
 import { useIsWide } from "@/lib/layout";
 import { useChatCrypto } from "@/lib/use-chat-crypto";
 import { useMinuteTick } from "@/lib/use-minute-tick";
@@ -458,7 +458,7 @@ function ChatRow({
             ) : last ? (
               <>
                 {own ? <Text style={{ color: colors.textSoft }}>You: </Text> : null}
-                {previewText(plainText(decrypt(last).text))}
+                {previewText(messagePreview(decrypt(last)))}
               </>
             ) : (
               <Text style={styles.italic}>No messages yet</Text>

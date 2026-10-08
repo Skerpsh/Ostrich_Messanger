@@ -56,9 +56,9 @@ sends them) and messages not sent yet, so the CLI opens at once and works
 offline; unsent messages go out once it is back online.
 
 A remembered session stays when the CLI is closed. It ends, and is
-forgotten here together with the cache, with Settings → Log out, Log out of all devices, deleting
-the account, logging this device out from another one, or after 30 days
-unused. Uncheck "Remember me" on a computer you share: then closing the CLI
+forgotten here together with the cache, with Settings → Log out, Log out of
+all devices, deleting the account, logging this device out from another
+one, or after 30 days unused. Uncheck "Remember me" on a computer you share: then closing the CLI
 logs out.
 
 ## Keys
@@ -68,8 +68,8 @@ logs out.
 | Everywhere | `Ctrl+C` quit |
 | Login | `Tab` log in / create account, `↑↓` field, `Ctrl+R` remember me, `Enter` next / submit |
 | Chats list | `↑↓` move, `Enter` open, `/` search, `n` new chat (type a @username), `m` chat menu (pin, mute, clear, delete), `s` settings, `t` light / dark, `Tab` to the chat, `q` quit |
-| Chat | `Enter` send, `Alt+Enter` new line, `↑` (empty input) choose a message, `Ctrl+O` chat menu, `Ctrl+F` search, `Ctrl+K` safety code, `PgUp/PgDn` scroll, `Tab` to the list, `Esc` back |
-| Chosen message | `Enter` menu, `r` reply, `e` edit, `d` delete, `c` copy, `1`–`8` react, `Esc` back |
+| Chat | `Enter` send, `Alt+Enter` new line, `Ctrl+A` attach a file (type or drop its path; `Ctrl+X` removes the last), `↑` (empty input) choose a message, `Ctrl+O` chat menu, `Ctrl+F` search, `Ctrl+K` safety code, `PgUp/PgDn` scroll, `Tab` to the list, `Esc` back |
+| Chosen message | `Enter` menu (also: forward, pin, save its files to `~/Downloads`), `r` reply, `e` edit, `d` delete, `c` copy, `1`–`8` react, `Esc` back |
 | Menus | `↑↓` choose, `Enter` select (destructive actions ask twice), `1`–`8` react, `Esc` close |
 | Settings | `↑↓` move, `Enter` open / toggle, `←→` theme and accent, `Esc` close |
 

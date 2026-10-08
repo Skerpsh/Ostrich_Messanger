@@ -5,7 +5,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+  decryptAttachment,
   decryptMessage,
+  encryptAttachment,
   deriveFromOstrichId,
   encryptMessage,
   fromBase64,
@@ -105,4 +107,18 @@ test("base64 round trip", () => {
     const bytes = Uint8Array.from({ length }, (_, i) => (i * 37) & 255);
     assert.deepEqual(fromBase64(toBase64(bytes)), bytes);
   }
+});
+
+test("attachments: shared vector and round trip", () => {
+  assert.deepEqual(
+    decryptAttachment(fromBase64(v.attachment_sealed), v.attachment_key),
+    fromBase64(v.attachment_plain),
+  );
+
+  const data = Uint8Array.from({ length: 1000 }, (_, i) => i & 255);
+  const { key, sealed } = encryptAttachment(data);
+  assert.deepEqual(decryptAttachment(sealed, key), data);
+
+  // Another key does not open it.
+  assert.throws(() => decryptAttachment(sealed, encryptAttachment(data).key));
 });

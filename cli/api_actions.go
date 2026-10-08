@@ -31,12 +31,16 @@ func getMe(token string) (*Account, error) {
 }
 
 // sendMessage sends an encrypted message; id was chosen here (the
-// encryption is bound to it).
-func sendMessage(token, chatID, id, content, replyTo string) (Message, error) {
-	body := map[string]string{"id": id, "content": content}
+// encryption is bound to it). attachments: ids of its uploaded files.
+func sendMessage(token, chatID, id, content, replyTo string, attachments []string) (Message, error) {
+	body := map[string]any{"id": id, "content": content}
 
 	if replyTo != "" {
 		body["reply_to"] = replyTo
+	}
+
+	if len(attachments) > 0 {
+		body["attachments"] = attachments
 	}
 
 	var result struct {

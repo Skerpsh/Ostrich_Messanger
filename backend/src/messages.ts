@@ -131,7 +131,8 @@ export type CreateMessageError =
   | "not_member"
   | "reply_not_found"
   | "blocked"
-  | "duplicate_id";
+  | "duplicate_id"
+  | "attachment_invalid";
 
 export type CreateMessageResult =
   | {
@@ -141,6 +142,15 @@ export type CreateMessageResult =
       firstFromSender: boolean;
     }
   | { error: CreateMessageError };
+
+// SQL: whether the attachments in parameter `ids` are uploads of the
+// sender ($2) not yet sent in a message.
+const attachmentsFree = (ids: string) => `(
+  SELECT COUNT(*) FROM attachments
+  WHERE id = ANY(${ids}::uuid[])
+    AND uploader_id = $2
+    AND message_id IS NULL
+) = cardinality(${ids}::uuid[])`;
 
 // SQL: whether $2 (a member of chat $1) and the chat's other member have
 // blocked each other, in either direction.
@@ -153,14 +163,16 @@ const BLOCKED_IN_CHAT = `EXISTS (
 )`;
 
 // Saves a message, bumps the chat's updated_at and the sender's read
-// position, and unhides the chat for its members, in one statement. A reply must refer to a message of the same
-// chat. `messageId` is the id chosen by the client (required for "e2").
+// position, unhides the chat for its members and links its attachments,
+// in one statement. A reply must refer to a message of the same chat.
+// `messageId` is the id chosen by the client (required for "e2").
 export async function createMessage(
   chatId: string,
   senderId: string,
   content: string,
   replyToId: string | null = null,
   messageId: string | null = null,
+  attachmentIds: string[] = [],
 ): Promise<CreateMessageResult> {
   let result;
 
@@ -192,7 +204,16 @@ export async function createMessage(
           )
         )
         AND NOT ${BLOCKED_IN_CHAT}
+        AND ${attachmentsFree("$6")}
         RETURNING id, chat_id, sender_id, content, created_at, reply_to_id
+      ),
+      linked AS (
+        UPDATE attachments
+        SET message_id = (SELECT id FROM inserted)
+        WHERE id = ANY($6::uuid[])
+          AND uploader_id = $2
+          AND message_id IS NULL
+          AND EXISTS (SELECT 1 FROM inserted)
       ),
       touched AS (
         UPDATE chats
@@ -229,7 +250,7 @@ export async function createMessage(
       JOIN users ON users.id = inserted.sender_id
       ${REPLY_JOINS("inserted")}
       `,
-      [chatId, senderId, content, replyToId, messageId],
+      [chatId, senderId, content, replyToId, messageId, attachmentIds],
     );
   } catch (error) {
     if (isPgError(error, PG_UNIQUE_VIOLATION)) {
@@ -259,15 +280,22 @@ export async function createMessage(
       EXISTS (
         SELECT 1 FROM chat_members WHERE chat_id = $1 AND user_id = $2
       ) AS member,
-      ${BLOCKED_IN_CHAT} AS blocked
+      ${BLOCKED_IN_CHAT} AS blocked,
+      ${attachmentsFree("$3")} AS attachments_free
     `,
-    [chatId, senderId],
+    [chatId, senderId, attachmentIds],
   );
 
-  const { member, blocked } = why.rows[0];
+  const { member, blocked, attachments_free } = why.rows[0];
 
   return {
-    error: !member ? "not_member" : blocked ? "blocked" : "reply_not_found",
+    error: !member
+      ? "not_member"
+      : blocked
+        ? "blocked"
+        : !attachments_free
+          ? "attachment_invalid"
+          : "reply_not_found",
   };
 }
 
@@ -286,6 +314,7 @@ export const CREATE_MESSAGE_ERRORS: Record<CreateMessageError, string> = {
   reply_not_found: "The message you reply to is not in this chat",
   blocked: "You can't message this user",
   duplicate_id: "A message with this id already exists",
+  attachment_invalid: "An attachment is missing or was already sent",
 };
 
 export const CREATE_MESSAGE_STATUS: Record<CreateMessageError, number> = {
@@ -293,4 +322,5 @@ export const CREATE_MESSAGE_STATUS: Record<CreateMessageError, number> = {
   reply_not_found: 400,
   blocked: 403,
   duplicate_id: 409,
+  attachment_invalid: 400,
 };

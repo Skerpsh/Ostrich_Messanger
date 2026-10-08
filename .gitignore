@@ -13,3 +13,6 @@ dist/
 # Expo
 .expo/
 
+
+# Encrypted message attachments (backend/src/attachments.ts)
+backend/data/

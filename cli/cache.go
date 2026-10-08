@@ -26,9 +26,10 @@ const cachedMessages = 300
 const cacheSaveInterval = 10 * time.Second
 
 type cachedOutgoing struct {
-	Message Message `json:"message"`
-	State   string  `json:"state"`
-	Err     string  `json:"error,omitempty"`
+	Message     Message  `json:"message"`
+	Attachments []string `json:"attachments,omitempty"`
+	State       string   `json:"state"`
+	Err         string   `json:"error,omitempty"`
 }
 
 type cacheFile struct {
@@ -122,7 +123,7 @@ func (m *model) snapshotCache() {
 	m.cache.Outbox = m.cache.Outbox[:0]
 
 	for _, o := range m.outgoing {
-		m.cache.Outbox = append(m.cache.Outbox, cachedOutgoing{Message: o.message, State: o.state, Err: o.err})
+		m.cache.Outbox = append(m.cache.Outbox, cachedOutgoing{Message: o.message, Attachments: o.attachments, State: o.state, Err: o.err})
 	}
 }
 
@@ -161,6 +162,6 @@ func (m *model) restoreCache() {
 			state = "sending"
 		}
 
-		m.outgoing = append(m.outgoing, outgoing{message: o.Message, state: state, err: o.Err})
+		m.outgoing = append(m.outgoing, outgoing{message: o.Message, attachments: o.Attachments, state: state, err: o.Err})
 	}
 }

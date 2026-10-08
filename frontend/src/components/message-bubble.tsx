@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { Animated, PanResponder, Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import AttachmentView from "@/components/attachment-view";
 import DevBadge from "@/components/dev-badge";
 import IconButton from "@/components/icon-button";
 import MarkupText from "@/components/markup-text";
@@ -8,7 +9,7 @@ import { useAppTheme } from "@/context/theme";
 import type { Reaction } from "@/lib/api";
 import type { MessageRow } from "@/lib/chat-rows";
 import { formatTime, previewText } from "@/lib/format";
-import { plainText } from "@/lib/markup";
+import { messagePreview } from "@/lib/preview";
 import type { Shown } from "@/lib/use-chat-crypto";
 import { radius } from "@/theme/colors";
 
@@ -36,6 +37,7 @@ export default function MessageBubble({
   onMenu,
   onQuotePress,
   onReact,
+  onError,
 }: {
   row: MessageRow;
   read: boolean;
@@ -52,6 +54,8 @@ export default function MessageBubble({
   onQuotePress: (messageId: string) => void;
   // Tapping a reaction under the message toggles yours.
   onReact: (emoji: string) => void;
+  // A file could not be loaded or saved.
+  onError: (message: string) => void;
 }) {
   const { colors } = useAppTheme();
   const [hovered, setHovered] = useState(false);
@@ -149,7 +153,7 @@ export default function MessageBubble({
                   quoteText.status === "error" && styles.unreadable,
                 ]}
               >
-                {previewText(plainText(quoteText.text))}
+                {previewText(messagePreview(quoteText))}
               </Text>
             </Pressable>
           ) : null}
@@ -159,7 +163,10 @@ export default function MessageBubble({
               Forwarded from @{text.forwardedFrom}
             </Text>
           ) : null}
-          {text.status === "ok" ? (
+          {text.attachments?.length ? (
+            <AttachmentView attachments={text.attachments} own={own} onError={onError} />
+          ) : null}
+          {text.status === "ok" && !text.text && text.attachments?.length ? null : text.status === "ok" ? (
             <MarkupText
               text={text.text}
               // Touch screens copy through the long-press menu; selecting

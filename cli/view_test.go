@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -77,10 +79,14 @@ func testModel(t *testing.T, w, h int, mode string) model {
 	messages[1].EditedAt = &edited
 	messages = append(messages, Message{ID: newMessageID(), ChatID: v.ChatID, SenderID: v.SenderID, Content: "plain text from the server", CreatedAt: at(-1)})
 
-	// Formatting, and a forwarded message.
+	// Formatting, a forwarded message, files.
 	for _, text := range []string{
 		"**bold** and _italic_, `code` and a link https://example.org/page, ~~gone~~",
 		encodePayload(payload{text: "forwarded text", forwardedFrom: "carol"}),
+		encodePayload(payload{text: "", attachments: []attachment{
+			{ID: newMessageID(), Key: "a2V5", Name: "holiday photo with a long name.jpg", Mime: "image/jpeg", Size: 1234567},
+			{ID: newMessageID(), Key: "a2V5", Name: "report.pdf", Mime: "application/pdf", Size: 34567},
+		}}),
 	} {
 		id := newMessageID()
 		messages = append(messages, Message{ID: id, ChatID: v.ChatID, SenderID: v.SenderID,
@@ -107,8 +113,8 @@ func testModel(t *testing.T, w, h int, mode string) model {
 	m.layoutInputs()
 
 	// One message on its way, one refused.
-	_ = m.queueMessage(v.ChatID, newMessageID(), encrypt("on its way", "x", me, privateB, v.PublicKeyA), nil)
-	_ = m.queueMessage(v.ChatID, newMessageID(), "e2:AAAA", nil)
+	_ = m.queueMessage(v.ChatID, newMessageID(), encrypt("on its way", "x", me, privateB, v.PublicKeyA), nil, nil)
+	_ = m.queueMessage(v.ChatID, newMessageID(), "e2:AAAA", nil, nil)
 	m.outgoing[1].state, m.outgoing[1].err = "failed", "Something went wrong"
 
 	return m
@@ -316,6 +322,10 @@ func TestKeys(t *testing.T) {
 // click renders the model and clicks the middle of a zone.
 func click(t *testing.T, m model, id string, button tea.MouseButton) model {
 	t.Helper()
+
+	// The zone manager is shared by the tests: forget where the zone was
+	// drawn before, so the position found is this view's.
+	zone.Clear(id)
 	_ = m.View()
 
 	var z *zone.ZoneInfo
@@ -332,6 +342,9 @@ func click(t *testing.T, m model, id string, button tea.MouseButton) model {
 	if z == nil || z.IsZero() {
 		t.Fatalf("zone %s not drawn", id)
 	}
+
+	// The rest of the view's zones are recorded right after.
+	time.Sleep(5 * time.Millisecond)
 
 	next, _ := m.Update(tea.MouseMsg{
 		X: (z.StartX + z.EndX) / 2, Y: (z.StartY + z.EndY) / 2,
@@ -481,7 +494,7 @@ func TestOutboxForwardDrafts(t *testing.T) {
 	target := m.chats[0]
 	target.ID, target.Username = newMessageID(), "erin"
 	m.chats = append(m.chats, target)
-	_ = m.forward(chat, first, target)
+	m = run(m, m.forward(chat, first, target))
 
 	last := m.outgoing[len(m.outgoing)-1].message
 
@@ -507,5 +520,83 @@ func TestMarkupLines(t *testing.T) {
 
 	if got := ansi.Strip(strings.Join(lines, "\n")); !strings.Contains(got, "bold words") || strings.Contains(got, "**") {
 		t.Errorf("text: %q", got)
+	}
+}
+
+// run carries out a command's background work (no network involved) and
+// applies its result.
+func run(m model, cmd tea.Cmd) model {
+	if cmd == nil {
+		return m
+	}
+
+	switch msg := cmd().(type) {
+	case resultMsg:
+		next, _ := m.Update(msg)
+		return next.(model)
+	case tea.BatchMsg:
+		for _, c := range msg {
+			m = run(m, c)
+		}
+	}
+
+	return m
+}
+
+func TestAttachmentFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Names from other users cannot leave the folder or hide.
+	for name, want := range map[string]string{
+		"../../.bashrc":   "_.._.bashrc",
+		"photo.jpg":       "photo.jpg",
+		".hidden":         "hidden",
+		"a/b\\c:d*e?.txt": "a_b_c_d_e_.txt",
+		"\x1b[31mred":     "_[31mred",
+		"":                "attachment",
+	} {
+		if got := safeFileName(name); got != want {
+			t.Errorf("safeFileName(%q) = %q, want %q", name, got, want)
+		}
+	}
+
+	// Saving never overwrites.
+	a := attachment{Name: "notes.txt"}
+	first, err := saveAttachment(dir, a, []byte("one"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := saveAttachment(dir, a, []byte("two"))
+	if err != nil || filepath.Base(second) != "notes (2).txt" {
+		t.Fatalf("second file: %s %v", second, err)
+	}
+
+	if data, _ := os.ReadFile(first); string(data) != "one" {
+		t.Fatalf("first file overwritten: %q", data)
+	}
+
+	// Picking: sizes and kinds.
+	path := filepath.Join(dir, "pic.png")
+	_ = os.WriteFile(path, []byte("\x89PNG\r\n\x1a\n...."), 0o600)
+
+	if file, err := pickFile(" '" + path + "' "); err != nil || file.mime != "image/png" || file.name != "pic.png" {
+		t.Fatalf("picked %+v %v", file, err)
+	}
+
+	if _, err := pickFile(dir); err == nil {
+		t.Fatal("a folder was accepted")
+	}
+
+	if _, err := pickFile(filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("a missing file was accepted")
+	}
+
+	if got := attachmentsLabel([]attachment{{Mime: "image/png"}, {Mime: "image/jpeg"}}); got != "🖼 2 photos" {
+		t.Fatalf("label %q", got)
+	}
+
+	if got := formatSize(1234567); got != "1.2 MB" {
+		t.Fatalf("size %q", got)
 	}
 }

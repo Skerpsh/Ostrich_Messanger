@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseMarkup, plainText } from "./markup.ts";
+import { readFileSync } from "node:fs";
 import { decodePayload, encodePayload } from "./payload.ts";
 
 test("formatting", () => {
@@ -54,4 +55,30 @@ test("payloads", () => {
 
   // Broken payloads show as text.
   assert.deepEqual(decodePayload("\u001eostrich1:{oops"), { text: "\u001eostrich1:{oops" });
+});
+
+test("payloads with attachments", () => {
+  const v = JSON.parse(
+    readFileSync(new URL("../../../testdata/crypto-vectors.json", import.meta.url), "utf8"),
+  );
+  const payload = decodePayload(v.payload_with_attachments);
+
+  assert.equal(payload.text, "caption");
+  assert.equal(payload.forwardedFrom, "carol");
+  assert.deepEqual(payload.attachments, [
+    {
+      id: "6f2b4ad0-8a3e-4c51-9d7b-1e2f3a4b5c6d",
+      key: v.attachment_key,
+      name: "photo.jpg",
+      mime: "image/jpeg",
+      size: 110,
+      width: 640,
+      height: 480,
+    },
+  ]);
+  assert.equal(encodePayload(payload), v.payload_with_attachments);
+
+  // Malformed attachments are left out.
+  const broken = '\u001eostrich1:{"t":"x","a":[{"i":"nope"},{"i":1}]}';
+  assert.deepEqual(decodePayload(broken), { text: "x" });
 });

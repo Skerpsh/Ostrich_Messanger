@@ -185,6 +185,17 @@ func (m model) drawBubble(chat Chat, message Message, own, read bool, sending st
 		)
 	}
 
+	for _, a := range shown.attachments {
+		icon := "📎 "
+
+		if isImage(a.Mime) {
+			icon = "🖼 "
+		}
+
+		label := icon + clip(sanitize(a.Name), maxInner-14) + " · " + formatSize(a.Size)
+		content = append(content, bold(clip(label, maxInner), fg, fill))
+	}
+
 	if shown.forwardedFrom != "" {
 		forwardFg := p.accent
 
@@ -195,8 +206,10 @@ func (m model) drawBubble(chat Chat, message Message, own, read bool, sending st
 		content = append(content, bold(clip("Forwarded from @"+sanitize(shown.forwardedFrom), maxInner), forwardFg, fill))
 	}
 
-	switch status {
-	case decryptOK:
+	switch {
+	case status == decryptOK && strings.TrimSpace(text) == "" && len(shown.attachments) > 0:
+		// Only files.
+	case status == decryptOK:
 		codeBg, linkFg := p.panelAlt, p.accent
 
 		if own {
@@ -204,7 +217,7 @@ func (m model) drawBubble(chat Chat, message Message, own, read bool, sending st
 		}
 
 		content = append(content, markupLines(text, maxInner, fg, fill, codeBg, linkFg)...)
-	case decryptFailed:
+	case status == decryptFailed:
 		for _, line := range wrap(text, maxInner) {
 			content = append(content, italic(line, meta, fill))
 		}
@@ -341,6 +354,29 @@ func (m model) chatBanners(chat Chat, w int) []string {
 
 	if c.err != "" {
 		lines = append(lines, zone.Mark("chat:error", row(seg(" "+clip(sanitize(c.err), w-6), p.danger, bg), seg(" ✕ ", p.danger, bg), w, bg)))
+	}
+
+	if c.attaching {
+		input := seg(" 📎 ", p.accent, bg) + seg("▌", p.accent, p.panelAlt) +
+			fitLine(onBackground(c.attach.View(), p.panelAlt), w-6, p.panelAlt)
+		lines = append(lines, fitLine(input, w, bg))
+	}
+
+	for i, file := range c.picked {
+		icon := "📎 "
+
+		if isImage(file.mime) {
+			icon = "🖼 "
+		}
+
+		status := formatSize(file.size)
+
+		if c.uploading {
+			status = "uploading…"
+		}
+
+		left := seg(" "+icon, p.accent, bg) + bold(clip(sanitize(file.name), w/2), p.text, bg) + seg("  "+status, p.muted, bg)
+		lines = append(lines, row(left, zone.Mark(fmt.Sprintf("chat:unpick:%d", i), seg(" ✕ ", p.muted, bg)), w, bg))
 	}
 
 	if c.editing != nil {
@@ -579,9 +615,13 @@ func (m model) composerView(chat Chat, w int) []string {
 
 	composer := zone.Mark("chat:composer", strings.Join(box, "\n"))
 
-	hints := "Enter Send  ↑ Messages  Ctrl+O Menu  Ctrl+F Search  Ctrl+K Safety code  Alt+Enter New line  Esc Back"
+	hints := "Enter Send  ↑ Messages  Ctrl+A Attach  Ctrl+O Menu  Ctrl+F Search  Ctrl+K Safety code  Alt+Enter New line  Esc Back"
 
 	switch {
+	case c.attaching:
+		hints = "Type or drop a file's path  Enter Add  Esc Cancel"
+	case len(c.picked) > 0:
+		hints = "Enter Send with the files  Ctrl+A Another  Ctrl+X Remove the last  Esc Back"
 	case c.selecting:
 		hints = "↑↓ Choose  Enter Menu  r Reply  e Edit  d Delete  c Copy  1–8 React  Esc Back"
 	case c.searching:

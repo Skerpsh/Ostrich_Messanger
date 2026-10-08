@@ -44,16 +44,21 @@ func TestPayload(t *testing.T) {
 
 	got := decodePayload(encodePayload(payload{text: "hi", forwardedFrom: "alice"}))
 
-	if got != (payload{text: "hi", forwardedFrom: "alice"}) {
+	if got.text != "hi" || got.forwardedFrom != "alice" || got.attachments != nil {
 		t.Fatalf("forward: %+v", got)
 	}
 
 	// The same bytes as the app's.
-	if decodePayload("\u001eostrich1:{\"t\":\"x\",\"f\":\"bob\"}") != (payload{text: "x", forwardedFrom: "bob"}) {
-		t.Fatal("app payload not read")
+	if got := decodePayload("\u001eostrich1:{\"t\":\"x\",\"f\":\"bob\"}"); got.text != "x" || got.forwardedFrom != "bob" {
+		t.Fatalf("app payload not read: %+v", got)
 	}
 
 	if broken := "\u001eostrich1:{oops"; decodePayload(broken).text != broken {
 		t.Fatal("broken payload not shown as text")
+	}
+
+	// Malformed attachments are left out.
+	if got := decodePayload(payloadMarker + `{"t":"x","a":[{"i":"nope"},{"i":1}]}`); got.text != "x" || len(got.attachments) != 0 {
+		t.Fatalf("malformed attachments: %+v", got)
 	}
 }

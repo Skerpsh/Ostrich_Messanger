@@ -34,6 +34,7 @@ var (
 	privateKeyAAD = []byte("ostrich/v1 private-key")
 	chatInfo      = []byte("ostrich/v1 chat")
 	safetyInfo    = []byte("ostrich/v1 safety")
+	attachmentAAD = []byte("ostrich/v1 attachment")
 )
 
 func hkdf32(secret, salt, info []byte) []byte {
@@ -336,6 +337,11 @@ func (m model) textOf(chat Chat, messageID, senderID, content string) string {
 		return "[not encrypted] " + shown.text
 	}
 
+	// A message with only files says what they are.
+	if strings.TrimSpace(plainText(shown.text)) == "" && len(shown.attachments) > 0 {
+		return attachmentsLabel(shown.attachments)
+	}
+
 	return shown.text
 }
 
@@ -379,4 +385,43 @@ func decryptMessage(content, messageID, senderID string, privateKey []byte, peer
 	}
 
 	return string(plain), decryptOK
+}
+
+// --- attachments ---
+
+// encryptAttachment encrypts a file with a new key: the sealed bytes to
+// upload and the key (base64) for the message.
+func encryptAttachment(data []byte) (key string, sealed []byte) {
+	fileKey := randomBytes(chacha20poly1305.KeySize)
+
+	aead, err := chacha20poly1305.NewX(fileKey)
+	if err != nil {
+		panic(err)
+	}
+
+	nonce := randomBytes(chacha20poly1305.NonceSizeX)
+
+	return base64.StdEncoding.EncodeToString(fileKey), aead.Seal(nonce, nonce, data, attachmentAAD)
+}
+
+var errBadAttachment = errors.New("the file cannot be decrypted")
+
+// decryptAttachment decrypts a downloaded file.
+func decryptAttachment(sealed []byte, key string) ([]byte, error) {
+	fileKey, err := base64.StdEncoding.DecodeString(key)
+	if err != nil || len(sealed) < chacha20poly1305.NonceSizeX {
+		return nil, errBadAttachment
+	}
+
+	aead, err := chacha20poly1305.NewX(fileKey)
+	if err != nil {
+		return nil, errBadAttachment
+	}
+
+	plain, err := aead.Open(nil, sealed[:chacha20poly1305.NonceSizeX], sealed[chacha20poly1305.NonceSizeX:], attachmentAAD)
+	if err != nil {
+		return nil, errBadAttachment
+	}
+
+	return plain, nil
 }

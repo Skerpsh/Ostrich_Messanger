@@ -1,4 +1,5 @@
 import { FastifyInstance } from "fastify";
+import { MAX_ATTACHMENTS_PER_MESSAGE } from "../attachments.js";
 import { db } from "../database.js";
 import { authenticate } from "../middleware/auth.js";
 import {
@@ -64,7 +65,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
   // SEND MESSAGE
   server.post<{
     Params: ChatParams;
-    Body: { id?: string; content: string; reply_to?: string };
+    Body: { id?: string; content: string; reply_to?: string; attachments?: string[] };
   }>(
     "/api/chats/:chatId/messages",
     {
@@ -85,6 +86,13 @@ export default async function messagesRoutes(server: FastifyInstance) {
             },
             // Id of the message (in this chat) this one replies to.
             reply_to: { type: "string", format: "uuid" },
+            // Encrypted files uploaded for this message (attachments.ts).
+            attachments: {
+              type: "array",
+              maxItems: MAX_ATTACHMENTS_PER_MESSAGE,
+              uniqueItems: true,
+              items: { type: "string", format: "uuid" },
+            },
           },
         },
       },
@@ -105,6 +113,7 @@ export default async function messagesRoutes(server: FastifyInstance) {
         content,
         request.body.reply_to ?? null,
         id ?? null,
+        request.body.attachments ?? [],
       );
 
       if ("error" in result) {

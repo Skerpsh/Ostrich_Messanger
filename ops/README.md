@@ -76,7 +76,22 @@ Two free services watch the server from outside and write to Telegram:
 The health check answers `{"status":"ok","database":"connected"}` only when
 the backend runs and reaches PostgreSQL, so a stopped database alerts too.
 
-### Backups: Healthchecks.io
+### Files of messages
+
+Photos and files sent in chats are stored encrypted (the server never has
+their keys) in `ATTACHMENTS_DIR`, by default `/opt/ostrich/backend/data/attachments`.
+Set it in the backend's `.env` to put them on a bigger disk. Uploads are
+refused when less than 1 GB would stay free. Files of deleted messages, and
+uploads never sent, are removed by the backend within a few hours.
+
+The database backups below do not contain these files. To keep them too,
+copy the folder to another machine now and then, e.g. from your computer:
+
+```bash
+rsync -a root@SERVER:/opt/ostrich/backend/data/attachments/ ostrich-attachments/
+```
+
+## Backups: Healthchecks.io
 
 1. Sign up at <https://healthchecks.io>, *Integrations* → *Telegram* →
    follow the link to their bot.

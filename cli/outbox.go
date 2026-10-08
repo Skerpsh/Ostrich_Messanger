@@ -17,6 +17,8 @@ const outboxRetry = 15 * time.Second
 
 type outgoing struct {
 	message Message
+	// Ids of its encrypted files, already uploaded.
+	attachments []string
 	// "sending" (in flight or waiting for the network) or "failed".
 	state    string
 	err      string
@@ -24,8 +26,9 @@ type outgoing struct {
 }
 
 // queueMessage adds an encrypted message to the outbox and sends it.
-func (m *model) queueMessage(chatID, id, content string, replyTo *ReplyPreview) tea.Cmd {
+func (m *model) queueMessage(chatID, id, content string, replyTo *ReplyPreview, attachments []string) tea.Cmd {
 	m.outgoing = append(m.outgoing, outgoing{
+		attachments: attachments,
 		message: Message{
 			ID:             id,
 			ChatID:         chatID,
@@ -68,6 +71,7 @@ func (m *model) attemptSend(id string) tea.Cmd {
 	m.outgoing[i].state = "sending"
 	m.outgoing[i].err = ""
 	o := m.outgoing[i].message
+	files := m.outgoing[i].attachments
 	token := m.user.Token
 
 	replyID := ""
@@ -77,7 +81,7 @@ func (m *model) attemptSend(id string) tea.Cmd {
 	}
 
 	return task(func() func(*model) tea.Cmd {
-		sent, err := sendMessage(token, o.ChatID, o.ID, o.Content, replyID)
+		sent, err := sendMessage(token, o.ChatID, o.ID, o.Content, replyID, files)
 
 		return func(m *model) tea.Cmd {
 			i := m.findOutgoing(id)
@@ -183,6 +187,7 @@ type shownMessage struct {
 	text          string
 	status        decryptStatus
 	forwardedFrom string
+	attachments   []attachment
 }
 
 // show decrypts a message and reads its payload (text, forward); text
@@ -196,5 +201,5 @@ func (m model) show(chat Chat, messageID, senderID, content string) shownMessage
 
 	p := decodePayload(text)
 
-	return shownMessage{text: p.text, status: status, forwardedFrom: p.forwardedFrom}
+	return shownMessage{text: p.text, status: status, forwardedFrom: p.forwardedFrom, attachments: p.attachments}
 }
